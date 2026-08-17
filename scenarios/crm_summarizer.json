@@ -1,0 +1,38 @@
+{
+  "root": {
+    "agent": "planner",
+    "authority": {
+      "scopes": ["crm.read", "crm.write"],
+      "ceilings": [{"key": "max_rows", "max": 1000}],
+      "ttl": 3600
+    }
+  },
+  "delegations": [
+    {
+      "as": "summarizer",
+      "attenuate": {
+        "scopes": ["crm.read"],
+        "ceilings": [{"key": "max_rows", "max": 100}]
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "node": "summarizer",
+      "check": {"scope": "crm.read", "context": {"rows": 50}},
+      "expect": "allow"
+    },
+    {
+      "node": "summarizer",
+      "check": {"scope": "crm.write"},
+      "expect": "deny",
+      "because": "scope_not_granted"
+    },
+    {
+      "node": "summarizer",
+      "check": {"scope": "crm.read", "context": {"rows": 5000}},
+      "expect": "deny",
+      "because": "ceiling_exceeded"
+    }
+  ]
+}

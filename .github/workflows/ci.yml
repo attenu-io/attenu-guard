@@ -1,0 +1,62 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  stdlib-suite:
+    # Everything that must pass with ZERO third-party deps (the safety core).
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Property invariants (4k trials each, zero deps)
+        run: python tests/run_properties.py
+      - name: Red-team (0 unresolved findings required)
+        run: python tests/red_team.py
+      - name: Core unit tests
+        run: python tests/test_core_v02.py
+      - name: Wire format + offline verification
+        run: python tests/test_wire.py
+      - name: Interop test vectors self-check
+        run: python tests/vectors/generate.py
+      - name: Scenario harness
+        run: python tests/test_scenarios.py
+      - name: LangGraph adapter logic
+        run: python tests/test_langgraph_adapter.py
+      - name: Demo runs
+        run: python examples/poisoned_summarizer.py
+  optional-extras:
+    # The hypothesis suite + optional-dependency paths (cryptography / yaml).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install with all extras and run the hypothesis suite
+        run: |
+          pip install -e '.[test,all]'
+          pytest -q tests/test_invariants.py
+      - name: Ed25519 wire path (cryptography present)
+        run: python tests/test_wire.py
+  quickstart-canary:
+    # Guards against a broken first-run experience: install from a clean tree
+    # and run the README quickstart verbatim, every push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install from a clean tree and run the README quickstart
+        run: |
+          pip install .
+          python - <<'PY'
+          from delegation_guard import Authority, Guard, RowLimit, EgressRank
+          o = Guard.issue("o", Authority({"crm.*","mail.send"}, [RowLimit(100000), EgressRank("any")], 3600))
+          s = o.delegate("s", Authority({"crm.read"}, [RowLimit(5000), EgressRank("none")], 900), task="summarize")
+          assert s.check("crm.read", context={"rows":4200})
+          assert not s.check("crm.export", context={"egress":"any"})
+          print("quickstart OK")
+          PY

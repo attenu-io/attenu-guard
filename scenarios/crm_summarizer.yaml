@@ -1,0 +1,51 @@
+# crm_summarizer.yaml — the DEVX-REVIEW.md worked example (planner delegates
+# a read-only, row-capped task to a summarizer), as YAML. Semantically
+# identical to crm_summarizer.json in this directory; see README.md for the
+# full schema.
+#
+# Requires PyYAML (`pip install pyyaml`) to load. If you don't have it,
+# crm_summarizer.json is the stdlib-only equivalent.
+#
+# Two deliberate differences from the original sketch in docs/DEVX-REVIEW.md
+# ("## 6. Dry-run + declarative assertion harness"), reconciled against the
+# authoritative v0.2 schema in docs/V0.2-SPEC.md's "scenarios.py" section:
+#
+#   1. "ceilings" is a LIST of typed wire objects (`{key: max_rows, max: N}`),
+#      not the "{max_rows: N}" shorthand dict the DEVX-REVIEW sketch used.
+#      v0.2 replaced the old bare-dict ceilings with typed Ceiling objects
+#      reconstructed via ceilings.ceiling_from_wire (see authority.py's
+#      module docstring) — the wire shape here is exactly what
+#      Authority.to_wire()["constraints"] emits, so a scenario file exercises
+#      the same deserialisation path a real Delegation Token goes through.
+#   2. "ttl" is whole seconds (an int), not a "1h" duration string.
+#      Authority.ttl is `int | None` seconds in the locked core, with no
+#      duration-string parser anywhere in it.
+root:
+  agent: planner
+  authority:
+    scopes: [crm.read, crm.write]
+    ceilings:
+      - {key: max_rows, max: 1000}
+    ttl: 3600
+
+delegations:
+  - as: summarizer
+    attenuate:
+      scopes: [crm.read]
+      ceilings:
+        - {key: max_rows, max: 100}
+
+assertions:
+  - node: summarizer
+    check: {scope: crm.read, context: {rows: 50}}
+    expect: allow
+
+  - node: summarizer
+    check: {scope: crm.write}
+    expect: deny
+    because: scope_not_granted
+
+  - node: summarizer
+    check: {scope: crm.read, context: {rows: 5000}}
+    expect: deny
+    because: ceiling_exceeded

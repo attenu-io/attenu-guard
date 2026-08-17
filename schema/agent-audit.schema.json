@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://attenu.io/schemas/agent-audit/v1.json",
+  "title": "Agent Delegation Audit Event",
+  "description": "One decision in an agent delegation chain. Hash-chained, tamper-evident, offline-verifiable. Published as an open standard so SIEMs and observability tools can ingest agent-authority decisions in a common format.",
+  "type": "object",
+  "required": ["v", "seq", "ts", "event", "prev_hash", "hash"],
+  "properties": {
+    "v": { "const": 1, "description": "Schema version." },
+    "seq": { "type": "integer", "minimum": 0, "description": "Monotonic sequence number; gaps are provable evidence of deletion." },
+    "ts": { "description": "Trusted timestamp (RFC 3339 string) or monotonic integer in tests." },
+    "event": {
+      "type": "string",
+      "enum": ["root", "spawn", "spawn_denied", "allow", "deny", "kill"],
+      "description": "root=chain start; spawn=delegation minted; allow/deny=action authorization; kill=cascade revocation."
+    },
+    "chain_id": { "type": "string" },
+    "node": { "type": "string", "description": "The node this event concerns." },
+    "parent": { "type": "string" },
+    "agent": { "type": "string" },
+    "task": { "type": "string", "description": "Natural-language task the delegation was scoped to." },
+    "scope": { "type": "string" },
+    "tool": { "type": ["string", "null"] },
+    "requested": { "type": "object", "description": "Authority requested at a spawn." },
+    "granted": { "type": "object", "description": "Authority actually granted (the attenuated meet)." },
+    "authority": { "type": "object" },
+    "reason": { "type": "string", "description": "Denial reason: scope | egress | max_rows | max_spend | max_depth | max_fanout | chain_ceiling | chain_revoked." },
+    "detail": { "type": "object" },
+    "rows": { "type": ["integer", "null"] },
+    "spend": { "type": ["number", "null"] },
+    "egress": { "type": ["string", "null"] },
+    "revoked": { "type": "array", "items": { "type": "string" }, "description": "Node ids revoked by a kill." },
+    "prev_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || canonical(event-without-hash))." }
+  },
+  "additionalProperties": true
+}

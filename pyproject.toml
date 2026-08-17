@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "delegation-guard"
+version = "0.2.0"
+description = "Enforced authority attenuation for multi-agent AI systems — the open answer to OWASP ASI07/ASI08."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "Attenu" }]
+keywords = ["ai", "agents", "security", "authorization", "mcp", "a2a", "owasp", "delegation", "attenuation"]
+dependencies = []
+
+[project.optional-dependencies]
+crypto = ["cryptography>=41"]      # Ed25519 production signer for the wire format
+yaml = ["pyyaml>=6"]              # YAML scenario files (JSON works with no deps)
+langgraph = ["langgraph>=0.2"]   # the LangGraph adapter
+test = ["pytest>=7", "hypothesis>=6"]
+all = ["cryptography>=41", "pyyaml>=6"]
+
+[project.scripts]
+dg = "delegation_guard.cli:main"
+
+[project.urls]
+Homepage = "https://attenu.io"
+Source = "https://github.com/attenu-io/delegation-guard"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/delegation_guard"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

@@ -1,0 +1,14 @@
+{
+  "description": "Adversarial: the real, validly-issued 'summarizer' child token (real_tokens[1] from the valid chain) is presented together with a DIFFERENT, broader, honestly-signed root token as its purported parent, instead of the root it was actually delegated under. The child's par_hash still commits to the ORIGINAL root's exact signing bytes, so it does not match this substituted root. MUST be rejected by the byte-commitment check (draft Chain Linkage) even though the substituted root is broad enough that subsumption alone would not necessarily have caught the splice.",
+  "expect_reject_reason": "par_hash_mismatch",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "64656c65676174696f6e2d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJhbnkifSx7ImtleSI6Im1heF9yb3dzIiwibWF4IjoxMDAwMDAwMDAwfV0sInNjb3BlcyI6WyJjcm0uKiIsIm1haWwuc2VuZCIsInBheS50cmFuc2ZlciJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjo3LCJleHAiOjk5OTk5OSwiaWF0IjowLCJpc3MiOiJkZWxlZ2F0aW9uLWd1YXJkIiwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJhdHRhY2tlci1jb250cm9sbGVkLWJyb2FkLXJvb3QifQ.7pWoNV9_mP0jyqef7TkvLm7tJOv8Mx1ZsShexk2s7zE",
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJub25lIn0seyJrZXkiOiJtYXhfcm93cyIsIm1heCI6NTAwMH1dLCJzY29wZXMiOlsiY3JtLnJlYWQiXSwidHlwZSI6ImFnZW50X2RlbGVnYXRpb24ifV0sImRlbF9kZXB0aCI6MSwiZXhwIjo5MDAsImlhdCI6MCwiaXNzIjoiZGVsZWdhdGlvbi1ndWFyZCIsImp0aSI6ImNoYWluOm4xIiwicGFyX2hhc2giOiJNNWJ5Vld1di1NYXZkUkZpSjhmcmxpUXdsZGtaTWlNaXR1M1dhc0MxS0JrIiwic3ViIjoic3VtbWFyaXplciJ9.UAcCCctMUohaOL3dCYyxIeR4tmGdb-xaUrAKqib50qI"
+  ]
+}

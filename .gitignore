@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.hypothesis/
+/tmp/
+.DS_Store
+*.zip
+*.tgz
+.venv/
+venv/
+.idea/
+.vscode/
