@@ -49,6 +49,15 @@ class Ceiling(Protocol):
     """
     key: str
 
+    # OPTIONAL (deliberately NOT part of the runtime-checkable protocol, so
+    # existing custom ceilings stay valid): a `ctx_field: str` attribute
+    # naming the request-context field this ceiling reads (RowLimit reads
+    # ctx["rows"] while its `key` is "max_rows"). Consumers must go through
+    # `ctx_field_of(ceiling)` below, which falls back to `field`, then `key`.
+    # `Guard(strict_metering=True)` uses it to tell whether a metered call
+    # DECLARED the dimension. Custom metered ceilings whose ctx field differs
+    # from their key should set it, or strict metering will look for `key`.
+
     def permits(self, ctx: Mapping) -> Decision:
         """Does this ceiling admit the given request context? A ctx that
         doesn't mention this ceiling's dimension at all is treated as "not
@@ -78,6 +87,28 @@ class Ceiling(Protocol):
         ...
 
 
+def ctx_field_of(ceiling) -> str:
+    """The request-context field a ceiling reads. Prefers an explicit
+    `ctx_field`, then the caller-keyed `field` (Allow/Deny/Prefix), then the
+    ceiling's `key` — the convention every built-in follows, so this is
+    correct for them and a sane default for custom ceilings."""
+    explicit = getattr(ceiling, "ctx_field", None)
+    if explicit:
+        return explicit
+    field_name = getattr(ceiling, "field", None)
+    return field_name if field_name else ceiling.key
+
+
+def is_metered(ceiling) -> bool:
+    """A METERED ceiling bounds a consumed quantity the caller must declare
+    (rows read, spend, calls) — by convention its key starts with "max_".
+    Rank/membership ceilings (egress, allow/deny/prefix) are not metered:
+    omitting them from a context means "not asserting anything here", not
+    "consuming an undeclared amount". `Guard(strict_metering=True)` refuses a
+    metered call that omits ANY held metered ceiling's `ctx_field`."""
+    return bool(getattr(ceiling, "metered", False)) or str(ceiling.key).startswith("max_")
+
+
 # =========================================================================
 # Built-in ceilings — fixed-key numeric/enum caps.
 #
@@ -91,6 +122,7 @@ class RowLimit:
     """Per-call cap on rows read/returned. ctx field: "rows"."""
     max_rows: int
     key: str = field(default="max_rows", init=False, repr=False)
+    ctx_field: str = field(default="rows", init=False, repr=False, compare=False)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("rows")
@@ -117,6 +149,7 @@ class SpendCap:
     """Per-call cap on spend (currency-agnostic). ctx field: "spend"."""
     max_spend: float
     key: str = field(default="max_spend", init=False, repr=False)
+    ctx_field: str = field(default="spend", init=False, repr=False, compare=False)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("spend")
@@ -143,6 +176,7 @@ class CallLimit:
     """Per-call cap on a call count. ctx field: "calls"."""
     max_calls: int
     key: str = field(default="max_calls", init=False, repr=False)
+    ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("calls")
@@ -169,6 +203,7 @@ class EgressRank:
     """Ordered-enum egress ceiling: none < internal < any. ctx field: "egress"."""
     level: str
     key: str = field(default="egress", init=False, repr=False)
+    ctx_field: str = field(default="egress", init=False, repr=False, compare=False)
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get("egress")

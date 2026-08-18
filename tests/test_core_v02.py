@@ -570,6 +570,230 @@ class TestEnforceVsCheck(unittest.TestCase):
 # alongside the rest of __init__.py's exports but not otherwise exercised
 # by the tests above.
 # =========================================================================
+class TestStrictMeteringPartialContext(unittest.TestCase):
+    """Regression for the fail-open found by the Pydantic AI integration PoC:
+    `strict_metering=True` only refused a call whose context was ENTIRELY
+    empty. A context that mentioned SOME dimensions but omitted a held,
+    metered ceiling's dimension slipped through and that ceiling was simply
+    never evaluated — the exact mistake an adapter's per-tool context lambda
+    makes when it forgets one field. The invariant users actually rely on:
+    with strict metering, a metered call must declare EVERY metered
+    dimension the node holds, or it is refused (fail closed)."""
+
+    def _strict_child(self, ceilings):
+        root = Guard.issue("o", Authority({"crm.read"}, ceilings, ttl=10**6),
+                           strict_metering=True)
+        return root.delegate("c", Authority({"crm.read"}, ceilings, ttl=10**6), task="t")
+
+    def test_partial_context_omitting_a_metered_ceiling_is_refused(self):
+        g = self._strict_child([RowLimit(5_000), EgressRank("none")])
+        # egress is declared, rows is not — RowLimit(5000) would never be evaluated.
+        d = g.check("crm.read", context={"egress": "none"}, metered=True)
+        self.assertFalse(d, "partial context must fail closed under strict metering")
+        self.assertEqual(d.reasons[0].code, ReasonCode.UNMETERED)
+        self.assertIn("max_rows", str(d.reasons[0]))
+
+    def test_every_builtin_metered_ceiling_is_covered(self):
+        # The CLASS of the bug: each metered (max_*) ceiling reads its own ctx
+        # field. Omitting any one of them must be caught, not just rows.
+        cases = [
+            (RowLimit(10), {"spend": 1, "calls": 1}, "max_rows"),
+            (SpendCap(10.0), {"rows": 1, "calls": 1}, "max_spend"),
+            (CallLimit(10), {"rows": 1, "spend": 1}, "max_calls"),
+        ]
+        for ceiling, ctx, key in cases:
+            with self.subTest(ceiling=ceiling):
+                g = self._strict_child([RowLimit(10), SpendCap(10.0), CallLimit(10)])
+                d = g.check("crm.read", context=ctx, metered=True)
+                self.assertFalse(d)
+                self.assertEqual(d.reasons[0].code, ReasonCode.UNMETERED)
+                self.assertIn(key, str(d.reasons[0]))
+
+    def test_full_context_still_evaluates_normally(self):
+        g = self._strict_child([RowLimit(5_000), EgressRank("none")])
+        self.assertTrue(g.check("crm.read", context={"rows": 10, "egress": "none"}, metered=True))
+        over = g.check("crm.read", context={"rows": 10**6, "egress": "none"}, metered=True)
+        self.assertFalse(over)
+        self.assertEqual(over.reasons[0].code, ReasonCode.CEILING_EXCEEDED)
+
+    def test_empty_context_is_still_refused(self):
+        # The original v0.2 behaviour, kept: no context at all -> UNMETERED.
+        g = self._strict_child([RowLimit(5_000)])
+        d = g.check("crm.read", metered=True)
+        self.assertFalse(d)
+        self.assertEqual(d.reasons[0].code, ReasonCode.UNMETERED)
+
+    def test_non_metered_ceilings_do_not_trigger_strictness(self):
+        # EgressRank is a rank, not a metered quantity: omitting it under
+        # strict metering is fine (the call isn't consuming egress).
+        g = self._strict_child([RowLimit(5_000), EgressRank("none")])
+        self.assertTrue(g.check("crm.read", context={"rows": 10}, metered=True))
+
+    def test_unmetered_calls_and_non_strict_guards_are_unchanged(self):
+        g = self._strict_child([RowLimit(5_000), EgressRank("none")])
+        self.assertTrue(g.check("crm.read", context={"egress": "none"}))          # metered=False
+        loose = Guard.issue("o", Authority({"crm.read"}, [RowLimit(5)], ttl=10**6))
+        self.assertTrue(loose.check("crm.read", context={"egress": "none"}, metered=True))
+
+
+class TestAdapterFacingSurface(unittest.TestCase):
+    """The small read-only/introspection surface the framework-integration
+    PoCs (examples/integrations/) independently asked for. Each was hit by
+    more than one adapter, so it lives in the core rather than being
+    re-invented per framework."""
+
+    def _pair(self):
+        root = Guard.issue("orchestrator", Authority({"crm.*"}, [RowLimit(100)], ttl=3600))
+        child = root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(10)], ttl=900),
+                              task="summarize")
+        return root, child
+
+    def test_agent_id_is_readable(self):
+        root, child = self._pair()
+        self.assertEqual(root.agent_id, "orchestrator")
+        self.assertEqual(child.agent_id, "summarizer")
+
+    def test_is_revoked_and_is_expired_reflect_chain_state(self):
+        root, child = self._pair()
+        self.assertFalse(child.is_revoked)
+        self.assertFalse(child.is_expired)
+        root.revoke(child.node_id)
+        self.assertTrue(child.is_revoked)
+        self.assertFalse(root.is_revoked)
+        # expiry: a zero-ttl-ish child under a manual clock
+        class _Clock:
+            t = 0
+            def now(self): return self.t
+        clk = _Clock()
+        r2 = Guard.issue("o", Authority({"x"}, [], ttl=100), clock=clk)
+        c2 = r2.delegate("c", Authority({"x"}, [], ttl=5), task="t")
+        self.assertFalse(c2.is_expired)
+        clk.t = 6
+        self.assertTrue(c2.is_expired)
+        self.assertFalse(c2.check("x"))
+        self.assertEqual(c2.check("x").reasons[0].code, ReasonCode.EXPIRED)
+
+    def test_reason_code_no_authority_exists(self):
+        self.assertEqual(ReasonCode.NO_AUTHORITY, "no_authority")
+
+    def test_record_denial_lands_in_the_audit_log_as_a_deny_event(self):
+        # An adapter refusing something UPSTREAM of policy (unknown principal,
+        # undeclared sub-agent, unparseable tool args) must be able to put
+        # that refusal on the same tamper-evident trail as policy denials --
+        # otherwise `dg view` never sees it.
+        root, child = self._pair()
+        before = len(root.audit_log().entries)
+        d = child.record_denial(ReasonCode.NO_AUTHORITY, "sub-agent 'exfiltrator' was never delegated to",
+                                scope="crm.export", tool="crm_export")
+        self.assertFalse(d)
+        self.assertEqual(d.reasons[0].code, ReasonCode.NO_AUTHORITY)
+        self.assertEqual(d.determining_node, child.node_id)
+        entries = root.audit_log().entries
+        self.assertEqual(len(entries), before + 1)
+        last = entries[-1]
+        self.assertEqual(last["event"], "deny")
+        self.assertEqual(last["reason"], ReasonCode.NO_AUTHORITY)
+        self.assertEqual(last["scope"], "crm.export")
+        self.assertEqual(last["tool"], "crm_export")
+        self.assertEqual(last["node"], child.node_id)
+        ok, err = AuditLog.verify(entries)
+        self.assertTrue(ok, err)
+
+    def test_record_denial_accepts_a_prebuilt_reason_and_defaults_scope(self):
+        root, child = self._pair()
+        d = child.record_denial(Reason(ReasonCode.UNKNOWN_CONSTRAINT, message="bad args"), tool="t")
+        last = root.audit_log().entries[-1]
+        self.assertEqual(last["reason"], ReasonCode.UNKNOWN_CONSTRAINT)
+        self.assertIsInstance(last["scope"], str)     # schema: scope is a string
+        self.assertFalse(d)
+
+    def test_audit_log_is_iterable_and_sized(self):
+        root, child = self._pair()
+        log = root.audit_log()
+        self.assertEqual(len(log), len(log.entries))
+        self.assertEqual([e["event"] for e in log], [e["event"] for e in log.entries])
+        self.assertEqual(len(log), 2)   # root + spawn
+
+
+class TestPrincipalRevocationAndDelegationDryRun(unittest.TestCase):
+    """Found by the Strands + OpenAI-SDK integration PoCs: `revoke()` is
+    node-scoped, so a framework that re-hands-off to the SAME agent after a
+    revoke (swarm ping-pong, a second `as_tool()` call) minted a fresh, clean
+    child from the still-valid parent — a re-delegation bypass every adapter
+    had to close with its own invisible "revoked names" set. The invariant
+    users rely on: once an agent is revoked BY NAME, no node in the chain
+    can delegate to it again, and that ban is on the audit trail."""
+
+    def _chain(self):
+        root = Guard.issue("orchestrator", Authority({"crm.*"}, [RowLimit(100)], ttl=3600))
+        c1 = root.delegate("summarizer", Authority({"crm.read"}, [], ttl=900), task="t1")
+        return root, c1
+
+    def test_re_delegating_to_a_revoked_agent_is_refused_chain_wide(self):
+        root, c1 = self._chain()
+        revoked = root.revoke_agent("summarizer")
+        self.assertIn(c1.node_id, revoked)
+        self.assertTrue(c1.is_revoked)
+        with self.assertRaises(AuthorityError) as cm:
+            root.delegate("summarizer", Authority({"crm.read"}, [], ttl=900), task="t2")
+        self.assertEqual(cm.exception.reason, "agent_banned")
+        # ...from ANY node in the chain, not just the one that revoked
+        other = root.delegate("planner", Authority({"crm.read"}, [], ttl=900), task="p")
+        with self.assertRaises(AuthorityError):
+            other.delegate("summarizer", Authority({"crm.read"}, [], ttl=900), task="t3")
+        # other agents are unaffected
+        self.assertTrue(other.check("crm.read"))
+
+    def test_revoke_agent_revokes_every_node_of_that_principal(self):
+        root, c1 = self._chain()
+        c2 = root.delegate("summarizer", Authority({"crm.read"}, [], ttl=900), task="t2")
+        gc = c2.delegate("helper", Authority({"crm.read"}, [], ttl=900), task="h")
+        revoked = root.revoke_agent("summarizer")
+        self.assertEqual(set(revoked), {c1.node_id, c2.node_id, gc.node_id})   # cascade too
+        for g in (c1, c2, gc):
+            self.assertFalse(g.check("crm.read"))
+            self.assertEqual(g.check("crm.read").reasons[0].code, ReasonCode.REVOKED)
+
+    def test_revoke_agent_is_on_the_audit_trail(self):
+        root, c1 = self._chain()
+        root.revoke_agent("summarizer")
+        kill = [e for e in root.audit_log() if e["event"] == "kill"][-1]
+        self.assertEqual(kill["agent"], "summarizer")
+        self.assertIn(c1.node_id, kill["revoked"])
+        try:
+            root.delegate("summarizer", Authority({"crm.read"}, [], ttl=900), task="t2")
+        except AuthorityError:
+            pass
+        denied = [e for e in root.audit_log() if e["event"] == "spawn_denied"][-1]
+        self.assertEqual(denied["reason"], "agent_banned")
+        ok, err = AuditLog.verify(root.audit_log().entries)
+        self.assertTrue(ok, err)
+
+    def test_would_delegate_is_a_pure_dry_run(self):
+        root, c1 = self._chain()
+        n = len(root.audit_log())
+        d = root.would_delegate("helper", Authority({"crm.read"}, [], ttl=10))
+        self.assertTrue(d)
+        self.assertEqual(len(root.audit_log()), n)                    # nothing written
+        self.assertEqual(len(root.graph()["nodes"]), 2)               # no node created
+        root.revoke_agent("summarizer")
+        d2 = root.would_delegate("summarizer", Authority({"crm.read"}, [], ttl=10))
+        self.assertFalse(d2)
+        self.assertEqual(d2.reasons[0].code, "agent_banned")
+        root.revoke()                                                # whole chain
+        d3 = root.would_delegate("helper", Authority({"crm.read"}, [], ttl=10))
+        self.assertFalse(d3)
+        self.assertEqual(d3.reasons[0].code, "chain_revoked")
+        self.assertEqual(len(root.graph()["nodes"]), 2)
+
+    def test_would_delegate_reports_depth_and_fanout_ceilings(self):
+        root = Guard.issue("o", Authority({"x"}, [], ttl=100), max_depth=1, max_fanout=1)
+        self.assertTrue(root.would_delegate("a", Authority({"x"}, [], ttl=10)))
+        a = root.delegate("a", Authority({"x"}, [], ttl=10), task="t")
+        self.assertEqual(root.would_delegate("b", Authority({"x"}, [], ttl=10)).reasons[0].code, "max_fanout")
+        self.assertEqual(a.would_delegate("c", Authority({"x"}, [], ttl=10)).reasons[0].code, "max_depth")
+
+
 class TestPublicExports(unittest.TestCase):
     def test_ceiling_protocol_isinstance_check(self):
         # runtime_checkable: any object with the right method names — built

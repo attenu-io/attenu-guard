@@ -8,6 +8,8 @@ on:
     # a clean-tree install + the README quickstart, so a broken front door is
     # caught within hours, not on the next push.
     - cron: '0 */6 * * *'
+    # Weekly (Mon 03:00 UTC): integrations-latest — unpinned framework drift canary.
+    - cron: '0 3 * * 1'
 jobs:
   stdlib-suite:
     # Everything that must pass with ZERO third-party deps (the safety core).
@@ -70,3 +72,74 @@ jobs:
           assert not s.check("crm.export", context={"egress":"any"})
           print("quickstart OK")
           PY
+  integrations:
+    # Real-framework integration PoCs (tests/integrations/): each job installs
+    # ONE framework at the exact version the PoC was validated against and runs
+    # its test with that framework's offline/mock model — no LLM API keys.
+    # Pinned on purpose: this job proves "delegation-guard works inside X";
+    # upstream drift is caught separately by integrations-latest (below).
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { fw: langgraph,       pkgs: "langgraph==1.2.11 langchain-core deepagents==0.7.6", tests: "tests/integrations/test_langgraph.py tests/integrations/test_deepagents.py" }
+          - { fw: openai_agents,   pkgs: "openai-agents==0.21.1" }
+          - { fw: google_adk,      pkgs: "google-adk==2.7.1" }
+          - { fw: pydantic_ai,     pkgs: "pydantic-ai-slim==2.31.1" }
+          - { fw: crewai,          pkgs: "crewai==1.15.16" }
+          - { fw: autogen,         pkgs: "autogen-agentchat==0.7.5 autogen-ext==0.7.5" }
+          - { fw: claude_sdk,      pkgs: "claude-agent-sdk==0.2.139" }
+          - { fw: smolagents,      pkgs: "smolagents==1.26.0" }
+          - { fw: strands,         pkgs: "strands-agents==1.52.0" }
+          - { fw: llama_index,     pkgs: "llama-index-core==0.14.23" }
+          - { fw: semantic_kernel, pkgs: "semantic-kernel==1.36.0" }
+          - { fw: agno,            pkgs: "agno==2.9.0" }
+    name: integration (${{ matrix.fw }})
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.12" }
+      - name: Install delegation-guard + ${{ matrix.fw }} (pinned)
+        run: |
+          python -m pip install -q --upgrade pip
+          pip install -q -e . pytest ${{ matrix.pkgs }}
+      - name: Run the ${{ matrix.fw }} integration test
+        run: python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}.py', matrix.fw) }}
+      - name: Run the ${{ matrix.fw }} demo (must exit 0 offline)
+        run: |
+          for d in examples/integrations/${{ matrix.fw }}/demo.py examples/integrations/${{ matrix.fw }}/deepagents_demo.py; do
+            [ -f "$d" ] && python "$d" || true
+          done
+  integrations-latest:
+    # Weekly upstream-drift canary: same tests, UNPINNED latest framework
+    # versions. Allowed to fail (continue-on-error) — it is a signal, not a gate.
+    if: github.event.schedule == '0 3 * * 1' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { fw: langgraph,       pkgs: "langgraph langchain-core deepagents", tests: "tests/integrations/test_langgraph.py tests/integrations/test_deepagents.py" }
+          - { fw: openai_agents,   pkgs: "openai-agents" }
+          - { fw: google_adk,      pkgs: "google-adk" }
+          - { fw: pydantic_ai,     pkgs: "pydantic-ai-slim" }
+          - { fw: crewai,          pkgs: "crewai" }
+          - { fw: autogen,         pkgs: "autogen-agentchat autogen-ext" }
+          - { fw: claude_sdk,      pkgs: "claude-agent-sdk" }
+          - { fw: smolagents,      pkgs: "smolagents" }
+          - { fw: strands,         pkgs: "strands-agents" }
+          - { fw: llama_index,     pkgs: "llama-index-core" }
+          - { fw: semantic_kernel, pkgs: "semantic-kernel" }
+          - { fw: agno,            pkgs: "agno" }
+    name: integration-latest (${{ matrix.fw }})
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.12" }
+      - run: |
+          python -m pip install -q --upgrade pip
+          pip install -q -e . pytest ${{ matrix.pkgs }}
+          python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}.py', matrix.fw) }}

@@ -9,6 +9,8 @@ The open answer to [OWASP ASI07 (insecure inter-agent communication) and ASI08
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) —
 the two agentic risks that no framework or platform enforces today.
 
+![dg demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](docs/assets/demo.gif)
+
 ```bash
 # From a clone (pre-publish): install in editable mode, zero runtime deps.
 pip install -e .        # gives you the `dg` command too
@@ -57,11 +59,14 @@ parties (user, agent), so "child ⊆ parent" can't even be *written down*; every
 policy check fires at invocation time inside one vendor's perimeter, never at the
 moment authority is handed down.
 
-| System | What it does at a handoff |
+| System | What it does at a handoff (verified against the released code — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)) |
 |---|---|
-| OpenAI Agents SDK | passes the **entire** conversation to the sub-agent |
+| OpenAI Agents SDK 0.21 | passes the **entire** conversation to the sub-agent (`Handoff.input_filter=None` by default: *"the new agent sees the entire conversation history"*); no parent/child relation exists, so nothing checks child ⊆ parent |
+| LangChain `deepagents` 0.7 | a sub-agent's `permissions` **replace** the parent's rules entirely (`graph.py`) — a child can be granted what its parent is denied |
+| Google ADK 2.7 | `disallow_transfer_to_peers` only shapes the prompt/tool schema; the 2.x transfer path (`workflow/utils/_transfer_utils.py`) never checks it (cf. [#3850](https://github.com/google/adk-python/issues/3850)) |
+| CrewAI 1.15 | a delegated coworker runs with its **own full tool list**; the tool-hook dispatcher swallows exceptions and runs the tool (**fail-open**) unless you raise its one blessed exception |
+| AutoGen 0.7 | `Handoff` carries target/description/message only; the receiver offers the model its own full tool list |
 | Microsoft Entra | child agent **inherits** the parent's scopes |
-| Google ADK | ships a restriction flag that ["only influences the prompt"](https://github.com/google/adk-python/issues/3850) |
 | MCP | scope flow is **accumulation**-biased (step-up unions) |
 | A2A | authenticates the hop, carries **no** delegated authority |
 
@@ -77,7 +82,7 @@ invariant — in ten minutes, in your framework, with no proxy and no phone-home
 - **Hash-chained audit log** — an open, versioned [schema](schema/agent-audit.schema.json); `dg view log.jsonl` renders the tree and verifies it; tampering is provable offline.
 - **Wire format** ([`delegation_guard.wire`](src/delegation_guard/wire.py)) — `serialize`/`load` the delegation chain as signed **Delegation Tokens** and verify child ⊆ parent **offline**, across services, with no authorization server in the path. This is the reference implementation of the Internet-Draft in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-00.md); interop test vectors live in [`tests/vectors/`](tests/vectors/).
 - **Scenario harness** — declarative JSON/YAML authorization tests (`dg scenarios file.json`); see [`scenarios/`](scenarios/).
-- **Adapters** — a LangGraph integration ([`delegation_guard.adapters.langgraph`](src/delegation_guard/adapters/langgraph.py)); MCP/FastAPI to follow.
+- **Adapters & integrations** — a LangGraph node adapter ([`delegation_guard.adapters.langgraph`](src/delegation_guard/adapters/langgraph.py)) plus runnable, tested integrations with the major agent frameworks under [`examples/integrations/`](examples/integrations/) — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 ## Prove the safety claims yourself
 

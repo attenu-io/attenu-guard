@@ -33,6 +33,9 @@ class ReasonCode:
     FANOUT_EXCEEDED = "fanout_exceeded"
     UNMETERED = "unmetered"
     UNKNOWN_CONSTRAINT = "unknown_constraint"   # fail-closed on unknown ceiling type
+    NO_AUTHORITY = "no_authority"               # principal holds no Authority at all in this chain
+                                                # (adapter-level: unknown/undelegated agent, unmapped
+                                                # tool, unparseable args) — upstream of scope/ceilings
 
 
 @dataclass(frozen=True)

@@ -58,6 +58,7 @@ class Chain:
         self.clock = clock or MonotonicClock()
         self.nodes: dict[str, Node] = {}
         self._revoked: set[str] = set()          # grow-only
+        self._banned_agents: set[str] = set()    # grow-only: agent_ids no node may delegate to
         self._ids = itertools.count()
         self._consumed: dict[str, float] = {}     # aggregate counters
         self._secret = os.urandom(32)             # per-chain integrity key
@@ -89,25 +90,39 @@ class Chain:
             return False
         return (self.clock.now() - node.issued_at) > ttl
 
-    def add_child(self, parent_id: str, agent_id: str,
-                  requested: Authority, task: str) -> Node:
+    def delegation_error(self, parent_id: str, agent_id: str) -> AuthorityError | None:
+        """The structural preconditions for `add_child`, WITHOUT mutating
+        anything: returns the AuthorityError that `add_child` would raise, or
+        None if the delegation is currently permitted. `add_child` calls this;
+        `Guard.would_delegate` exposes it as a pure dry-run."""
         parent = self.nodes[parent_id]
         if self.is_revoked(parent_id):
-            raise AuthorityError("cannot delegate from a revoked node",
-                                 reason="chain_revoked", detail={"parent": parent_id})
+            return AuthorityError("cannot delegate from a revoked node",
+                                  reason="chain_revoked", detail={"parent": parent_id})
+        if agent_id in self._banned_agents:
+            return AuthorityError(f"agent {agent_id!r} has been revoked in this chain",
+                                  reason="agent_banned", detail={"agent": agent_id})
         if not self.verify_integrity(parent):
-            raise AuthorityError("parent authority failed integrity check",
-                                 reason="integrity", detail={"parent": parent_id})
+            return AuthorityError("parent authority failed integrity check",
+                                  reason="integrity", detail={"parent": parent_id})
         if self.is_expired(parent):
-            raise AuthorityError("cannot delegate from an expired authority",
-                                 reason="ttl_expired", detail={"parent": parent_id})
+            return AuthorityError("cannot delegate from an expired authority",
+                                  reason="ttl_expired", detail={"parent": parent_id})
         if parent.depth + 1 > self.max_depth:
-            raise AuthorityError(
+            return AuthorityError(
                 f"delegation depth {parent.depth + 1} exceeds max_depth {self.max_depth}",
                 reason="max_depth", detail={"max_depth": self.max_depth})
         if len(parent.children) + 1 > self.max_fanout:
-            raise AuthorityError(f"fanout exceeds max_fanout {self.max_fanout}",
-                                 reason="max_fanout", detail={"max_fanout": self.max_fanout})
+            return AuthorityError(f"fanout exceeds max_fanout {self.max_fanout}",
+                                  reason="max_fanout", detail={"max_fanout": self.max_fanout})
+        return None
+
+    def add_child(self, parent_id: str, agent_id: str,
+                  requested: Authority, task: str) -> Node:
+        parent = self.nodes[parent_id]
+        err = self.delegation_error(parent_id, agent_id)
+        if err is not None:
+            raise err
 
         # THE attenuation step: child authority is the meet, never a copy.
         child_auth = parent.authority.meet(requested)
@@ -138,6 +153,22 @@ class Chain:
 
     def is_revoked(self, node_id: str) -> bool:
         return node_id in self._revoked
+
+    def revoke_agent(self, agent_id: str) -> list[str]:
+        """PRINCIPAL-scoped revocation: cascade-revoke every node held by
+        `agent_id` and ban the agent so no node in this chain can delegate to
+        it again (grow-only, like `_revoked`). Closes the re-delegation
+        bypass where a framework re-hands-off to a revoked agent and would
+        otherwise mint it a fresh, clean child from a still-valid parent."""
+        self._banned_agents.add(agent_id)
+        revoked_now: list[str] = []
+        for nid, node in list(self.nodes.items()):
+            if node.agent_id == agent_id and nid not in self._revoked:
+                revoked_now.extend(self.revoke(nid))
+        return revoked_now
+
+    def is_banned(self, agent_id: str) -> bool:
+        return agent_id in self._banned_agents
 
     # ---- aggregate budgets --------------------------------------------
     def consume(self, key: str, amount: float, chain_ceiling: float | None):

@@ -40,6 +40,7 @@ from .authority import Authority, AuthorityError
 from .chain import Chain, Node, MonotonicClock
 from .audit import AuditLog
 from .reasons import Decision, Reason, ReasonCode
+from .ceilings import ctx_field_of, is_metered
 
 __all__ = ["Guard", "AuthorityDenied"]
 
@@ -111,6 +112,24 @@ class Guard:
     @property
     def authority(self) -> Authority:
         return self._node.authority
+
+    @property
+    def agent_id(self) -> str:
+        """The `agent_id` this Guard was issued/delegated to. Adapters key
+        their per-agent registries on it."""
+        return self._node.agent_id
+
+    @property
+    def is_revoked(self) -> bool:
+        """Read-only chain state: has this node (or an ancestor) been
+        revoked? A cheap way for adapters/UIs to render "authority pulled"
+        without fabricating a scope to `would_allow()`."""
+        return self._chain.is_revoked(self._node.node_id)
+
+    @property
+    def is_expired(self) -> bool:
+        """Read-only chain state: has this node's TTL elapsed?"""
+        return self._chain.is_expired(self._node)
 
     # ---- delegation ----------------------------------------------------
     def delegate(self, agent_id: str, request: Authority, task: str) -> "Guard":
@@ -195,16 +214,22 @@ class Guard:
                        message="authority ttl has elapsed"), node=nid)
 
         # Strict metering (opt-in, for adapters): a call flagged as consuming
-        # a metered resource but carrying no context at all is refused
-        # rather than silently treated as free — closes the "undeclared
-        # quantity" trust gap documented in red_team.bb_budget_omission.
-        if self._strict and metered and not context:
-            metered_keys = [c.key for c in auth.ceilings if c.key.startswith("max_")]
-            if metered_keys:
+        # a metered resource must DECLARE every metered dimension this node
+        # holds a ceiling on; any it omits is refused rather than silently
+        # treated as free — closes the "undeclared quantity" trust gap
+        # documented in red_team.bb_budget_omission. Checked PER CEILING (not
+        # "is the context empty?"): a partial context that mentions egress
+        # but forgets rows would otherwise let RowLimit go unevaluated —
+        # the exact slip an adapter's per-tool context lambda makes.
+        if self._strict and metered:
+            missing = [c.key for c in auth.ceilings
+                       if is_metered(c) and ctx_field_of(c) not in context]
+            if missing:
+                held = [c.key for c in auth.ceilings if is_metered(c)]
                 return Decision.deny(
-                    Reason(ReasonCode.UNMETERED,
-                           message=f"metered=True but no context supplied; "
-                                   f"metered ceilings held: {metered_keys}"),
+                    Reason(ReasonCode.UNMETERED, constraint=",".join(missing),
+                           message=f"metered=True but context omits {missing}; "
+                                   f"metered ceilings held: {held}"),
                     node=nid)
 
         decision = auth.permits(scope, context)
@@ -258,6 +283,27 @@ class Guard:
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         return self._evaluate(scope, ctx, metered)
 
+    def record_denial(self, reason, message: str = "", *, scope: str | None = None,
+                      tool: str | None = None, context: Mapping | None = None) -> Decision:
+        """Put an ADAPTER-LEVEL refusal on the audit trail as a `deny` event
+        and return it as a Decision — for denials that happen UPSTREAM of
+        policy evaluation (an agent the chain never delegated to, a tool
+        with no declared policy, unparseable tool arguments). Nothing is
+        evaluated: the caller has already decided; this only records it,
+        with this Guard's node/chain, in the same tamper-evident log as
+        `check()` denials, so `dg view` and offline verifiers see it.
+
+        `reason` is a `Reason` or a `ReasonCode` string (typically
+        `ReasonCode.NO_AUTHORITY`); `message` is used only when a code is
+        given. `scope` defaults to `tool` (or "-") because the published
+        audit schema requires a string scope on allow/deny events.
+        """
+        r = reason if isinstance(reason, Reason) else Reason(str(reason), message=message)
+        decision = Decision.deny(r, node=self._node.node_id)
+        self._log_decision(decision, scope if scope is not None else (tool or "-"),
+                           tool, dict(context) if context else {})
+        return decision
+
     @contextmanager
     def authorize(self, scope: str, **kwargs):
         """Convenience sugar (not part of the core issue/delegate/revoke/
@@ -276,6 +322,29 @@ class Guard:
         self._audit.append("kill", self._seq.now(), chain_id=self.chain_id,
                            target=target, revoked=revoked)
         return revoked
+
+    def revoke_agent(self, agent_id: str) -> list:
+        """Revoke an agent BY NAME, chain-wide: every node it holds is
+        cascade-revoked and no node may `delegate()` to it again
+        (`AuthorityError`, reason "agent_banned"). Use this — not
+        `revoke(node_id)` — when the intent is "this principal is done",
+        because frameworks re-hand-off to the same agent freely and a fresh
+        `delegate()` would otherwise mint it clean authority. One audit event."""
+        revoked = self._chain.revoke_agent(agent_id)
+        self._audit.append("kill", self._seq.now(), chain_id=self.chain_id,
+                           target=self._node.node_id, agent=agent_id, revoked=revoked)
+        return revoked
+
+    def would_delegate(self, agent_id: str, request: Authority) -> Decision:
+        """Pure dry-run of `delegate()`'s structural preconditions (revoked
+        or expired parent, banned agent, depth/fanout ceilings): returns a
+        Decision, creates no node, consumes no fanout, writes nothing to the
+        audit log. `request` is accepted for symmetry with `delegate()`; the
+        granted authority would be `self.authority.meet(request)`."""
+        err = self._chain.delegation_error(self._node.node_id, agent_id)
+        if err is None:
+            return Decision.allow(node=self._node.node_id)
+        return Decision.deny(Reason(err.reason, message=str(err)), node=self._node.node_id)
 
     def kill(self, *args, **kwargs) -> list:
         """Deprecated alias for `revoke` (v0.1 name)."""

@@ -76,6 +76,14 @@ class AuditLog:
     def entries(self) -> list[dict]:
         return list(self._entries)
 
+    # Ergonomics (adapters kept writing `.entries()`): iterate/len the log
+    # directly. `entries` stays a property — the wire-published contract.
+    def __iter__(self):
+        return iter(self.entries)
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
     # ---- verification --------------------------------------------------
     @staticmethod
     def verify(entries: list[dict]) -> tuple[bool, str | None]:

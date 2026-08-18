@@ -27,6 +27,13 @@ from delegation_guard.adapters.langgraph import (
     DelegatedToolNode, add_guarded_node, guard_node, is_langgraph_available,
 )
 
+# Captured IMMEDIATELY after importing the adapter, before any test runs: did
+# importing `delegation_guard.adapters.langgraph` drag `langgraph` into the
+# process? This is the actual guarantee under test, and it holds whether or
+# not langgraph happens to be installed on this machine (it IS installed in
+# the integration-test venvs — see tests/integrations/test_langgraph.py).
+_LANGGRAPH_IMPORTED_BY_ADAPTER = "langgraph" in sys.modules
+
 
 class _Recorder:
     """A fake tool callable: records every call it receives and returns a
@@ -55,11 +62,23 @@ def _make_tool_guard():
 
 
 class TestModuleImportsWithoutLanggraph(unittest.TestCase):
-    def test_langgraph_is_genuinely_not_installed_here(self):
-        # This environment intentionally has no langgraph -- confirms the
-        # rest of this test file is actually exercising the "no langgraph"
-        # guarantee, not accidentally passing because it IS installed.
-        self.assertFalse(is_langgraph_available())
+    def test_importing_the_adapter_does_not_import_langgraph(self):
+        # The guarantee: importing the adapter must NOT import langgraph
+        # (lazy imports only). Asserted via the flag captured at module load,
+        # so this passes on machines WITH langgraph installed too — the old
+        # form asserted `not is_langgraph_available()`, which was a statement
+        # about the machine, not the module, and failed on any dev box with
+        # `pip install -e '.[langgraph]'`.
+        self.assertFalse(_LANGGRAPH_IMPORTED_BY_ADAPTER)
+
+    def test_is_langgraph_available_reports_reality(self):
+        # Whatever this machine has, the probe must agree with a direct import.
+        try:
+            import langgraph  # noqa: F401
+            really = True
+        except ImportError:
+            really = False
+        self.assertEqual(is_langgraph_available(), really)
 
     def test_module_already_imported_successfully(self):
         # Reaching this line at all proves `import delegation_guard.adapters.langgraph`
