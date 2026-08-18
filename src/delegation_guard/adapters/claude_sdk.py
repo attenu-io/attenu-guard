@@ -270,6 +270,8 @@ class DelegationGuardRegistry:
         """``SubagentStop`` hook: cascade-revoke the finished subagent so a
         late or replayed tool call from it cannot still be authorized."""
         agent_id = input_data.get("agent_id")
+        if agent_id and agent_id in self._guards:
+            self._guards[agent_id].complete()      # lifecycle end on the ledger (informational; revocation below is the hard stop)
         if self.revoke_on_stop and agent_id and agent_id in self._guards:
             self._guards[agent_id].revoke()
         return {}

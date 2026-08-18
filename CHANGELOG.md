@@ -67,6 +67,10 @@ Driven by integration PoCs against twelve real agent frameworks
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
 
+- **`Guard.complete()` / `Guard.is_complete` — node lifecycle end** (`done` audit event, idempotent,
+  informational: authority is unchanged, revocation stays the hard stop). The LangChain, Claude SDK,
+  Google ADK and CrewAI adapters record it when a delegation returns to its caller, so a ledger reader
+  can tell a sub-agent that finished from one that was cut short. Schema enum gains `done`.
 - `Ceiling.describe()` on all built-ins, `ceilings.describe()` helper,
   `Authority.describe()`; `ReasonCode` constants for the structural
   `AuthorityError` reasons (`CHAIN_REVOKED`, `AGENT_BANNED`, `TTL_EXPIRED`,

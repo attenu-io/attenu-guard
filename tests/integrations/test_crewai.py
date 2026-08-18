@@ -736,3 +736,11 @@ def test_observe_mode_hooks_record_undeclared_tools_and_coworkers(effects, tools
     spawns = [e for e in entries if e.get("event") == "spawn"]
     assert spawns and spawns[-1]["agent"] == SUMMARIZER and "summarize Q3 pipeline" in spawns[-1]["task"]  # the delegated task text
     assert bridge.guard_for(SUMMARIZER) is not None
+
+
+def test_delegation_lifecycle_end_is_recorded_when_the_coworker_returns(effects, tools):
+    root = _root_guard(); bridge = _bridge(root)
+    with bridge:
+        _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
+    dones = [e for e in root.audit_log().entries if e.get("event") == "done"]
+    assert dones and dones[-1]["agent"] == SUMMARIZER and bridge.guard_for(SUMMARIZER).is_complete

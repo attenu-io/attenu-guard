@@ -216,6 +216,15 @@ class DelegationGuardPlugin(BasePlugin):
         self._current = agent.name
         return None  # never short-circuit the agent itself
 
+    async def after_agent_callback(
+        self, *, agent: BaseAgent, callback_context: CallbackContext
+    ) -> None:
+        """The agent's run returned to its caller: lifecycle end on the ledger (informational)."""
+        g = self._guards.get(agent.name)
+        if g is not None and g is not self._root:
+            g.complete()
+        return None
+
     # ---- hook 2: an agent is about to invoke a tool ---------------------
     async def before_tool_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext

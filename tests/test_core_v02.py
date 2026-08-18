@@ -984,3 +984,18 @@ class TestPublicExports(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---- node lifecycle end: Guard.complete() -> "done" audit event (attenu-derive T21: per-node truncation) ----------
+def test_complete_records_a_done_event_once_and_leaves_authority_intact():
+    from delegation_guard import Authority, Guard, AuditLog
+    root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t")
+    child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
+    assert child.check("fs.read").allowed
+    assert child.complete() is True and child.is_complete
+    assert child.complete() is False                                    # idempotent: one lifecycle end per node
+    dones = [e for e in root.audit_log().entries if e["event"] == "done"]
+    assert len(dones) == 1 and dones[0]["node"] == child.node_id and dones[0]["agent"] == "researcher"
+    assert child.check("fs.read").allowed                                # informational marker: authority itself is unchanged (revocation is the hard stop)
+    ok, err = AuditLog.verify(root.audit_log().entries); assert ok, err
+    assert not root.is_complete

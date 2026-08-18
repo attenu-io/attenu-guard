@@ -134,6 +134,22 @@ class Guard:
         """Read-only chain state: has this node's TTL elapsed?"""
         return self._chain.is_expired(self._node)
 
+    @property
+    def is_complete(self) -> bool:
+        """Read-only lifecycle state: did the holder mark this node's work finished (`complete()`)?"""
+        return bool(getattr(self._node, "complete", False))
+
+    def complete(self) -> bool:
+        """Mark this node's work FINISHED — one `done` audit event (idempotent: returns False if already
+        marked). Purely a lifecycle marker for the ledger and for downstream analytics (a delegation that
+        never reached `done` was cut short); it does NOT change authority — revocation is the hard stop.
+        Adapters call it when the delegation returns to its parent."""
+        if getattr(self._node, "complete", False):
+            return False
+        self._node.complete = True
+        self._append("done", chain_id=self.chain_id, node=self._node.node_id, agent=self._node.agent_id)
+        return True
+
     # ---- delegation ----------------------------------------------------
     def delegate(self, agent_id: str, request: Authority, task: str) -> "Guard":
         """Create a child Guard. The child's authority is

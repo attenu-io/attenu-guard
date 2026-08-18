@@ -224,8 +224,11 @@ class GuardedDelegation:
             return gate.denial
         if gate.child is None:
             return handler(request)
-        with use_guard(gate.child):
-            return handler(request)
+        try:
+            with use_guard(gate.child):
+                return handler(request)
+        finally:
+            gate.child.complete()               # the delegation returned: lifecycle end on the ledger (informational)
 
     async def awrap_tool_call(self, request, handler):
         """Async twin of `wrap_tool_call`."""
@@ -234,8 +237,11 @@ class GuardedDelegation:
             return gate.denial
         if gate.child is None:
             return await handler(request)
-        with use_guard(gate.child):
-            return await handler(request)
+        try:
+            with use_guard(gate.child):
+                return await handler(request)
+        finally:
+            gate.child.complete()
 
     def middleware(self):
         """An `AgentMiddleware` wrapping this gate, for `create_agent` /

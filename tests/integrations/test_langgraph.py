@@ -489,3 +489,19 @@ def test_without_the_hooks_unlisted_still_fails_closed(side_effects):
     app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
     app.invoke({"messages": [("user", "go")]})
     assert side_effects == []
+
+
+def test_delegation_lifecycle_end_is_recorded_when_the_task_tool_returns(side_effects):
+    """`done` on the ledger when the delegation tool's handler returns (per-node truncation accounting downstream)."""
+    root = Guard.issue("recorder", Authority({"observe.*"}, [], ttl=None), task="sample")
+    guarded = GuardedDelegation(root, tools={}, subagents={},
+                                default_policy=lambda name: ToolPolicy(f"observe.{name}"),
+                                default_subagent_authority=lambda name: Authority({"observe.*"}, [], ttl=None))
+    from types import SimpleNamespace
+    req = SimpleNamespace(tool_call={"name": "task", "args": {"subagent_type": "researcher", "description": "look things up"}})
+    out = guarded.wrap_tool_call(req, lambda r: "child ran")
+    assert out == "child ran"
+    child = guarded.children["researcher"]
+    assert child.is_complete
+    dones = [e for e in root.audit_log() if e["event"] == "done"]
+    assert len(dones) == 1 and dones[0]["agent"] == "researcher" and dones[0]["node"] == child.node_id

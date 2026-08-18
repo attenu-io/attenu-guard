@@ -676,3 +676,22 @@ def test_parallel_agent_tool_calls_fan_out_from_the_delegating_agent():
     assert spawns["analyst"]["parent"] == root_node and spawns["reviewer"]["parent"] == root_node, \
         {k: v["parent"] for k, v in spawns.items()}                       # fan-out from the orchestrator, not a chain
     assert spawns["analyst"]["task"] == "analyse" and spawns["reviewer"]["task"] == "review"
+
+
+def test_delegation_lifecycle_end_is_recorded_when_the_child_returns():
+    """`done` on the ledger when an AgentTool child returns to its caller (per-node truncation accounting downstream)."""
+    async def scenario():
+        calls: list = []
+        model = demo.ScriptedLlm(script={"orchestrator": [_fc("summarizer", request="q"), _text("done")], "summarizer": [_fc("crm_query", rows=4), _text("s")]})
+        summarizer = LlmAgent(name="summarizer", model=model, description="S", tools=[demo.make_crm_query(calls)])
+        orchestrator = LlmAgent(name="orchestrator", model=model, description="O", tools=[AgentTool(agent=summarizer)])
+        root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")
+        plugin = dg_adk.DelegationGuardPlugin(root_guard, root_agent_name="orchestrator", delegations={"summarizer": SUMMARIZER_REQUEST}, tools=demo.TOOL_AUTHORITIES)
+        app = App(name="dg-adk-done", root_agent=orchestrator, plugins=[plugin])
+        sessions = InMemorySessionService(); runner = Runner(app=app, session_service=sessions)
+        session = await sessions.create_session(app_name="dg-adk-done", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard, plugin
+    root_guard, plugin = asyncio.run(scenario())
+    dones = [e for e in root_guard.audit_log().entries if e.get("event") == "done"]
+    assert [e["agent"] for e in dones] == ["summarizer"] and plugin.guard_for("summarizer").is_complete

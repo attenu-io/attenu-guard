@@ -46,6 +46,7 @@ class Node:
     depth: int
     issued_at: float
     revoked: bool = False
+    complete: bool = False       # lifecycle end marker (Guard.complete()): informational, never widens or narrows authority
     children: list[str] = field(default_factory=list)
     seal: str = ""  # HMAC of the authority under the chain secret
 

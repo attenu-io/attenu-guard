@@ -11,8 +11,8 @@
     "ts": { "description": "Trusted timestamp (RFC 3339 string) or monotonic integer in tests." },
     "event": {
       "type": "string",
-      "enum": ["root", "spawn", "spawn_denied", "allow", "deny", "kill"],
-      "description": "root=chain start; spawn=delegation minted; allow/deny=action authorization; kill=cascade revocation."
+      "enum": ["root", "spawn", "spawn_denied", "allow", "deny", "kill", "done"],
+      "description": "root=chain start; spawn=delegation minted; allow/deny=action authorization; kill=cascade revocation; done=node lifecycle end (holder finished; informational)."
     },
     "chain_id": { "type": "string" },
     "node": { "type": "string", "description": "The node this event concerns." },

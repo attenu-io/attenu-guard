@@ -404,6 +404,13 @@ class CrewAIGuardBridge:
         pending = self._pending()
         denial = pending.denial
         pending.denial = None
+        tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
+        if denial is None and tool_name in self._delegation_tools:
+            args = getattr(ctx, "tool_input", None) or {}
+            coworker = _normalize_role(args.get("coworker") or args.get("co_worker") or args.get("agent") or "")
+            child = self.guard_for(coworker) if coworker else None
+            if child is not None:
+                child.complete()                  # the coworker returned: lifecycle end on the ledger (informational)
         if denial is None:
             return None
         if _sanitize_tool_name(getattr(ctx, "tool_name", "") or "") != denial.tool_name:
