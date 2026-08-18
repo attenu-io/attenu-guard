@@ -219,8 +219,10 @@ class Authority:
                 ReasonCode.SCOPE_NOT_GRANTED, requested=scope,
                 message=f"scope {scope!r} not covered by held scopes {sorted(self.scopes)}"))
 
+        # Reserved key so SCOPED ceilings (CallLimit(applies_to=...)) can tell whether they apply.
+        cctx = dict(ctx); cctx.setdefault("_scope", scope)
         for c in self.ceilings:
-            decision = c.permits(ctx)
+            decision = c.permits(cctx)
             if not decision:
                 reasons.extend(decision.reasons)
 

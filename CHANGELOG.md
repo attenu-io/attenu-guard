@@ -46,6 +46,13 @@ Driven by integration PoCs against twelve real agent frameworks
   and a test (`tests/integrations/`, 213 tests) using the framework's own mock
   model; CI matrix per framework. `docs/INTEGRATIONS.md` documents hooks,
   versions and what each framework enforces itself.
+- **Scoped call ceilings**: `CallLimit(max, applies_to=<scope|pattern>)` — its own
+  dimension (`max_calls[<scope>]`, ctx field `calls[<scope>]`), evaluated only for the
+  matching scope; `Authority.permits` passes the requested scope to ceilings as the
+  reserved `_scope` context key. **Auto-metering**: `Guard.check()` supplies `calls` /
+  `calls[<pattern>]` per (node, pattern) when the caller does not, incrementing on allow —
+  adapters need no counting logic; `would_allow()` reads the meter without consuming it.
+  Unscoped `CallLimit` wire form is unchanged.
 - `Ceiling.describe()` on all built-ins, `ceilings.describe()` helper,
   `Authority.describe()`; `ReasonCode` constants for the structural
   `AuthorityError` reasons (`CHAIN_REVOKED`, `AGENT_BANNED`, `TTL_EXPIRED`,

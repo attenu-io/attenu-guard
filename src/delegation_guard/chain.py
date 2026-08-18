@@ -62,6 +62,7 @@ class Chain:
         self._banned_agents: set[str] = set()    # grow-only: agent_ids no node may delegate to
         self._ids = itertools.count()
         self._consumed: dict[str, float] = {}     # aggregate counters
+        self._calls: dict[tuple, int] = {}        # (node_id, scope) -> calls so far (auto-metering for CallLimit)
         self._secret = os.urandom(32)             # per-chain integrity key
         self._lock = threading.RLock()            # mutations from parallel tool calls
 
@@ -189,6 +190,15 @@ class Chain:
                     reason="chain_ceiling",
                     detail={"key": key, "total": total, "ceiling": chain_ceiling})
             self._consumed[key] = total
+
+    def calls_so_far(self, node_id: str, scope: str) -> int:
+        return self._calls.get((node_id, scope), 0)
+
+    def count_call(self, node_id: str, scope: str) -> int:
+        with self._lock:
+            n = self._calls.get((node_id, scope), 0) + 1
+            self._calls[(node_id, scope)] = n
+            return n
 
     def graph(self) -> dict:
         return {

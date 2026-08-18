@@ -264,14 +264,41 @@ class Guard:
         self._append(event, **fields)
 
     # ---- enforcement ---------------------------------------------------
+    def _call_limits(self):
+        return [c for c in self._node.authority.ceilings if str(c.key).startswith("max_calls")]
+
+    def _auto_meter(self, scope: str, ctx: dict) -> list:
+        """Fill in `calls` / `calls[<pattern>]` for every held CallLimit the caller left
+        undeclared, reading the per-(node, pattern) meter. Returns the limits that were
+        auto-filled AND apply to this scope (to be counted on allow)."""
+        filled = []
+        for c in self._call_limits():
+            fld = getattr(c, "ctx_field", "calls")
+            if fld in ctx:
+                continue                                              # explicit count wins
+            applies = getattr(c, "applies_to_scope", lambda s: True)(scope)
+            ctx[fld] = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
+            if applies:
+                filled.append(c)
+        return filled
+
     def check(self, scope: str, *, context: Mapping | None = None,
               metered: bool = False, tool: str | None = None,
               rows=None, spend=None, egress=None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
+
+        Auto-metering: when this node holds a `CallLimit` and the caller did
+        not supply `calls`, the guard supplies the running count for
+        (node, scope) itself — including this call — and increments it on
+        allow. An explicit `calls` in the context always wins.
         """
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
+        filled = self._auto_meter(scope, ctx)
         decision = self._evaluate(scope, ctx, metered)
+        if decision:
+            for c in filled:
+                self._chain.count_call(self._node.node_id, getattr(c, "meter_key", "*"))
         self._log_decision(decision, scope, tool, ctx)
         return decision
 
@@ -291,6 +318,7 @@ class Guard:
         planners/UIs that want to ask "could I do this?" without leaving a
         record as though the action were actually attempted."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
+        self._auto_meter(scope, ctx)                                  # read the meters, never consume them
         return self._evaluate(scope, ctx, metered)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,

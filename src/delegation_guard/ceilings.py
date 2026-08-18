@@ -189,13 +189,43 @@ class SpendCap:
 
 @dataclass(frozen=True)
 class CallLimit:
-    """Per-call cap on a call count. ctx field: "calls"."""
+    """Cap on a call COUNT. ctx field: "calls" (the running count including this call).
+
+    `applies_to` (optional) makes the ceiling SCOPED: it only bites requests for that scope
+    (wildcards as in scopes: "fs.write", "web.*"). A scoped limit is its own dimension —
+    `key` becomes "max_calls[<applies_to>]" — so an unscoped and a scoped limit coexist in one
+    Authority and pair independently in meet/is_narrower_than.
+
+    Metering: `Guard.check()` supplies `calls` itself, per (node, scope), when the caller does
+    not — so adapters need no counting logic; an explicit `calls` in the context still wins.
+    `Authority.permits` passes the requested scope as ctx["_scope"] (reserved) so scoped
+    ceilings can tell whether they apply.
+    """
     max_calls: int
+    applies_to: str | None = None
     key: str = field(default="max_calls", init=False, repr=False)
     ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
 
+    def __post_init__(self):
+        if self.applies_to:
+            object.__setattr__(self, "key", f"max_calls[{self.applies_to}]")
+            object.__setattr__(self, "ctx_field", f"calls[{self.applies_to}]")   # own meter, coexists with unscoped `calls`
+
+    @property
+    def meter_key(self) -> str:
+        """What this ceiling counts: the pattern it applies to, or "*" (every call of the node)."""
+        return self.applies_to or "*"
+
+    def applies_to_scope(self, scope: str | None) -> bool:
+        if not self.applies_to or scope is None:
+            return True
+        held = self.applies_to
+        return held == scope or (held.endswith(".*") and str(scope).startswith(held[:-1]))
+
     def permits(self, ctx: Mapping) -> Decision:
-        n = ctx.get("calls")
+        if not self.applies_to_scope(ctx.get("_scope")):
+            return Decision.allow()
+        n = ctx.get(self.ctx_field)
         if n is None or n <= self.max_calls:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n))
@@ -204,17 +234,19 @@ class CallLimit:
         return f"{self.key}<={self.max_calls}"
 
     def narrow(self, other: "CallLimit") -> "CallLimit":
-        return CallLimit(min(self.max_calls, other.max_calls))
+        return CallLimit(min(self.max_calls, other.max_calls), self.applies_to)
 
     def subsumes(self, other: "CallLimit") -> bool:
         return self.max_calls >= other.max_calls
 
     def to_wire(self) -> dict:
-        return {"key": self.key, "max": self.max_calls}
+        if not self.applies_to:
+            return {"key": self.key, "max": self.max_calls}                       # unchanged v0.2 wire form
+        return {"key": self.key, "type": "max_calls", "max": self.max_calls, "applies_to": self.applies_to}
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "CallLimit":
-        return cls(d["max"])
+        return cls(d["max"], d.get("applies_to"))
 
 
 @dataclass(frozen=True)

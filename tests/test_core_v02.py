@@ -596,10 +596,11 @@ class TestStrictMeteringPartialContext(unittest.TestCase):
     def test_every_builtin_metered_ceiling_is_covered(self):
         # The CLASS of the bug: each metered (max_*) ceiling reads its own ctx
         # field. Omitting any one of them must be caught, not just rows.
+        # CallLimit is deliberately absent: the Guard AUTO-METERS call counts per (node, scope),
+        # so an omitted `calls` is not an undeclared quantity (see TestScopedCallLimit).
         cases = [
             (RowLimit(10), {"spend": 1, "calls": 1}, "max_rows"),
             (SpendCap(10.0), {"rows": 1, "calls": 1}, "max_spend"),
-            (CallLimit(10), {"rows": 1, "spend": 1}, "max_calls"),
         ]
         for ceiling, ctx, key in cases:
             with self.subTest(ceiling=ceiling):
@@ -896,6 +897,71 @@ class TestDescribeAndStructuralReasonCodes(unittest.TestCase):
         self.assertEqual(cm.exception.reason, ReasonCode.CHAIN_REVOKED)
         for name in ("CHAIN_REVOKED", "AGENT_BANNED", "TTL_EXPIRED", "MAX_DEPTH", "MAX_FANOUT", "CHAIN_CEILING"):
             self.assertIsInstance(getattr(ReasonCode, name), str)
+
+
+class TestScopedCallLimit(unittest.TestCase):
+    """attenu-derive T4: gold-v1 labels an orchestrator as `fs.write` with `CallLimit(5, applies_to="fs.write")`
+    — a per-SCOPE call ceiling. Two things must hold: the ceiling only bites the scope it applies to
+    (reads are unaffected), and it is enforceable WITHOUT every adapter learning to count — the Guard
+    meters calls per (node, scope) itself when the caller supplies no `calls`."""
+
+    def _writer(self):
+        root = Guard.issue("o", Authority({"fs.*", "agent.delegate.*"}, [RowLimit(10**6)], ttl=None))
+        return root.delegate("w", Authority({"fs.write", "fs.read"}, [CallLimit(5, applies_to="fs.write"), RowLimit(1000)], ttl=None), task="write report")
+
+    def test_sixth_write_is_denied_reads_unaffected_auto_metered(self):
+        w = self._writer()
+        for i in range(5):
+            self.assertTrue(w.check("fs.write", tool="write_file"), f"write {i+1} should be allowed")
+        d = w.check("fs.write", tool="write_file")
+        self.assertFalse(d, "the 6th write must be denied")
+        self.assertEqual(d.reasons[0].code, ReasonCode.CEILING_EXCEEDED)
+        self.assertIn("max_calls", d.reasons[0].constraint)
+        for _ in range(20):
+            self.assertTrue(w.check("fs.read", context={"rows": 5}, tool="read_file"))   # reads never counted against the write limit
+
+    def test_explicit_calls_context_still_wins(self):
+        # A scoped limit reads its OWN field, `calls[<applies_to>]`, so scoped and unscoped
+        # counts coexist; an explicit value there overrides the auto-meter.
+        w = self._writer()
+        self.assertFalse(w.check("fs.write", context={"calls[fs.write]": 6}))
+        self.assertTrue(w.check("fs.write", context={"calls[fs.write]": 1}))
+
+    def test_would_allow_does_not_consume_the_meter(self):
+        w = self._writer()
+        for _ in range(50):
+            self.assertTrue(w.would_allow("fs.write"))
+        for _ in range(5):
+            self.assertTrue(w.check("fs.write"))
+        self.assertFalse(w.check("fs.write"))
+
+    def test_scoped_and_unscoped_are_distinct_dimensions_and_meet_is_sound(self):
+        parent = Authority({"fs.*"}, [CallLimit(100)], ttl=None)                       # unscoped: any call
+        req = Authority({"fs.write"}, [CallLimit(5, applies_to="fs.write")], ttl=None)
+        child = parent.meet(req)
+        self.assertTrue(child.is_narrower_than(parent))
+        keys = sorted(c.key for c in child.ceilings)
+        self.assertEqual(keys, ["max_calls", "max_calls[fs.write]"])                  # both kept: distinct keys
+        wider = Authority({"fs.write"}, [CallLimit(500, applies_to="fs.write")], ttl=None)
+        self.assertFalse(wider.is_narrower_than(req))
+        self.assertTrue(req.is_narrower_than(wider))
+
+    def test_wire_round_trip_and_describe(self):
+        c = CallLimit(5, applies_to="fs.write")
+        w = c.to_wire()
+        self.assertEqual(w, {"key": "max_calls[fs.write]", "type": "max_calls", "max": 5, "applies_to": "fs.write"})
+        from delegation_guard.ceilings import ceiling_from_wire
+        back = ceiling_from_wire(w)
+        self.assertEqual(back, c)
+        self.assertEqual(c.describe(), "max_calls[fs.write]<=5")
+        a = Authority({"fs.write"}, [c], ttl=60)
+        self.assertEqual(Authority.from_wire(a.to_wire()), a)
+
+    def test_applies_to_supports_wildcards(self):
+        g = Guard.issue("o", Authority({"fs.*", "web.*"}, [CallLimit(2, applies_to="web.*")], ttl=None))
+        self.assertTrue(g.check("web.fetch")); self.assertTrue(g.check("web.search")); self.assertFalse(g.check("web.fetch"))
+        for _ in range(10):
+            self.assertTrue(g.check("fs.read"))
 
 
 class TestPublicExports(unittest.TestCase):
