@@ -30,13 +30,14 @@ from .ceilings import (
 from .authority import Authority, AuthorityError
 from .guard import Guard, AuthorityDenied
 from .audit import AuditLog
+from .strikes import StrikePolicy
 from . import wire, scenarios          # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
 
 __version__ = "0.2.0"
 __all__ = [
     "Authority", "Guard", "Decision", "Reason", "ReasonCode",
     "AuthorityError", "AuthorityDenied", "AuditLog",
-    "Ceiling", "RowLimit", "SpendCap", "CallLimit", "EgressRank",
+    "Ceiling", "RowLimit", "SpendCap", "CallLimit", "EgressRank", "StrikePolicy",
     "Allow", "Deny", "Prefix", "register_ceiling",
     "wire", "scenarios",
     "__version__",

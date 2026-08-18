@@ -74,18 +74,19 @@ class _SeqClock:
 
 class Guard:
     def __init__(self, node: Node, chain: Chain, audit: AuditLog, seq: _SeqClock,
-                 strict_metering: bool):
+                 strict_metering: bool, strikes=None):
         self._node = node
         self._chain = chain
         self._audit = audit
         self._seq = seq
         self._strict = strict_metering
+        self._strikes = strikes            # StrikePolicy | None (shared across the chain's Guards)
 
     # ---- factory ---------------------------------------------------------
     @classmethod
     def issue(cls, agent_id: str, authority: Authority, task: str = "root",
               *, chain_id: str = "chain", max_depth: int = 6, max_fanout: int = 16,
-              audit_path=None, clock=None, strict_metering: bool = False) -> "Guard":
+              audit_path=None, clock=None, strict_metering: bool = False, strikes=None) -> "Guard":
         chain = Chain(chain_id, max_depth=max_depth, max_fanout=max_fanout,
                       clock=clock or MonotonicClock())
         audit = AuditLog(audit_path)
@@ -93,7 +94,7 @@ class Guard:
         node = chain.add_root(agent_id, authority, task)
         audit.append("root", seq.now(), chain_id=chain_id, node=node.node_id,
                      agent=agent_id, authority=authority.to_wire())
-        return cls(node, chain, audit, seq, strict_metering)
+        return cls(node, chain, audit, seq, strict_metering, strikes)
 
     @classmethod
     def root(cls, *args, **kwargs) -> "Guard":
@@ -179,7 +180,7 @@ class Guard:
                            parent=self._node.node_id, node=child.node_id,
                            agent=agent_id, task=task, requested=request.to_wire(),
                            granted=child.authority.to_wire())
-        return Guard(child, self._chain, self._audit, self._seq, self._strict)
+        return Guard(child, self._chain, self._audit, self._seq, self._strict, self._strikes)
 
     def spawn(self, *args, **kwargs) -> "Guard":
         """Deprecated alias for `delegate` (v0.1 name)."""
@@ -316,6 +317,12 @@ class Guard:
             for c in filled:
                 self._chain.count_call(self._node.node_id, getattr(c, "meter_key", "*"))
         self._log_decision(decision, scope, tool, ctx)
+        if not decision and self._strikes is not None and self._strikes.enabled and not self._chain.is_revoked(self._node.node_id):
+            count = self._chain.record_strike(self._strikes.key(self._node.node_id, scope))
+            if count >= self._strikes.n:
+                revoked = self._chain.revoke(self._node.node_id)
+                self._append("kill", chain_id=self.chain_id, target=self._node.node_id,
+                             reason="strike_policy", scope=scope, strikes=count, mode=self._strikes.mode, revoked=revoked)
         return decision
 
     def enforce(self, scope: str, **kwargs) -> None:

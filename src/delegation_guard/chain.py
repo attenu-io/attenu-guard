@@ -64,6 +64,7 @@ class Chain:
         self._ids = itertools.count()
         self._consumed: dict[str, float] = {}     # aggregate counters
         self._calls: dict[tuple, int] = {}        # (node_id, scope) -> calls so far (auto-metering for CallLimit)
+        self._strikes: dict[tuple, int] = {}      # (node_id, scope|*) -> denials so far (strike policy)
         self._secret = os.urandom(32)             # per-chain integrity key
         self._lock = threading.RLock()            # mutations from parallel tool calls
 
@@ -199,6 +200,13 @@ class Chain:
         with self._lock:
             n = self._calls.get((node_id, scope), 0) + 1
             self._calls[(node_id, scope)] = n
+            return n
+
+    def record_strike(self, key: tuple) -> int:
+        """Count a denial for the strike policy; returns the running total for `key`."""
+        with self._lock:
+            n = self._strikes.get(key, 0) + 1
+            self._strikes[key] = n
             return n
 
     def graph(self) -> dict:

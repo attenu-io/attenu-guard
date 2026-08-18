@@ -30,6 +30,8 @@
     "spend": { "type": ["number", "null"] },
     "egress": { "type": ["string", "null"] },
     "revoked": { "type": "array", "items": { "type": "string" }, "description": "Node ids revoked by a kill." },
+    "strikes": { "type": "integer", "description": "Same-scope denial count that tripped the strike policy (kill with reason=strike_policy)." },
+    "mode": { "type": "string", "description": "Strike policy mode (same_scope|total) on a strike-policy kill." },
     "prev_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || canonical(event-without-hash))." }
   },

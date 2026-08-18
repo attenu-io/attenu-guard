@@ -999,3 +999,45 @@ def test_complete_records_a_done_event_once_and_leaves_authority_intact():
     assert child.check("fs.read").allowed                                # informational marker: authority itself is unchanged (revocation is the hard stop)
     ok, err = AuditLog.verify(root.audit_log().entries); assert ok, err
     assert not root.is_complete
+
+
+# ---- Strike policy (attenu-derive T26): revoke a node after N same-scope denials (Rafael: 3, configurable, on/off) ------
+def test_strike_policy_revokes_after_n_same_scope_denials():
+    from delegation_guard import Authority, Guard, StrikePolicy, ReasonCode
+    root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t",
+                       strikes=StrikePolicy(enabled=True, n=3, mode="same_scope"))
+    child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
+    # three denials of the SAME scope trips the strike -> node revoked (cascade)
+    for i in range(3):
+        d = child.check("fs.write", tool="write_file")
+        assert not d
+    assert child.is_revoked
+    # a previously-allowed scope is now denied too (the node is revoked)
+    dr = child.check("fs.read"); assert not dr and any(r.code == ReasonCode.REVOKED for r in dr.reasons)
+    strikes = [e for e in root.audit_log().entries if e.get("event") == "kill" and e.get("reason") == "strike_policy"]
+    assert strikes and strikes[-1]["scope"] == "fs.write" and strikes[-1]["strikes"] == 3
+
+
+def test_strike_policy_same_scope_does_not_trip_on_different_scopes():
+    from delegation_guard import Authority, Guard, StrikePolicy
+    root = Guard.issue("o", Authority({"fs.read"}, [], ttl=None), task="t", strikes=StrikePolicy(n=3, mode="same_scope"))
+    child = root.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
+    for scope in ("fs.write", "mail.send", "payments.transfer"):     # 3 denials, all DIFFERENT scopes
+        child.check(scope)
+    assert not child.is_revoked                                       # same_scope mode: no single scope hit 3
+    child.check("fs.write"); child.check("fs.write")                  # now fs.write reaches 3 total
+    assert child.is_revoked
+
+
+def test_strike_policy_total_mode_and_off():
+    from delegation_guard import Authority, Guard, StrikePolicy
+    root = Guard.issue("o", Authority({"fs.read"}, [], ttl=None), task="t", strikes=StrikePolicy(n=3, mode="total"))
+    child = root.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
+    for scope in ("fs.write", "mail.send", "payments.transfer"):      # 3 denials across ANY scope -> total mode trips
+        child.check(scope)
+    assert child.is_revoked
+    # off by default when no policy is passed: denials never revoke
+    root2 = Guard.issue("o", Authority({"fs.read"}, [], ttl=None), task="t")
+    c2 = root2.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
+    for _ in range(10): c2.check("fs.write")
+    assert not c2.is_revoked

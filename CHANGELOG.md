@@ -67,6 +67,10 @@ Driven by integration PoCs against twelve real agent frameworks
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
 
+- **`StrikePolicy` — revoke a node after repeated denials** (`Guard.issue(strikes=StrikePolicy(n=3, mode="same_scope"))`,
+  off by default). N denials of the same scope (or N total) cascade-revoke the offending node; one `kill` event with
+  `reason="strike_policy"`, `scope`, `strikes`, `mode` so the parent can see why. The policy propagates to every child
+  in the chain. A denied agent that keeps probing the same wall is stopped, not left to keep probing.
 - **`Guard.complete()` / `Guard.is_complete` — node lifecycle end** (`done` audit event, idempotent,
   informational: authority is unchanged, revocation stays the hard stop). The LangChain, Claude SDK,
   Google ADK and CrewAI adapters record it when a delegation returns to its caller, so a ledger reader
