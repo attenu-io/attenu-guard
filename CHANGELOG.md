@@ -11,6 +11,11 @@ Driven by integration PoCs against twelve real agent frameworks
 **unmodified** everywhere; what follows is what those integrations asked for.
 
 ### Fixed
+- **Google ADK adapter: parallel delegations were chained, not fanned out.** When one
+  model turn issued several `AgentTool` calls (ADK runs them concurrently), "parent =
+  the last active agent" minted child 2 from child 1. The delegating agent is now
+  recorded at the tool call and used as the parent when the child starts. Safe
+  direction before (authority only shrank), wrong topology. Found by sampling.
 - **Thread-safety under parallel tool calls.** Frameworks execute an agent's
   parallel tool calls on thread pools; concurrent `check()`s could interleave the
   audit hash-chain append (`verify()` then rejected the library's own log) and
@@ -60,6 +65,7 @@ Driven by integration PoCs against twelve real agent frameworks
   authorized-and-recorded on the audit log instead of denied. Deny stays the default
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
+
 - `Ceiling.describe()` on all built-ins, `ceilings.describe()` helper,
   `Authority.describe()`; `ReasonCode` constants for the structural
   `AuthorityError` reasons (`CHAIN_REVOKED`, `AGENT_BANNED`, `TTL_EXPIRED`,

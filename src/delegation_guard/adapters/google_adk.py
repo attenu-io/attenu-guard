@@ -185,6 +185,13 @@ class DelegationGuardPlugin(BasePlugin):
         # consumed by `_ensure_guard` when the child agent starts — so the
         # spawn record says what the child was asked, not just its name.
         self._pending_tasks: dict[str, str] = {}
+        # Who issued the pending hand-off. "Parent = the last active agent"
+        # is right for sequential control flow but wrong when one model turn
+        # issues several AgentTool calls and ADK runs them concurrently: the
+        # second child would be minted from the first (a chain, not a
+        # fan-out). The delegating agent is known at the tool call, so it is
+        # recorded here and consumed by `_ensure_guard`.
+        self._pending_parent: dict[str, str] = {}
 
         self._guards: dict[str, Guard] = {}
         self._current: Optional[str] = None
@@ -219,6 +226,7 @@ class DelegationGuardPlugin(BasePlugin):
 
         target = self._delegation_target(tool, tool_args)
         if target is not None:
+            self._pending_parent[target] = agent_name
             request = tool_args.get("request")
             if isinstance(request, str) and request:
                 self._pending_tasks[target] = request
@@ -268,7 +276,8 @@ class DelegationGuardPlugin(BasePlugin):
             self._guards[agent_name] = self._root
             return self._root
 
-        parent = self._guards.get(self._current or "", self._root)
+        issuer = self._pending_parent.pop(agent_name, None)
+        parent = self._guards.get(issuer or self._current or "", self._root)
         request = self._delegations.get(agent_name)
         if request is None and self._default_delegation is not None:
             request = self._default_delegation(agent_name)

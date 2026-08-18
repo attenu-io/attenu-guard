@@ -625,3 +625,54 @@ def test_observe_mode_hooks_record_undeclared_tools_and_agents():
     assert "summarizer" in plugin.guards
     handoff = [e for e in entries if e.get("event") in ("allow", "deny") and e.get("scope") == "agent.delegate.summarizer"]
     assert handoff and handoff[-1]["event"] == "allow"                       # the hand-off itself is recorded
+
+
+# ==========================================================================
+# 13. PARALLEL delegations: one model turn issues several AgentTool calls;
+#     ADK runs them concurrently. "Parent = the last active agent" then chains
+#     the children (child 2 minted from child 1) instead of fanning them out
+#     from the delegating agent. Found by attenu-derive sampling (fd, task 1:
+#     researcher <- security_reviewer <- test_analyst <- api_surveyor). Safe
+#     direction (authority only shrinks) but the wrong topology. The parent of
+#     an AgentTool / transfer target is the agent that ISSUED the call.
+# ==========================================================================
+def test_parallel_agent_tool_calls_fan_out_from_the_delegating_agent():
+    async def scenario():
+        calls: list = []
+        model = demo.ScriptedLlm(script={
+            "orchestrator": [types.Part.from_function_call(name="analyst", args={"request": "a"}), _text("done")],   # placeholder, replaced below
+        })
+        # one AssistantMessage with TWO function calls -> ADK dispatches them concurrently
+        class TwoCallsLlm(demo.ScriptedLlm):
+            async def generate_content_async(self, llm_request, stream=False):
+                labels = (llm_request.config.labels or {}) if llm_request.config else {}
+                agent = labels.get(demo._AGENT_LABEL)
+                if agent == "orchestrator" and not getattr(self, "_fired", False):
+                    self._fired = True
+                    yield demo.LlmResponse(content=types.Content(role="model", parts=[
+                        types.Part.from_function_call(name="analyst", args={"request": "analyse"}),
+                        types.Part.from_function_call(name="reviewer", args={"request": "review"})]))
+                    return
+                yield demo.LlmResponse(content=types.Content(role="model", parts=[_text(f"[{agent}] finished.")]))
+        model = TwoCallsLlm(script={})
+        analyst = LlmAgent(name="analyst", model=model, description="A", tools=[demo.make_crm_query(calls)])
+        reviewer = LlmAgent(name="reviewer", model=model, description="R", tools=[demo.make_crm_query(calls)])
+        orchestrator = LlmAgent(name="orchestrator", model=model, description="O",
+                                tools=[AgentTool(agent=analyst), AgentTool(agent=reviewer)])
+        root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")
+        plugin = dg_adk.DelegationGuardPlugin(
+            root_guard, root_agent_name="orchestrator",
+            delegations={"analyst": SUMMARIZER_REQUEST, "reviewer": SUMMARIZER_REQUEST}, tools=demo.TOOL_AUTHORITIES)
+        app = App(name="dg-adk-parallel", root_agent=orchestrator, plugins=[plugin])
+        sessions = InMemorySessionService(); runner = Runner(app=app, session_service=sessions)
+        session = await sessions.create_session(app_name="dg-adk-parallel", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard, plugin
+
+    root_guard, plugin = asyncio.run(scenario())
+    spawns = {e["agent"]: e for e in root_guard.audit_log().entries if e.get("event") == "spawn"}
+    assert set(spawns) == {"analyst", "reviewer"}
+    root_node = root_guard.node_id
+    assert spawns["analyst"]["parent"] == root_node and spawns["reviewer"]["parent"] == root_node, \
+        {k: v["parent"] for k, v in spawns.items()}                       # fan-out from the orchestrator, not a chain
+    assert spawns["analyst"]["task"] == "analyse" and spawns["reviewer"]["task"] == "review"
