@@ -171,6 +171,13 @@ class CrewAIGuardBridge:
             off for the rest of the run rather than left to keep probing.
         deny_message_fn: renders the message handed back to the model on a
             denial. Defaults to a machine-readable one-liner.
+        default_policy / default_delegation_authority: OBSERVE-MODE hooks for
+            sampling (attenu-derive) — called with the (sanitized) tool name /
+            (normalized) coworker role when no ToolPolicy / Authority was
+            declared, and their result is used as if it had been declared, so
+            every call is authorized-and-RECORDED on the audit log with the
+            generated scope/context instead of denied. Deny stays the default
+            without the hooks.
     """
 
     def __init__(
@@ -183,6 +190,8 @@ class CrewAIGuardBridge:
         revoke_on_deny: bool = False,
         deny_message_fn: Optional[Callable[[Denial], str]] = None,
         delegation_tools: frozenset = DELEGATION_TOOLS,
+        default_policy: Optional[Callable[[str], ToolPolicy]] = None,
+        default_delegation_authority: Optional[Callable[[str], Authority]] = None,
     ) -> None:
         self._root_role = _normalize_role(root_role)
         self._guards: dict[str, Guard] = {self._root_role: root_guard}
@@ -198,6 +207,8 @@ class CrewAIGuardBridge:
         )
         self._revoke_on_deny = revoke_on_deny
         self._deny_message_fn = deny_message_fn or _default_deny_message
+        self._default_policy = default_policy
+        self._default_delegation_authority = default_delegation_authority
         self._denials: list[Denial] = []
         self._lock = threading.Lock()
         self._local = threading.local()
@@ -280,6 +291,8 @@ class CrewAIGuardBridge:
             )
 
         policy = self._policies.get(tool_name)
+        if policy is None and self._default_policy is not None:
+            policy = self._default_policy(tool_name)
         if policy is None:
             self._deny(
                 role,
@@ -315,6 +328,8 @@ class CrewAIGuardBridge:
             self._deny(role, tool_name, args, "delegation names no coworker")
 
         requested = self._delegation_authorities.get(coworker)
+        if requested is None and self._default_delegation_authority is not None:
+            requested = self._default_delegation_authority(coworker)
         if requested is None:
             self._deny(
                 role,

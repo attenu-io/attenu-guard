@@ -705,3 +705,34 @@ def test_native_function_calling_path_is_guarded_too(effects, tools):
     assert "crm_export" not in effects.names()
     assert bridge.guard_for(SUMMARIZER) is not None
     assert [d.tool_name for d in bridge.denials] == ["crm_export"]
+
+
+# --------------------------------------------------------------------------
+# 10. OBSERVE-MODE hooks for sampling (attenu-derive P1 recorder): an
+#     undeclared tool / an undeclared coworker get a GENERATED ToolPolicy /
+#     Authority so every call is authorized-and-RECORDED on the audit log
+#     with the generated scope + context, instead of denied (the fail-closed
+#     default, which stays the default without the hooks — tests 6/7).
+# --------------------------------------------------------------------------
+def test_observe_mode_hooks_record_undeclared_tools_and_coworkers(effects, tools):
+    observe = Authority(scopes={"observe.*", "agent.delegate.*"}, ceilings=[], ttl=None)
+    root = Guard.issue(ORCHESTRATOR, observe, task="sample")
+    bridge = CrewAIGuardBridge(
+        root_guard=root, root_role=ORCHESTRATOR,
+        tool_policies={}, delegation_authorities={},                            # NOTHING declared...
+        default_policy=lambda name: ToolPolicy(f"observe.{name}", lambda a: {"rows_bucket": "1k-10k"}),
+        default_delegation_authority=lambda role: observe,                        # ...but observe hooks generate it
+    )
+    with bridge:
+        llm = _build_llm([_act("crm_query", '{"rows": 4200}'), _act("crm_export", '{"destination": "https://x/y"}'),
+                          "Thought: done.\nFinal Answer: summarized."])
+        _build_crew(llm, tools).kickoff()
+    assert ("crm_query", 4200) in effects.calls and any(n == "crm_export" for n, _ in effects.calls)   # RAN (observe, not deny)
+    assert bridge.denials == []
+    entries = root.audit_log().entries
+    allows = [e for e in entries if e.get("event") == "allow" and e.get("tool") in ("crm_query", "crm_export")]
+    assert {e["scope"] for e in allows} == {"observe.crm_query", "observe.crm_export"}
+    assert all(e.get("context", {}).get("rows_bucket") == "1k-10k" for e in allows)                # generated context lands on the record
+    spawns = [e for e in entries if e.get("event") == "spawn"]
+    assert spawns and spawns[-1]["agent"] == SUMMARIZER and "summarize Q3 pipeline" in spawns[-1]["task"]  # the delegated task text
+    assert bridge.guard_for(SUMMARIZER) is not None
