@@ -1041,3 +1041,42 @@ def test_strike_policy_total_mode_and_off():
     c2 = root2.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
     for _ in range(10): c2.check("fs.write")
     assert not c2.is_revoked
+
+
+# ---- Ledger anchoring (attenu-derive T27 / ADR-14): an external signed commitment to the chain head, so a fully -------
+# rewritten-and-re-hashed log is still detectable ------------------------------------------------------------------------
+def test_anchor_detects_a_consistently_rewritten_ledger():
+    import copy
+    from delegation_guard import Authority, Guard, AuditLog
+    from delegation_guard.audit import _hash, GENESIS
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"anchor-key", kid="anchor-1")
+    root = Guard.issue("orchestrator", Authority({"crm.*"}, [], ttl=None), task="quarterly review")
+    child = root.delegate("summarizer", Authority({"crm.read"}, [], ttl=None), task="summarize")
+    child.check("crm.read", context={"rows": 10}, tool="crm_query")
+    log = root.audit_log(); entries = log.entries
+    # the operator publishes an anchor to an external store
+    anchor = log.anchor(signer)
+    assert anchor["seq"] == len(entries) - 1 and anchor["head"] == entries[-1]["hash"] and anchor["chain_id"] == "chain"
+    ok, err = AuditLog.verify_anchor(entries, anchor, signer); assert ok, err
+    # attacker rewrites history: change a granted scope, then RE-HASH the whole chain so plain verify() passes
+    forged = copy.deepcopy(entries)
+    forged[1]["granted"] = {"scopes": ["crm.read", "crm.export", "mail.send"], "ceilings": [], "ttl": None}
+    prev = GENESIS
+    for e in forged:
+        e["prev_hash"] = prev; payload = {k: v for k, v in e.items() if k != "hash"}
+        e["hash"] = _hash(prev, payload); prev = e["hash"]
+    assert AuditLog.verify(forged)[0]                       # internal chain is self-consistent again...
+    ok2, err2 = AuditLog.verify_anchor(forged, anchor, signer)
+    assert not ok2 and "anchor" in err2.lower()             # ...but the signed anchor's head no longer matches -> caught
+
+
+def test_anchor_rejects_a_forged_signature():
+    from delegation_guard import Authority, Guard, AuditLog
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"real-key", kid="k1"); attacker = HS256TestSigner(secret=b"attacker-key", kid="k1")
+    root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
+    entries = root.audit_log().entries
+    anchor = root.audit_log().anchor(signer)
+    bad = dict(anchor, sig=attacker.sign(b"whatever").hex())
+    ok, err = AuditLog.verify_anchor(entries, bad, signer); assert not ok and "signature" in err.lower()

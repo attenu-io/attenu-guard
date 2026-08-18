@@ -67,6 +67,10 @@ Driven by integration PoCs against twelve real agent frameworks
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
 
+- **Ledger anchoring (`AuditLog.anchor` / `verify_anchor` / `head`, ADR-14).** A signed external commitment to
+  the chain head. `verify()` catches in-chain tampering; a consistent full rewrite (re-hash the whole log)
+  reproduces its own hashes and passes `verify()` — but not `verify_anchor()`, because the out-of-band signed
+  head hash is the fixed point it cannot reproduce. Uses the existing `wire` signers (Ed25519 in production).
 - **`StrikePolicy` — revoke a node after repeated denials** (`Guard.issue(strikes=StrikePolicy(n=3, mode="same_scope"))`,
   off by default). N denials of the same scope (or N total) cascade-revoke the offending node; one `kill` event with
   `reason="strike_policy"`, `scope`, `strikes`, `mode` so the parent can see why. The policy propagates to every child

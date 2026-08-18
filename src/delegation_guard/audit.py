@@ -93,6 +93,49 @@ class AuditLog:
         return len(self.entries)
 
     # ---- verification --------------------------------------------------
+    def head(self) -> tuple[int, str]:
+        """(seq, hash) of the last entry — the chain head. (-1, GENESIS) for an empty log."""
+        with self._lock:
+            if not self._entries:
+                return (-1, GENESIS)
+            last = self._entries[-1]
+            return (last["seq"], last["hash"])
+
+    def anchor(self, signer, ts: str | int = 0) -> dict:
+        """A signed external COMMITMENT to the chain head (ADR-14). Publish it out-of-band; a later
+        `verify_anchor` then catches a log that was fully rewritten and re-hashed — plain `verify` cannot,
+        because a consistent rewrite reproduces its own hashes. The signed head hash is the fixed point."""
+        seq, head = self.head()
+        body = {"v": SCHEMA_VERSION, "chain_id": self._chain_id_hint(), "seq": seq, "head": head, "ts": ts}
+        signing_input = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        return {**body, "kid": getattr(signer, "kid", None), "sig": signer.sign(signing_input).hex()}
+
+    def _chain_id_hint(self) -> str:
+        for e in self._entries:
+            if e.get("chain_id"):
+                return e["chain_id"]
+        return "chain"
+
+    @staticmethod
+    def verify_anchor(entries: list[dict], anchor: dict, signer) -> tuple[bool, str | None]:
+        """The chain reproduces AND its head matches a SIGNED anchor. Catches a consistent full rewrite."""
+        body = {k: anchor[k] for k in ("v", "chain_id", "seq", "head", "ts")}
+        signing_input = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        try:
+            sig = bytes.fromhex(anchor.get("sig", ""))
+        except ValueError:
+            return False, "anchor signature not hex"
+        if not signer.verify(signing_input, sig, anchor.get("kid")):
+            return False, "anchor signature invalid"
+        ok, err = AuditLog.verify(entries)
+        if not ok:
+            return False, err
+        if not entries:
+            return (anchor["seq"] == -1), None
+        if entries[-1]["hash"] != anchor["head"] or entries[-1]["seq"] != anchor["seq"]:
+            return False, "anchor head does not match the ledger head (ledger rewritten?)"
+        return True, None
+
     @staticmethod
     def verify(entries: list[dict]) -> tuple[bool, str | None]:
         """Recompute the chain. Returns (ok, first_bad_reason)."""
