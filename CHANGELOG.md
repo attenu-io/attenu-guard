@@ -67,6 +67,13 @@ Driven by integration PoCs against twelve real agent frameworks
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
 
+- **Offline evidence bundle + verifier (`delegation_guard.evidence`).** `export_bundle(audit_log, signer)`
+  produces a self-contained bundle (the hash-chained ledger + a signed anchor); `verify_bundle(bundle, signer)`
+  checks three invariants from the bundle ALONE, no engine: **integrity** (hash chain + anchor — a consistent
+  full rewrite fails), **monotonicity** (every delegation child ⊆ parent), **containment** (every allowed
+  action was within the acting node's authority). `delegation_graph(bundle)` renders the chain (nodes, agents,
+  authorities, action counts, edges) for a reviewer or UI. This is the offline-verifiable audit trail: an
+  auditor confirms the guarantees without trusting the engine that produced them.
 - **Ledger anchoring (`AuditLog.anchor` / `verify_anchor` / `head`, ADR-14).** A signed external commitment to
   the chain head. `verify()` catches in-chain tampering; a consistent full rewrite (re-hash the whole log)
   reproduces its own hashes and passes `verify()` — but not `verify_anchor()`, because the out-of-band signed

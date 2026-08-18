@@ -1080,3 +1080,85 @@ def test_anchor_rejects_a_forged_signature():
     anchor = root.audit_log().anchor(signer)
     bad = dict(anchor, sig=attacker.sign(b"whatever").hex())
     ok, err = AuditLog.verify_anchor(entries, bad, signer); assert not ok and "signature" in err.lower()
+
+
+# ---- Offline evidence bundle + verifier (attenu-derive T33a): an auditor verifies, from the bundle ALONE with no --------
+# access to the engine, that (1) every action was within the acting node's authority, (2) the chain was monotonic at
+# every hop, (3) the ledger is untampered against its anchor. -----------------------------------------------------------
+def _evidence_chain():
+    from delegation_guard import Authority, Guard, RowLimit, EgressRank
+    root = Guard.issue("orchestrator", Authority({"crm.read", "crm.write", "agent.delegate.summarizer"}, [RowLimit(100_000), EgressRank("any")], ttl=None), task="review")
+    child = root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(5_000), EgressRank("none")], ttl=None), task="summarize")
+    child.check("crm.read", context={"rows": 10}, tool="crm_query")           # allowed
+    child.check("crm.export", tool="crm_export")                              # denied (not granted)
+    child.complete()
+    return root
+
+
+def test_evidence_bundle_verifies_offline():
+    from delegation_guard import evidence
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"anchor", kid="k1")
+    root = _evidence_chain()
+    bundle = evidence.export_bundle(root.audit_log(), signer)
+    assert bundle["chain_id"] == "chain" and bundle["entries"] and bundle["anchor"]["verified"] is not None
+    rep = evidence.verify_bundle(bundle, signer)
+    assert rep["ok"] is True
+    assert rep["checks"] == {"integrity": True, "monotonicity": True, "containment": True}
+    assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
+
+
+def test_altered_bundle_fails_each_check_independently():
+    import copy, json
+    from delegation_guard import evidence
+    from delegation_guard.audit import _hash, GENESIS
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"anchor", kid="k1")
+    root = _evidence_chain()
+    good = evidence.export_bundle(root.audit_log(), signer)
+
+    # (1) INTEGRITY: flip one field without re-hashing -> hash chain breaks
+    b1 = copy.deepcopy(good); b1["entries"][2]["scope"] = "crm.export"
+    r1 = evidence.verify_bundle(b1, signer); assert r1["ok"] is False and r1["checks"]["integrity"] is False
+
+    # (1b) INTEGRITY vs ANCHOR: consistent full rewrite (re-hash the chain) passes hash-chain but not the anchor
+    b1b = copy.deepcopy(good); b1b["entries"][1]["granted"]["scopes"] = ["crm.read", "crm.export"]
+    prev = GENESIS
+    for e in b1b["entries"]:
+        e["prev_hash"] = prev; payload = {k: v for k, v in e.items() if k != "hash"}; e["hash"] = _hash(prev, payload); prev = e["hash"]
+    r1b = evidence.verify_bundle(b1b, signer); assert r1b["ok"] is False and r1b["checks"]["integrity"] is False
+
+    # (2) MONOTONICITY: widen a child's granted authority beyond its parent, and re-anchor honestly (attacker holds the log
+    #     but NOT the parent's true authority) -> monotonicity fails even though integrity passes against the new anchor
+    b2 = copy.deepcopy(good)
+    for e in b2["entries"]:
+        if e.get("event") == "spawn":
+            e["granted"]["scopes"] = sorted(set(e["granted"]["scopes"]) | {"mail.send"})   # child now claims a scope the parent never had
+    prev = GENESIS
+    for e in b2["entries"]:
+        e["prev_hash"] = prev; payload = {k: v for k, v in e.items() if k != "hash"}; e["hash"] = _hash(prev, payload); prev = e["hash"]
+    b2["anchor"] = evidence._anchor_for(b2["entries"], signer)
+    r2 = evidence.verify_bundle(b2, signer)
+    assert r2["checks"]["integrity"] is True and r2["checks"]["monotonicity"] is False and r2["ok"] is False
+
+    # (3) CONTAINMENT: turn a recorded allow into a scope the node was never granted, re-anchor honestly
+    b3 = copy.deepcopy(good)
+    for e in b3["entries"]:
+        if e.get("event") == "allow":
+            e["scope"] = "mail.send"                          # an action outside the summarizer's {crm.read}
+    prev = GENESIS
+    for e in b3["entries"]:
+        e["prev_hash"] = prev; payload = {k: v for k, v in e.items() if k != "hash"}; e["hash"] = _hash(prev, payload); prev = e["hash"]
+    b3["anchor"] = evidence._anchor_for(b3["entries"], signer)
+    r3 = evidence.verify_bundle(b3, signer)
+    assert r3["checks"]["integrity"] is True and r3["checks"]["containment"] is False and r3["ok"] is False
+
+
+def test_delegation_graph_view_from_the_bundle():
+    from delegation_guard import evidence
+    from delegation_guard.wire import HS256TestSigner
+    root = _evidence_chain()
+    g = evidence.delegation_graph(evidence.export_bundle(root.audit_log(), HS256TestSigner(secret=b"k", kid="k")))
+    assert g["edges"] == [{"parent": root.node_id, "child": next(n for n in g["nodes"] if g["nodes"][n]["agent"] == "summarizer")}]
+    summ = next(v for v in g["nodes"].values() if v["agent"] == "summarizer")
+    assert summ["scopes"] == ["crm.read"] and summ["allows"] == 1 and summ["denies"] == 1 and summ["complete"] is True

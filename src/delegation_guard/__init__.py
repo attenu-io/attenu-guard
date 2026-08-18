@@ -31,7 +31,7 @@ from .authority import Authority, AuthorityError
 from .guard import Guard, AuthorityDenied
 from .audit import AuditLog
 from .strikes import StrikePolicy
-from . import wire, scenarios          # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
+from . import wire, scenarios, evidence          # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
 
 __version__ = "0.2.0"
 __all__ = [
