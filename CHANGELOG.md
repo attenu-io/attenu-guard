@@ -53,6 +53,13 @@ Driven by integration PoCs against twelve real agent frameworks
   `calls[<pattern>]` per (node, pattern) when the caller does not, incrementing on allow —
   adapters need no counting logic; `would_allow()` reads the meter without consuming it.
   Unscoped `CallLimit` wire form is unchanged.
+- **Observe-mode hooks on the LangChain and Google ADK adapters** (sampling):
+  `GuardedDelegation(default_policy=, default_subagent_authority=)` and
+  `DelegationGuardPlugin(default_tool_authority=, default_delegation=)` generate the
+  policy / Authority for an undeclared tool / sub-agent so the call is
+  authorized-and-recorded on the audit log instead of denied. Deny stays the default
+  without the hooks. The ADK plugin now records the `AgentTool` `request` as the
+  child's task text on the spawn record (was `"delegated to <name>"`).
 - `Ceiling.describe()` on all built-ins, `ceilings.describe()` helper,
   `Authority.describe()`; `ReasonCode` constants for the structural
   `AuthorityError` reasons (`CHAIN_REVOKED`, `AGENT_BANNED`, `TTL_EXPIRED`,

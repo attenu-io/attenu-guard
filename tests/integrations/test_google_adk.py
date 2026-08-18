@@ -575,3 +575,53 @@ def test_delegation_scope_allows_a_granted_handoff():
     events, calls = asyncio.run(scenario())
     assert any(e.author == "summarizer" for e in events)
     assert ("crm_query", 10) in calls
+
+
+# ==========================================================================
+# 12. OBSERVE-MODE hooks for sampling (attenu-derive P1 recorder): an undeclared
+#     tool / an undeclared sub-agent get a GENERATED ToolAuthority / Authority so
+#     every call is authorized-and-RECORDED on the audit log with the generated
+#     scope + context, instead of denied (the fail-closed default). Deny stays
+#     the default without the hooks (test 6). The AgentTool `request` becomes
+#     the child's task text on the spawn record (it was "delegated to <name>").
+# ==========================================================================
+def test_observe_mode_hooks_record_undeclared_tools_and_agents():
+    from delegation_guard.adapters.google_adk import ToolAuthority
+
+    async def scenario():
+        calls: list = []
+        model = demo.ScriptedLlm(script={
+            "orchestrator": [_fc("summarizer", request="summarize the Q3 pipeline"), _text("done")],
+            "summarizer": [_fc("crm_query", rows=42), _text("summary")],
+        })
+        summarizer = LlmAgent(name="summarizer", model=model, description="Summarizes.",
+                              tools=[demo.make_crm_query(calls)])
+        orchestrator = LlmAgent(name="orchestrator", model=model, description="Routes.",
+                                tools=[AgentTool(agent=summarizer)])
+        observe = Authority(scopes={"observe.*", "agent.delegate.*"}, ceilings=[], ttl=None)
+        root_guard = Guard.issue("orchestrator", observe, task="sample")
+        plugin = dg_adk.DelegationGuardPlugin(
+            root_guard, root_agent_name="orchestrator",
+            delegations={}, tools={},                                    # NOTHING declared...
+            default_tool_authority=lambda name: ToolAuthority(f"observe.{name}", lambda a: {"rows_bucket": "10-100"}),
+            default_delegation=lambda name: observe,                     # ...but observe hooks generate it
+            delegation_scope="agent.delegate",
+        )
+        app = App(name="dg-adk-observe", root_agent=orchestrator, plugins=[plugin])
+        sessions = InMemorySessionService()
+        runner = Runner(app=app, session_service=sessions)
+        session = await sessions.create_session(app_name="dg-adk-observe", user_id="u")
+        events = await _drive(runner, session, "go")
+        return events, root_guard, plugin, calls
+
+    events, root_guard, plugin, calls = asyncio.run(scenario())
+    assert ("crm_query", 42) in calls                                        # the undeclared tool RAN (observe, not deny)
+    entries = root_guard.audit_log().entries
+    checks = [e for e in entries if e.get("event") in ("allow", "deny") and e.get("tool") == "crm_query"]
+    assert checks and checks[-1]["scope"] == "observe.crm_query" and checks[-1]["event"] == "allow"
+    assert checks[-1].get("context", {}).get("rows_bucket") == "10-100"      # generated context lands on the record
+    spawns = [e for e in entries if e.get("event") == "spawn"]
+    assert spawns and spawns[-1]["task"] == "summarize the Q3 pipeline"      # the AgentTool request is the child's task text
+    assert "summarizer" in plugin.guards
+    handoff = [e for e in entries if e.get("event") in ("allow", "deny") and e.get("scope") == "agent.delegate.summarizer"]
+    assert handoff and handoff[-1]["event"] == "allow"                       # the hand-off itself is recorded

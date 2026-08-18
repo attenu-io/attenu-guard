@@ -131,6 +131,8 @@ class DelegationGuardPlugin(BasePlugin):
         delegation_scope: Optional[str] = None,
         raise_on_deny: bool = False,
         name: str = "delegation_guard",
+        default_tool_authority: Optional[Callable[[str], ToolAuthority]] = None,
+        default_delegation: Optional[Callable[[str], Authority]] = None,
     ):
         """
         root_guard:       the Guard you issued for the root agent. You keep it —
@@ -161,6 +163,14 @@ class DelegationGuardPlugin(BasePlugin):
                           hand-off and rely on attenuation alone.
         raise_on_deny:    raise `AuthorityDenied` instead of returning a denial
                           dict to the model.
+        default_tool_authority / default_delegation — OBSERVE-MODE hooks for
+                          sampling (attenu-derive): called with the tool name /
+                          agent name when no ToolAuthority / Authority was
+                          declared, and their result is used as if it had been
+                          declared — so every call is authorized-and-RECORDED
+                          on the audit log with the generated scope/context,
+                          instead of denied (the fail-closed default, which
+                          stays the default without the hooks).
         """
         super().__init__(name=name)
         self._root = root_guard
@@ -169,6 +179,12 @@ class DelegationGuardPlugin(BasePlugin):
         self._exempt = set(exempt_tools) | {TRANSFER_TOOL_NAME}
         self._delegation_scope = delegation_scope
         self._raise = raise_on_deny
+        self._default_tool_authority = default_tool_authority
+        self._default_delegation = default_delegation
+        # The task text a pending hand-off carries (the AgentTool `request`),
+        # consumed by `_ensure_guard` when the child agent starts — so the
+        # spawn record says what the child was asked, not just its name.
+        self._pending_tasks: dict[str, str] = {}
 
         self._guards: dict[str, Guard] = {}
         self._current: Optional[str] = None
@@ -203,6 +219,9 @@ class DelegationGuardPlugin(BasePlugin):
 
         target = self._delegation_target(tool, tool_args)
         if target is not None:
+            request = tool_args.get("request")
+            if isinstance(request, str) and request:
+                self._pending_tasks[target] = request
             if self._delegation_scope is None:
                 return None
             return self._authorize(
@@ -214,6 +233,8 @@ class DelegationGuardPlugin(BasePlugin):
             return None
 
         declared = self._tools.get(tool.name or "")
+        if declared is None and self._default_tool_authority is not None:
+            declared = self._default_tool_authority(tool.name or "<unnamed>")
         scope = declared.scope if declared else (tool.name or "<unnamed>")
         context: Mapping[str, Any] = {}
         if declared is not None and declared.context is not None:
@@ -248,8 +269,13 @@ class DelegationGuardPlugin(BasePlugin):
             return self._root
 
         parent = self._guards.get(self._current or "", self._root)
-        request = self._delegations.get(agent_name, Authority())
-        child = parent.delegate(agent_name, request, task=f"delegated to {agent_name}")
+        request = self._delegations.get(agent_name)
+        if request is None and self._default_delegation is not None:
+            request = self._default_delegation(agent_name)
+        if request is None:
+            request = Authority()
+        task = self._pending_tasks.pop(agent_name, None) or f"delegated to {agent_name}"
+        child = parent.delegate(agent_name, request, task=task)
         self._guards[agent_name] = child
         return child
 
