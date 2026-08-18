@@ -171,7 +171,18 @@ class GuardedDelegation:
         task_arg: str = "description",
         on_deny: str = "tool_error",
         allow_unlisted: bool = False,
+        default_policy: Optional[Callable[[str], ToolPolicy]] = None,
+        default_subagent_authority: Optional[Callable[[str], Authority]] = None,
     ) -> None:
+        """
+        default_policy / default_subagent_authority — OBSERVE-MODE hooks for
+        sampling (attenu-derive): called with the tool name / sub-agent name
+        when no policy / Authority was declared, and their result is used as if
+        it had been declared — so every call is authorized-and-RECORDED on the
+        audit log with the generated scope/context, instead of denied
+        (the fail-closed default) or silently passed through (`allow_unlisted`).
+        `default_policy` takes precedence over `allow_unlisted`.
+        """
         if on_deny not in ("tool_error", "raise"):
             raise ValueError("on_deny must be 'tool_error' or 'raise'")
         self.root = root
@@ -182,6 +193,8 @@ class GuardedDelegation:
         self.task_arg = task_arg
         self.on_deny = on_deny
         self.allow_unlisted = allow_unlisted
+        self.default_policy = default_policy
+        self.default_subagent_authority = default_subagent_authority
         self.children: MutableMapping[str, Guard] = {}
         self._middleware = None
 
@@ -259,10 +272,12 @@ class GuardedDelegation:
         args = call.get("args") or {}
         guard = self.active_guard()
 
-        if name == self.delegation_tool and self.subagents:
+        if name == self.delegation_tool and (self.subagents or self.default_subagent_authority):
             return self._gate_delegation(request, guard, args)
 
         policy = self.tools.get(name)
+        if policy is None and self.default_policy is not None:
+            policy = self.default_policy(name)
         if policy is None:
             if self.allow_unlisted:
                 return self._Gate()
@@ -284,6 +299,8 @@ class GuardedDelegation:
     def _gate_delegation(self, request, guard: Guard, args: Mapping[str, Any]) -> "GuardedDelegation._Gate":
         subagent = args.get(self.subagent_arg)
         requested = self.subagents.get(subagent)
+        if requested is None and self.default_subagent_authority is not None and subagent is not None:
+            requested = self.default_subagent_authority(str(subagent))
         if requested is None:
             return self._Gate(denial=self._deny(request, Decision.deny(
                 Reason("delegation_refused", constraint=self.subagent_arg,

@@ -425,3 +425,67 @@ def test_async_toolnode_blocks_export_before_the_tool_body(side_effects):
     denial = next(m for m in out["messages"]
                   if isinstance(m, ToolMessage) and m.status == "error")
     assert "scope_not_granted" in denial.content
+
+
+# ==========================================================================
+# 5. Observe mode for SAMPLING (attenu-derive P1): unlisted tools and undeclared
+#    sub-agents get a GENERATED policy/authority so every call is authorized-and-
+#    RECORDED through the guard instead of denied (fail-closed default) or silently
+#    passed through (`allow_unlisted=True`). Deny stays the default when neither
+#    hook is given.
+# ==========================================================================
+def test_default_policy_records_unlisted_tools_instead_of_denying(side_effects):
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root = Guard.issue("recorder", Authority({"observe.*"}, [], ttl=None), task="sample")
+    seen = []
+    def observe(name):
+        seen.append(name)
+        return ToolPolicy(f"observe.{name}", lambda args: {"arg_keys": sorted(args)})
+    guarded = GuardedDelegation(root, tools={}, default_policy=observe)
+
+    model = ScriptedToolModel(responses=[
+        _call("send_mail", {"to": "x@example.com"}, "c1"),
+        _call("crm_query", {"rows": 7}, "c2"),
+        AIMessage(content="done"),
+    ])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    assert side_effects == [("send_mail", "x@example.com"), ("crm_query", 7)]   # ran (allowed)
+    assert seen == ["send_mail", "crm_query"]                                    # generated per tool
+    allows = [e for e in root.audit_log() if e["event"] == "allow"]
+    assert [(e["tool"], e["scope"], e["context"]) for e in allows] == [
+        ("send_mail", "observe.send_mail", {"arg_keys": ["to"]}),
+        ("crm_query", "observe.crm_query", {"arg_keys": ["rows"]}),
+    ]                                                                            # RECORDED, with the policy's context
+    ok, _ = AuditLog.verify(root.audit_log().entries)
+    assert ok
+
+
+def test_default_subagent_authority_mints_children_for_undeclared_subagents(side_effects):
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root = Guard.issue("recorder", Authority({"observe.*"}, [], ttl=None), task="sample")
+    guarded = GuardedDelegation(
+        root, tools={}, subagents={},
+        default_policy=lambda name: ToolPolicy(f"observe.{name}"),
+        default_subagent_authority=lambda name: Authority({"observe.*"}, [], ttl=None),
+    )
+    # A `task` call for a sub-agent nobody declared: observe mode delegates anyway.
+    from types import SimpleNamespace
+    req = SimpleNamespace(tool_call={"name": "task", "args": {"subagent_type": "researcher",
+                                                                "description": "look things up"}})
+    gate = guarded._gate(req)
+    assert gate.denial is None and gate.child is not None
+    assert gate.child.agent_id == "researcher" and gate.child.is_narrower_than(root)
+    spawn = [e for e in root.audit_log() if e["event"] == "spawn"][-1]
+    assert spawn["agent"] == "researcher" and spawn["task"] == "look things up"
+
+
+def test_without_the_hooks_unlisted_still_fails_closed(side_effects):
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain()
+    guarded = GuardedDelegation(summarizer, tools={})
+    model = ScriptedToolModel(responses=[_call("send_mail", {"to": "a@b"}, "c1"), AIMessage(content="x")])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+    assert side_effects == []
