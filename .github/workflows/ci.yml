@@ -1,15 +1,24 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Quickstart canary every 6 hours (only the canary job runs on schedule):
+    # a clean-tree install + the README quickstart, so a broken front door is
+    # caught within hours, not on the next push.
+    - cron: '0 */6 * * *'
 jobs:
   stdlib-suite:
     # Everything that must pass with ZERO third-party deps (the safety core).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python: ["3.9", "3.11", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Property invariants (4k trials each, zero deps)
@@ -30,10 +39,11 @@ jobs:
         run: python examples/poisoned_summarizer.py
   optional-extras:
     # The hypothesis suite + optional-dependency paths (cryptography / yaml).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       - name: Install with all extras and run the hypothesis suite
         run: |
@@ -46,8 +56,8 @@ jobs:
     # and run the README quickstart verbatim, every push.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       - name: Install from a clean tree and run the README quickstart
         run: |
