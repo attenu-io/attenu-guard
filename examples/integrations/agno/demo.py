@@ -32,7 +32,7 @@ from agno.team import Team
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dg_agno import (  # noqa: E402
+from delegation_guard.adapters.agno import (  # noqa: E402
     Grant,
     GuardRegistry,
     ToolPolicy,

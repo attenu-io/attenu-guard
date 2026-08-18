@@ -23,6 +23,7 @@ import hmac
 import itertools
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -62,6 +63,7 @@ class Chain:
         self._ids = itertools.count()
         self._consumed: dict[str, float] = {}     # aggregate counters
         self._secret = os.urandom(32)             # per-chain integrity key
+        self._lock = threading.RLock()            # mutations from parallel tool calls
 
     # ---- integrity -----------------------------------------------------
     def _seal(self, authority: Authority) -> str:
@@ -119,6 +121,11 @@ class Chain:
 
     def add_child(self, parent_id: str, agent_id: str,
                   requested: Authority, task: str) -> Node:
+        with self._lock:
+            return self._add_child_locked(parent_id, agent_id, requested, task)
+
+    def _add_child_locked(self, parent_id: str, agent_id: str,
+                          requested: Authority, task: str) -> Node:
         parent = self.nodes[parent_id]
         err = self.delegation_error(parent_id, agent_id)
         if err is not None:
@@ -139,17 +146,18 @@ class Chain:
 
     # ---- revocation ----------------------------------------------------
     def revoke(self, node_id: str) -> list[str]:
-        revoked_now: list[str] = []
-        stack = [node_id]
-        while stack:
-            nid = stack.pop()
-            if nid in self._revoked:
-                continue
-            self._revoked.add(nid)
-            self.nodes[nid].revoked = True
-            revoked_now.append(nid)
-            stack.extend(self.nodes[nid].children)
-        return revoked_now
+        with self._lock:
+            revoked_now: list[str] = []
+            stack = [node_id]
+            while stack:
+                nid = stack.pop()
+                if nid in self._revoked:
+                    continue
+                self._revoked.add(nid)
+                self.nodes[nid].revoked = True
+                revoked_now.append(nid)
+                stack.extend(self.nodes[nid].children)
+            return revoked_now
 
     def is_revoked(self, node_id: str) -> bool:
         return node_id in self._revoked
@@ -160,25 +168,27 @@ class Chain:
         it again (grow-only, like `_revoked`). Closes the re-delegation
         bypass where a framework re-hands-off to a revoked agent and would
         otherwise mint it a fresh, clean child from a still-valid parent."""
-        self._banned_agents.add(agent_id)
-        revoked_now: list[str] = []
-        for nid, node in list(self.nodes.items()):
-            if node.agent_id == agent_id and nid not in self._revoked:
-                revoked_now.extend(self.revoke(nid))
-        return revoked_now
+        with self._lock:
+            self._banned_agents.add(agent_id)
+            revoked_now: list[str] = []
+            for nid, node in list(self.nodes.items()):
+                if node.agent_id == agent_id and nid not in self._revoked:
+                    revoked_now.extend(self.revoke(nid))
+            return revoked_now
 
     def is_banned(self, agent_id: str) -> bool:
         return agent_id in self._banned_agents
 
     # ---- aggregate budgets --------------------------------------------
     def consume(self, key: str, amount: float, chain_ceiling: float | None):
-        total = self._consumed.get(key, 0.0) + amount
-        if chain_ceiling is not None and total > chain_ceiling:
-            raise AuthorityError(
-                f"chain aggregate {key}={total} exceeds chain ceiling {chain_ceiling}",
-                reason="chain_ceiling",
-                detail={"key": key, "total": total, "ceiling": chain_ceiling})
-        self._consumed[key] = total
+        with self._lock:
+            total = self._consumed.get(key, 0.0) + amount
+            if chain_ceiling is not None and total > chain_ceiling:
+                raise AuthorityError(
+                    f"chain aggregate {key}={total} exceeds chain ceiling {chain_ceiling}",
+                    reason="chain_ceiling",
+                    detail={"key": key, "total": total, "ceiling": chain_ceiling})
+            self._consumed[key] = total
 
     def graph(self) -> dict:
         return {

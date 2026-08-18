@@ -32,7 +32,7 @@ from demo import (
     make_crm_export,
     make_crm_query,
 )
-from dg_google_adk import DelegationGuardPlugin
+from delegation_guard.adapters.google_adk import DelegationGuardPlugin
 
 MODEL = os.environ.get("DG_LIVE_MODEL", "gemini-2.5-flash")
 

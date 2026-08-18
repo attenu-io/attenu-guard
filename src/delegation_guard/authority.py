@@ -250,6 +250,14 @@ class Authority:
     to_dict = to_wire
     from_dict = from_wire
 
+    def describe(self) -> str:
+        """Stable, human-readable one-liner (sorted scopes, ceilings via
+        `ceilings.describe`). `repr`/`str` are unchanged."""
+        from .ceilings import describe as _describe   # local import: no cycle at load
+        scopes = ", ".join(sorted(self.scopes))
+        cs = ", ".join(sorted(_describe(c) for c in self.ceilings))
+        return f"scopes=[{scopes}] ceilings=[{cs}] ttl={self.ttl}"
+
     def __repr__(self) -> str:
         constraints = [c.to_wire() for c in self.ceilings]
         return f"Authority(scopes={sorted(self.scopes)}, ceilings={constraints}, ttl={self.ttl})"

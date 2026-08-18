@@ -47,25 +47,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_ADAPTER_PATH = _REPO_ROOT / "examples" / "integrations" / "crewai" / "dg_crewai.py"
-
-
-def _load_adapter():
-    """Load the adapter by file path.
-
-    Deliberately NOT `sys.path.insert(examples/integrations)`: that directory
-    contains a package directory literally named `crewai`, which would shadow
-    the real CrewAI install for the whole test session.
-    """
-    spec = importlib.util.spec_from_file_location("dg_crewai_adapter", _ADAPTER_PATH)
-    assert spec and spec.loader, f"adapter not found at {_ADAPTER_PATH}"
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-dg_crewai = _load_adapter()
+import delegation_guard.adapters.crewai as dg_crewai
 CrewAIGuardBridge = dg_crewai.CrewAIGuardBridge
 ToolPolicy = dg_crewai.ToolPolicy
 

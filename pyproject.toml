@@ -16,7 +16,23 @@ dependencies = []
 [project.optional-dependencies]
 crypto = ["cryptography>=41"]      # Ed25519 production signer for the wire format
 yaml = ["pyyaml>=6"]              # YAML scenario files (JSON works with no deps)
-langgraph = ["langgraph>=0.2"]   # the LangGraph adapter
+langgraph = ["langgraph>=0.2"]   # adapters.langgraph (node/tool-callable wrapper)
+# Framework adapters (delegation_guard.adapters.<name>). Floors = the versions the
+# integration tests were validated against (Aug 2026); the core stays zero-dependency —
+# an adapter module imports its framework only when YOU import that adapter.
+langchain = ["langgraph>=1.2", "langchain>=1.3", "langchain-core>=1.5"]   # adapters.langchain: ToolNode / create_agent / deepagents
+deepagents = ["deepagents>=0.7", "langgraph>=1.2", "langchain>=1.3"]
+openai-agents = ["openai-agents>=0.21"]
+google-adk = ["google-adk>=2.7"]
+pydantic-ai = ["pydantic-ai-slim>=2.31"]
+crewai = ["crewai>=1.15"]
+autogen = ["autogen-agentchat>=0.7", "autogen-ext>=0.7"]
+claude-agent-sdk = ["claude-agent-sdk>=0.2"]
+smolagents = ["smolagents>=1.26"]
+strands = ["strands-agents>=1.52"]
+llama-index = ["llama-index-core>=0.14"]
+semantic-kernel = ["semantic-kernel>=1.36"]
+agno = ["agno>=2.9"]
 test = ["pytest>=7", "hypothesis>=6"]
 all = ["cryptography>=41", "pyyaml>=6"]
 

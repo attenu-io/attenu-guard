@@ -1,4 +1,4 @@
-"""dg_langgraph.py — delegation-guard × LangGraph 1.x / LangChain 1.x / deepagents.
+"""delegation_guard.adapters.langchain — delegation-guard × LangGraph 1.x / LangChain 1.x / deepagents.
 
 A thin, paste-into-your-project adapter that enforces monotonic authority
 attenuation across a LangGraph agent's tool calls and sub-agent delegations.

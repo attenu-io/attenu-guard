@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import demo as offline  # noqa: E402  (reuses the tools, authorities and scope map)
-from dg_strands import DelegationGuard  # noqa: E402
+from delegation_guard.adapters.strands import DelegationGuard  # noqa: E402
 
 from delegation_guard import AuditLog, Guard  # noqa: E402
 

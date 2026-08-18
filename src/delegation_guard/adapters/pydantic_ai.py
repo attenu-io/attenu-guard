@@ -1,5 +1,5 @@
 """
-dg_pydantic_ai.py — a thin delegation-guard integration for Pydantic AI.
+delegation_guard.adapters.pydantic_ai — a thin delegation-guard integration for Pydantic AI.
 
 Tested against pydantic-ai-slim 2.31.1 (Python >= 3.10).
 

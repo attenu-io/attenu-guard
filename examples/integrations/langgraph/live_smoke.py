@@ -30,7 +30,7 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 from langchain_core.tools import tool
 
 from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
-from dg_langgraph import GuardedDelegation, ToolPolicy
+from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 EXECUTED: list[tuple] = []
 

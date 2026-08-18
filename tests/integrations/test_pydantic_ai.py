@@ -9,7 +9,7 @@ was delegated narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect flags the tool would have set).
 
 The test drives the SHIPPED example (`examples/integrations/pydantic_ai/demo.py`
-+ `dg_pydantic_ai.py`), so a green run also proves the example works.
++ `delegation_guard.adapters.pydantic_ai`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def _load(name: str):
     return mod
 
 
-dg_pai = _load("dg_pydantic_ai")
+import delegation_guard.adapters.pydantic_ai as dg_pai
 demo = _load("demo")
 
 

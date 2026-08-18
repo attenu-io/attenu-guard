@@ -36,7 +36,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
 from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
-from dg_langgraph import GuardedDelegation, ToolPolicy
+from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 BAR = "=" * 72
 EXECUTED: list[tuple] = []

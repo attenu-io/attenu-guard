@@ -10,7 +10,7 @@ was delegated narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect list the tool would have appended to).
 
 The test drives the SHIPPED example (`examples/integrations/google_adk/demo.py`
-+ `dg_google_adk.py`), so a green run also proves the example works.
++ `delegation_guard.adapters.google_adk`), so a green run also proves the example works.
 
 It additionally pins the ADK behaviour the integration exists to compensate for:
 `disallow_transfer_to_peers=True` does NOT stop a peer transfer on ADK 2.7.1's
@@ -68,7 +68,7 @@ def _load(name: str):
     return mod
 
 
-dg_adk = _load("dg_google_adk")
+import delegation_guard.adapters.google_adk as dg_adk
 demo = _load("demo")
 
 

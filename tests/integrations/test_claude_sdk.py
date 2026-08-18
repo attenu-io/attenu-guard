@@ -24,7 +24,7 @@ are the very `@tool`-decorated SDK MCP handlers that `live_smoke.py` registers
 with a real `query()`.
 
 The test drives the SHIPPED example (examples/integrations/claude_sdk/demo.py +
-dg_claude_sdk.py), so a green run also proves the example works.
+delegation_guard.adapters.claude_sdk), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def _load(name: str):
     return mod
 
 
-dg_cs = _load("dg_claude_sdk")
+import delegation_guard.adapters.claude_sdk as dg_cs
 demo = _load("demo")
 
 

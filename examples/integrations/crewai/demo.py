@@ -50,7 +50,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # `dg_crewai` sits next to this file, so plain import works.
-from dg_crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
+from delegation_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
 
 ORCHESTRATOR = "orchestrator"
 SUMMARIZER = "summarizer"

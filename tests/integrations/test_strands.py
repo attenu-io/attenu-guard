@@ -14,7 +14,7 @@ written to). Both of Strands' delegation primitives are covered:
   * `strands.multiagent.Swarm` (`handoff_to_agent`)
 
 The test drives the SHIPPED example (`examples/integrations/strands/demo.py` +
-`dg_strands.py`), so a green run also proves the example works.
+`delegation_guard.adapters.strands`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def _load(module_name: str, filename: str):
     return mod
 
 
-dg_strands = _load("dg_strands", "dg_strands.py")
+import delegation_guard.adapters.strands as dg_strands
 demo = _load("dg_strands_demo", "demo.py")
 
 

@@ -10,7 +10,7 @@ was handed off narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect list the tool body would have appended to).
 
 The test drives the SHIPPED example (`examples/integrations/llama_index/demo.py`
-+ `dg_llama_index.py`), so a green run also proves the example works.
++ `delegation_guard.adapters.llama_index`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def _load(name: str):
     return mod
 
 
-dg_li = _load("dg_llama_index")
+import delegation_guard.adapters.llama_index as dg_li
 demo = _load("demo")
 
 

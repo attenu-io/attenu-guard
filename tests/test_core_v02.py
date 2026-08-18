@@ -794,6 +794,110 @@ class TestPrincipalRevocationAndDelegationDryRun(unittest.TestCase):
         self.assertEqual(a.would_delegate("c", Authority({"x"}, [], ttl=10)).reasons[0].code, "max_depth")
 
 
+class TestThreadSafetyUnderParallelToolCalls(unittest.TestCase):
+    """Several frameworks execute an agent's parallel tool calls on a thread
+    pool (smolagents `process_tool_calls`, ADK's `asyncio.gather` under a
+    threaded executor). Every `check()` appends to ONE hash-chained audit log
+    and bumps ONE sequence counter, so unsynchronised appends can interleave
+    `prev_hash` reads and writes — producing a log that `verify()` rejects,
+    i.e. a tamper alarm caused by the library itself, or a lost/duplicated
+    seq. The invariant: N concurrent checks yield exactly N verifiable,
+    strictly-sequenced entries."""
+
+    def _hammer(self, fn, threads=16, per_thread=200):
+        import threading
+        errors = []
+        # Force very frequent thread switches so the (tiny) critical sections
+        # in AuditLog.append / _SeqClock.now actually interleave; with the
+        # default 5 ms interval the race exists but almost never fires here.
+        prev_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        self.addCleanup(sys.setswitchinterval, prev_interval)
+        def worker():
+            try:
+                for _ in range(per_thread):
+                    fn()
+            except Exception as e:                       # pragma: no cover
+                errors.append(e)
+        ts = [threading.Thread(target=worker) for _ in range(threads)]
+        for t in ts: t.start()
+        for t in ts: t.join()
+        self.assertEqual(errors, [])
+        return threads * per_thread
+
+    def test_concurrent_checks_keep_the_audit_chain_verifiable_and_complete(self):
+        root = Guard.issue("o", Authority({"crm.read"}, [RowLimit(10)], ttl=10**6))
+        child = root.delegate("c", Authority({"crm.read"}, [RowLimit(10)], ttl=10**6), task="t")
+        base = len(root.audit_log())
+        n = self._hammer(lambda: child.check("crm.read", context={"rows": 1}, tool="t"))
+        entries = root.audit_log().entries
+        self.assertEqual(len(entries), base + n, "lost or duplicated audit entries")
+        ok, err = AuditLog.verify(entries)
+        self.assertTrue(ok, f"audit chain broken by concurrent appends: {err}")
+        seqs = [e["seq"] for e in entries]
+        self.assertEqual(seqs, list(range(len(entries))), "seq must be dense and ordered")
+        tss = [e["ts"] for e in entries]
+        self.assertEqual(len(set(tss)), len(tss), "audit ts (seq clock) must be unique")
+        self.assertEqual(tss, sorted(tss), "ts must advance with seq (no out-of-order logging)")
+
+    def test_concurrent_delegate_and_revoke_do_not_corrupt_the_chain(self):
+        root = Guard.issue("o", Authority({"x"}, [], ttl=10**6), max_fanout=10**6)
+        counter = {"i": 0}
+        import threading
+        lock = threading.Lock()
+        def op():
+            with lock:
+                counter["i"] += 1; i = counter["i"]
+            g = root.delegate(f"a{i}", Authority({"x"}, [], ttl=10**6), task="t")
+            g.check("x")
+            if i % 3 == 0:
+                root.revoke(g.node_id)
+        n = self._hammer(op, threads=8, per_thread=50)
+        nodes = root.graph()["nodes"]
+        self.assertEqual(len(nodes), 1 + n)
+        ok, err = AuditLog.verify(root.audit_log().entries)
+        self.assertTrue(ok, err)
+
+
+class TestDescribeAndStructuralReasonCodes(unittest.TestCase):
+    """Two ergonomics asks from the integration PoCs: a uniform, human-readable
+    rendering of ceilings/authorities (every adapter demo re-invented one), and
+    constants for the STRUCTURAL failure reasons `AuthorityError` carries so
+    adapters can map them without a hand-written lookup table."""
+
+    def test_builtin_ceilings_describe_themselves(self):
+        from delegation_guard.ceilings import describe
+        self.assertEqual(RowLimit(5000).describe(), "max_rows<=5000")
+        self.assertEqual(SpendCap(2.5).describe(), "max_spend<=2.5")
+        self.assertEqual(CallLimit(3).describe(), "max_calls<=3")
+        self.assertEqual(EgressRank("none").describe(), "egress<=none")
+        self.assertEqual(Allow("region", {"eu", "us"}).describe(), "region in [eu, us]")
+        self.assertEqual(Deny("region", {"cn"}).describe(), "region not in [cn]")
+        self.assertEqual(Prefix("path", "/data/").describe(), "path startswith /data/")
+        # module-level helper works for custom ceilings without describe()
+        d = describe(_WidgetLimit(5))
+        self.assertTrue(d.startswith("max_widgets=") and "'max': 5" in d, d)   # falls back to key=<wire form>
+
+    def test_authority_describe_is_stable_and_readable(self):
+        a = Authority({"crm.read", "crm.*"}, [RowLimit(5000), EgressRank("none")], ttl=900)
+        self.assertEqual(a.describe(), "scopes=[crm.*, crm.read] ceilings=[egress<=none, max_rows<=5000] ttl=900")
+        # repr/str are unchanged (docs, GIF and wire rely on them)
+        self.assertTrue(repr(a).startswith("Authority("))
+
+    def test_structural_reason_constants_match_authorityerror_reasons(self):
+        root = Guard.issue("o", Authority({"x"}, [], ttl=100), max_depth=1)
+        a = root.delegate("a", Authority({"x"}, [], ttl=10), task="t")
+        with self.assertRaises(AuthorityError) as cm:
+            a.delegate("b", Authority({"x"}, [], ttl=10), task="t")
+        self.assertEqual(cm.exception.reason, ReasonCode.MAX_DEPTH)
+        root.revoke()
+        with self.assertRaises(AuthorityError) as cm:
+            root.delegate("c", Authority({"x"}, [], ttl=10), task="t")
+        self.assertEqual(cm.exception.reason, ReasonCode.CHAIN_REVOKED)
+        for name in ("CHAIN_REVOKED", "AGENT_BANNED", "TTL_EXPIRED", "MAX_DEPTH", "MAX_FANOUT", "CHAIN_CEILING"):
+            self.assertIsInstance(getattr(ReasonCode, name), str)
+
+
 class TestPublicExports(unittest.TestCase):
     def test_ceiling_protocol_isinstance_check(self):
         # runtime_checkable: any object with the right method names — built

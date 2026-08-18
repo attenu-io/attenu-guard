@@ -28,7 +28,7 @@ from demo import (
     _drive,
     _tools,
 )
-from dg_llama_index import guards_of
+from delegation_guard.adapters.llama_index import guards_of
 
 from llama_index.core.workflow import Context
 

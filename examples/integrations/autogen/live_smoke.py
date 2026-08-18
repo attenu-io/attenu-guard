@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dg_autogen import (  # noqa: E402
+from delegation_guard.adapters.autogen import (  # noqa: E402
     Grant,
     GuardedHandoff,
     GuardRegistry,

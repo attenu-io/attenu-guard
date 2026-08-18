@@ -35,7 +35,7 @@ from strands.models import Model
 from strands.multiagent import Swarm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dg_strands import DelegationGuard, ScopeRequest, scope_map  # noqa: E402
+from delegation_guard.adapters.strands import DelegationGuard, ScopeRequest, scope_map  # noqa: E402
 
 from delegation_guard import (  # noqa: E402
     AuditLog,

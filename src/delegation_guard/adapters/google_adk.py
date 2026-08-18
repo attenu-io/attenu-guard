@@ -1,5 +1,5 @@
 """
-dg_google_adk.py — a thin delegation-guard integration for Google ADK.
+delegation_guard.adapters.google_adk — a thin delegation-guard integration for Google ADK.
 
 Copy this file into your project. It is one `BasePlugin` subclass; you register
 it once on your `App` and every agent in the tree is covered.

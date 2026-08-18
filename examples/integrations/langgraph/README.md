@@ -1,6 +1,6 @@
 # delegation-guard × LangGraph / LangChain / deepagents
 
-`dg_langgraph.py` is a ~200-line adapter you can paste into your own project.
+`delegation_guard.adapters.langchain` is a ~200-line adapter you can paste into your own project.
 
 ## What it hooks
 

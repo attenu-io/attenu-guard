@@ -31,7 +31,7 @@ from google.genai import types
 
 from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from dg_google_adk import DelegationGuardPlugin, ToolAuthority
+from delegation_guard.adapters.google_adk import DelegationGuardPlugin, ToolAuthority
 
 # ==========================================================================
 # The offline model: yields scripted LlmResponses, keyed by which agent asks.

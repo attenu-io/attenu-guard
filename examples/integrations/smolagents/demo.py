@@ -39,7 +39,7 @@ from delegation_guard import (
     Guard,
     RowLimit,
 )
-from dg_smolagents import DelegatedAgent, GuardRef, guard_tools
+from delegation_guard.adapters.smolagents import DelegatedAgent, GuardRef, guard_tools
 
 QUIET = LogLevel.OFF
 

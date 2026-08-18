@@ -38,11 +38,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # The adapter lives under examples/ (not shipped in the package yet).
-_EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "integrations" / "agno"
-if str(_EXAMPLES) not in sys.path:
-    sys.path.insert(0, str(_EXAMPLES))
-
-from dg_agno import (  # noqa: E402
+from delegation_guard.adapters.agno import (  # noqa: E402
     DELEGATION_TOOLS,
     Grant,
     GuardRegistry,
@@ -594,7 +590,7 @@ def test_async_hook_guards_async_tools_under_arun():
     poisoned call is still blocked before its body."""
     import asyncio
 
-    from dg_agno import aguarded_tool_hook
+    from delegation_guard.adapters.agno import aguarded_tool_hook
 
     root, registry, agent = _async_agent(aguarded_tool_hook)
     asyncio.run(agent.arun("go"))
@@ -663,7 +659,7 @@ def test_arun_needs_the_async_delegation_hook_but_keeps_the_sync_tool_hook():
     """
     import asyncio
 
-    from dg_agno import adelegation_tool_hook
+    from delegation_guard.adapters.agno import adelegation_tool_hook
 
     root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")
     registry = GuardRegistry(root, root_key="orchestrator")

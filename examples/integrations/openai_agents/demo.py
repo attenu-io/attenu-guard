@@ -31,7 +31,7 @@ from delegation_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
-from dg_openai_agents import (  # noqa: E402
+from delegation_guard.adapters.openai_agents import (  # noqa: E402
     DelegationGuardHooks,
     GuardRegistry,
     guarded_tool,

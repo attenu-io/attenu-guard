@@ -39,7 +39,7 @@ from claude_agent_sdk import tool
 
 from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from dg_claude_sdk import AgentGrant, DelegationGuardRegistry, ToolPolicy
+from delegation_guard.adapters.claude_sdk import AgentGrant, DelegationGuardRegistry, ToolPolicy
 
 # --------------------------------------------------------------------------
 # The tools. Each records a side effect the moment its body runs — that flag is

@@ -12,7 +12,7 @@ CRM data, and the tool body is proven never to have run (via the side-effect
 flags the tool would have set).
 
 The test drives the SHIPPED example (`examples/integrations/semantic_kernel/demo.py`
-+ `dg_semantic_kernel.py`), so a green run also proves the example works.
++ `delegation_guard.adapters.semantic_kernel`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def _load(name: str):
     return mod
 
 
-dg_sk = _load("dg_semantic_kernel")
+import delegation_guard.adapters.semantic_kernel as dg_sk
 demo = _load("demo")
 
 

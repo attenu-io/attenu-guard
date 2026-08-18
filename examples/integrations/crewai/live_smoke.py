@@ -36,7 +36,7 @@ from delegation_guard import (  # noqa: E402
     RowLimit,
 )
 
-from dg_crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
+from delegation_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
 
 MODEL = os.environ.get("LIVE_MODEL", "gpt-4o-mini")
 ORCHESTRATOR = "orchestrator"

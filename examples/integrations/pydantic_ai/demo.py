@@ -27,7 +27,7 @@ from delegation_guard import (
     AuditLog, Authority, AuthorityDenied, AuthorityError, EgressRank, Guard, RowLimit,
 )
 
-from dg_pydantic_ai import UNGUARDED, DelegationGuard, GuardedDeps, ToolPolicy
+from delegation_guard.adapters.pydantic_ai import UNGUARDED, DelegationGuard, GuardedDeps, ToolPolicy
 
 # ==========================================================================
 # 1. The authorities. This is the security decision, written once, in code.

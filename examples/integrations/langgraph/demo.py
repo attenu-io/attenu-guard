@@ -31,7 +31,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from delegation_guard import (
     AuditLog, Authority, AuthorityDenied, EgressRank, Guard, RowLimit,
 )
-from dg_langgraph import GuardedDelegation, ToolPolicy
+from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 BAR = "=" * 72
 EXECUTED: list[tuple] = []

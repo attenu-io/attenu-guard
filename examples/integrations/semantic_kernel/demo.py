@@ -57,7 +57,7 @@ from delegation_guard import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dg_semantic_kernel import (  # noqa: E402
+from delegation_guard.adapters.semantic_kernel import (  # noqa: E402
     DelegationChain,
     ToolPolicy,
     attach_guard,

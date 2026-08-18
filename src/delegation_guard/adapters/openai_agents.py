@@ -1,4 +1,4 @@
-"""dg_openai_agents.py — delegation-guard x the OpenAI Agents SDK.
+"""delegation_guard.adapters.openai_agents — delegation-guard x the OpenAI Agents SDK.
 
 Copy this single file into your project. It needs `openai-agents` and
 `delegation-guard`, and nothing else.

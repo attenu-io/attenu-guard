@@ -28,7 +28,7 @@ from demo import (
     SUMMARIZER_POLICIES,
     Ops,
 )
-from dg_pydantic_ai import DelegationGuard, GuardedDeps
+from delegation_guard.adapters.pydantic_ai import DelegationGuard, GuardedDeps
 
 MODEL = os.environ.get("DG_LIVE_MODEL", "openai:gpt-4o-mini")
 

@@ -4,7 +4,7 @@ Tested against **google-adk 2.7.1** (Apache-2.0, requires Python ≥ 3.10) on Py
 
 ## What it hooks
 
-One `BasePlugin` (`dg_google_adk.DelegationGuardPlugin`), registered once on the `App`:
+One `BasePlugin` (`delegation_guard.adapters.google_adk.DelegationGuardPlugin`), registered once on the `App`:
 
 | delegation-guard step | ADK hook | where it runs |
 | --- | --- | --- |

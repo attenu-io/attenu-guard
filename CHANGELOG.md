@@ -11,6 +11,11 @@ Driven by integration PoCs against twelve real agent frameworks
 **unmodified** everywhere; what follows is what those integrations asked for.
 
 ### Fixed
+- **Thread-safety under parallel tool calls.** Frameworks execute an agent's
+  parallel tool calls on thread pools; concurrent `check()`s could interleave the
+  audit hash-chain append (`verify()` then rejected the library's own log) and
+  log out of sequence. The audit log, sequence clock and chain mutations are now
+  serialised per chain; `ts`/`seq` advance atomically.
 - **`strict_metering=True` failed open on a partial context.** Only an entirely
   empty context was refused; a context that declared some dimensions but omitted
   a held metered ceiling's field silently skipped that ceiling. Strictness is now
@@ -32,11 +37,19 @@ Driven by integration PoCs against twelve real agent frameworks
 - `Guard.would_delegate(agent_id, request)` — pure dry-run of the delegation
   preconditions (`Chain.delegation_error`), no node, no fanout, no audit write.
 - `AuditLog.__iter__` / `__len__`.
-- Integrations (examples + offline tests + CI matrix): LangGraph / LangChain
-  `create_agent`, deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI,
-  AutoGen, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic
-  Kernel, Agno. `docs/INTEGRATIONS.md` documents hooks, versions and what each
-  framework enforces itself.
+- **Framework adapters shipped in the package** as `delegation_guard.adapters.<name>`
+  with per-framework extras (`pip install 'delegation-guard[crewai]'` …): `langchain`
+  (LangGraph `ToolNode` / LangChain `create_agent` / deepagents), `openai_agents`,
+  `google_adk`, `pydantic_ai`, `crewai`, `autogen`, `claude_sdk`, `smolagents`,
+  `strands`, `llama_index`, `semantic_kernel`, `agno` — plus the existing
+  `langgraph` node adapter. Each has an offline demo (`examples/integrations/`)
+  and a test (`tests/integrations/`, 213 tests) using the framework's own mock
+  model; CI matrix per framework. `docs/INTEGRATIONS.md` documents hooks,
+  versions and what each framework enforces itself.
+- `Ceiling.describe()` on all built-ins, `ceilings.describe()` helper,
+  `Authority.describe()`; `ReasonCode` constants for the structural
+  `AuthorityError` reasons (`CHAIN_REVOKED`, `AGENT_BANNED`, `TTL_EXPIRED`,
+  `MAX_DEPTH`, `MAX_FANOUT`, `CHAIN_CEILING`).
 - `tools/render_demo_gif.py` regenerates `docs/assets/demo.gif` from `dg demo`.
 - CI: actions bumped to v6; 6-hourly quickstart canary; per-framework pinned
   `integrations` job; weekly unpinned `integrations-latest` drift canary.

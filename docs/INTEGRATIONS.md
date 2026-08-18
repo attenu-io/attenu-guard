@@ -1,8 +1,10 @@
 # Integrations — delegation-guard inside real agent frameworks
 
-Every row below is a **runnable, tested** integration under
-[`examples/integrations/<framework>/`](../examples/integrations/): a thin adapter
-(`dg_<framework>.py`) you can paste into your project, a `demo.py` that tells the
+Every row below is a **shipped, tested** integration: a thin adapter installed with the
+package as `delegation_guard.adapters.<framework>` (enable its framework with
+`pip install 'delegation-guard[<extra>]'`; the core stays zero-dependency — a framework is
+imported only when you import its adapter), a runnable `demo.py` under
+[`examples/integrations/<framework>/`](../examples/integrations/) that tells the
 poisoned-summariser story end to end, and a pytest under
 [`tests/integrations/`](../tests/integrations/) that runs **offline** — every
 framework's own mock/scripted model, no LLM API key — and is skipped when the
@@ -74,13 +76,26 @@ transcript into a single message for the parent.
   so a hook can pre-flight a handoff before it cancels a whole swarm.
 - The tool→scope map is the integrator's job and the only real work (~10 minutes once you
   know your tools). Adapters default to **fail-closed** on an unmapped tool.
+- Frameworks run parallel tool calls on thread pools (smolagents, ADK): concurrent `check()`s
+  could interleave the hash-chain append and make `verify()` reject the library's own log.
+  The audit log, sequence clock and chain mutations are now serialised per chain
+  (`ts` and `seq` advance together).
+- `Ceiling.describe()` / `Authority.describe()` and `ReasonCode.{CHAIN_REVOKED, AGENT_BANNED,
+  TTL_EXPIRED, MAX_DEPTH, MAX_FANOUT, CHAIN_CEILING}` — every adapter demo had re-invented the
+  first; every adapter had a lookup table for the second.
 
 ## Running one
 
 ```bash
-pip install -e . <framework-package>          # e.g. openai-agents==0.21.1
+pip install -e '.[openai-agents]'             # extras: langchain, deepagents, openai-agents, google-adk,
+                                              # pydantic-ai, crewai, autogen, claude-agent-sdk, smolagents,
+                                              # strands, llama-index, semantic-kernel, agno
 python examples/integrations/openai_agents/demo.py
 python -m pytest -q tests/integrations/test_openai_agents.py
+```
+
+```python
+from delegation_guard.adapters.openai_agents import GuardRegistry, DelegationGuardHooks, guarded_tool
 ```
 
 Each directory's `README.md` lists the exact hooks, the version tested, and an

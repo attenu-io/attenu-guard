@@ -41,10 +41,8 @@ from delegation_guard import (  # noqa: E402
 )
 
 # The adapter lives under examples/, which is not an installed package.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT / "examples" / "integrations" / "smolagents"))
 
-from dg_smolagents import (  # noqa: E402
+from delegation_guard.adapters.smolagents import (  # noqa: E402
     DelegatedAgent,
     GuardedTool,
     GuardRef,

@@ -1,5 +1,5 @@
 """
-dg_claude_sdk.py — a thin delegation-guard integration for the Claude Agent SDK
+delegation_guard.adapters.claude_sdk — a thin delegation-guard integration for the Claude Agent SDK
 (``claude-agent-sdk``, PyPI, tested against 0.2.139).
 
 WHAT IT HOOKS

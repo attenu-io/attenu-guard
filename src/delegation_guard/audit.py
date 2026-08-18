@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,28 +50,35 @@ class AuditLog:
 
     def __post_init__(self):
         self._entries = []
+        # One lock per log: `append` reads prev_hash/seq, hashes, then writes
+        # both — an unsynchronised interleaving from two threads (frameworks
+        # run parallel tool calls on thread pools) forks the chain and makes
+        # `verify()` reject the library's OWN log. RLock: `verify`/`entries`
+        # never take it, so there is no re-entrancy today, but it is cheap.
+        self._lock = threading.RLock()
         if self.path:
             self.path = Path(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text("")  # fresh log
 
     def append(self, event: str, ts: str | int, **fields) -> dict:
-        payload = {
-            "v": SCHEMA_VERSION,
-            "seq": self._seq,
-            "ts": ts,
-            "event": event,
-            **fields,
-            "prev_hash": self._prev,
-        }
-        payload["hash"] = _hash(self._prev, payload)
-        self._prev = payload["hash"]
-        self._seq += 1
-        self._entries.append(payload)
-        if self.path:
-            with self.path.open("a") as f:
-                f.write(json.dumps(payload, sort_keys=True) + "\n")
-        return payload
+        with self._lock:
+            payload = {
+                "v": SCHEMA_VERSION,
+                "seq": self._seq,
+                "ts": ts,
+                "event": event,
+                **fields,
+                "prev_hash": self._prev,
+            }
+            payload["hash"] = _hash(self._prev, payload)
+            self._prev = payload["hash"]
+            self._seq += 1
+            self._entries.append(payload)
+            if self.path:
+                with self.path.open("a") as f:
+                    f.write(json.dumps(payload, sort_keys=True) + "\n")
+            return payload
 
     @property
     def entries(self) -> list[dict]:

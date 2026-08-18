@@ -33,6 +33,16 @@ class ReasonCode:
     FANOUT_EXCEEDED = "fanout_exceeded"
     UNMETERED = "unmetered"
     UNKNOWN_CONSTRAINT = "unknown_constraint"   # fail-closed on unknown ceiling type
+    # Structural failures — the `reason` strings `AuthorityError` carries when a
+    # DELEGATION is refused (Chain.delegation_error). Values are the published
+    # v0.1 audit vocabulary and must not change; the constants exist so adapters
+    # can map them without a lookup table.
+    CHAIN_REVOKED = "chain_revoked"
+    AGENT_BANNED = "agent_banned"
+    TTL_EXPIRED = "ttl_expired"
+    MAX_DEPTH = "max_depth"
+    MAX_FANOUT = "max_fanout"
+    CHAIN_CEILING = "chain_ceiling"
     NO_AUTHORITY = "no_authority"               # principal holds no Authority at all in this chain
                                                 # (adapter-level: unknown/undelegated agent, unmapped
                                                 # tool, unparseable args) — upstream of scope/ceilings

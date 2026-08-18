@@ -32,6 +32,7 @@ metaphor -> authority vocabulary; docs/DEVX-REVIEW.md principle 4) and emit
 """
 from __future__ import annotations
 
+import threading
 import warnings
 from contextlib import contextmanager
 from typing import Mapping
@@ -63,10 +64,12 @@ class _SeqClock:
     tests regardless of wall-clock resolution."""
     def __init__(self):
         self._t = 0
+        self._lock = threading.Lock()
 
     def now(self) -> int:
-        self._t += 1
-        return self._t
+        with self._lock:
+            self._t += 1
+            return self._t
 
 
 class Guard:
@@ -152,11 +155,11 @@ class Guard:
         try:
             child = self._chain.add_child(self._node.node_id, agent_id, request, task)
         except AuthorityError as e:
-            self._audit.append("spawn_denied", self._seq.now(), chain_id=self.chain_id,
+            self._append("spawn_denied", chain_id=self.chain_id,
                                parent=self._node.node_id, agent=agent_id, task=task,
                                reason=e.reason, detail=e.detail)
             raise
-        self._audit.append("spawn", self._seq.now(), chain_id=self.chain_id,
+        self._append("spawn", chain_id=self.chain_id,
                            parent=self._node.node_id, node=child.node_id,
                            agent=agent_id, task=task, requested=request.to_wire(),
                            granted=child.authority.to_wire())
@@ -167,6 +170,13 @@ class Guard:
         warnings.warn("Guard.spawn is deprecated; use Guard.delegate",
                       DeprecationWarning, stacklevel=2)
         return self.delegate(*args, **kwargs)
+
+    def _append(self, event: str, **fields) -> dict:
+        """Take the next audit sequence timestamp AND append under one lock,
+        so parallel tool calls (thread pools) can never log out of order:
+        `seq` and `ts` advance together."""
+        with self._chain._lock:
+            return self._audit.append(event, self._seq.now(), **fields)
 
     # ---- policy evaluation (shared by check/enforce/would_allow) --------
     def _merge_legacy(self, context: Mapping | None, *, rows=None, spend=None,
@@ -251,7 +261,7 @@ class Guard:
             # just the first.
             fields["reason"] = decision.reasons[0].code if decision.reasons else None
             fields["reasons"] = [r.to_dict() for r in decision.reasons]
-        self._audit.append(event, self._seq.now(), **fields)
+        self._append(event, **fields)
 
     # ---- enforcement ---------------------------------------------------
     def check(self, scope: str, *, context: Mapping | None = None,
@@ -319,7 +329,7 @@ class Guard:
         # delegate() about schema/agent-audit.schema.json and cli.py.
         target = node_id or self._node.node_id
         revoked = self._chain.revoke(target)
-        self._audit.append("kill", self._seq.now(), chain_id=self.chain_id,
+        self._append("kill", chain_id=self.chain_id,
                            target=target, revoked=revoked)
         return revoked
 
@@ -331,7 +341,7 @@ class Guard:
         because frameworks re-hand-off to the same agent freely and a fresh
         `delegate()` would otherwise mint it clean authority. One audit event."""
         revoked = self._chain.revoke_agent(agent_id)
-        self._audit.append("kill", self._seq.now(), chain_id=self.chain_id,
+        self._append("kill", chain_id=self.chain_id,
                            target=self._node.node_id, agent=agent_id, revoked=revoked)
         return revoked
 

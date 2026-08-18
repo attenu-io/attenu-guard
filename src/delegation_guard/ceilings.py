@@ -99,6 +99,16 @@ def ctx_field_of(ceiling) -> str:
     return field_name if field_name else ceiling.key
 
 
+def describe(ceiling) -> str:
+    """Uniform human-readable rendering of ANY ceiling: uses the ceiling's own
+    `describe()` when it has one (all built-ins do), else `key=<wire form>`.
+    For dashboards, demos and parent-vs-child diffs; never parsed back."""
+    fn = getattr(ceiling, "describe", None)
+    if callable(fn):
+        return fn()
+    return f"{ceiling.key}={ceiling.to_wire()}"
+
+
 def is_metered(ceiling) -> bool:
     """A METERED ceiling bounds a consumed quantity the caller must declare
     (rows read, spend, calls) — by convention its key starts with "max_".
@@ -130,6 +140,9 @@ class RowLimit:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n))
 
+    def describe(self) -> str:
+        return f"{self.key}<={self.max_rows}"
+
     def narrow(self, other: "RowLimit") -> "RowLimit":
         return RowLimit(min(self.max_rows, other.max_rows))
 
@@ -156,6 +169,9 @@ class SpendCap:
         if n is None or n <= self.max_spend:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n))
+
+    def describe(self) -> str:
+        return f"{self.key}<={self.max_spend}"
 
     def narrow(self, other: "SpendCap") -> "SpendCap":
         return SpendCap(min(self.max_spend, other.max_spend))
@@ -184,6 +200,9 @@ class CallLimit:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n))
 
+    def describe(self) -> str:
+        return f"{self.key}<={self.max_calls}"
+
     def narrow(self, other: "CallLimit") -> "CallLimit":
         return CallLimit(min(self.max_calls, other.max_calls))
 
@@ -210,6 +229,9 @@ class EgressRank:
         if val is None or _egress_rank(val) <= _egress_rank(self.level):
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val))
+
+    def describe(self) -> str:
+        return f"{self.key}<={self.level}"
 
     def narrow(self, other: "EgressRank") -> "EgressRank":
         stricter = self.level if _egress_rank(self.level) <= _egress_rank(other.level) else other.level
@@ -257,6 +279,9 @@ class Allow:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
                                      sorted(self.one_of, key=str), val))
 
+    def describe(self) -> str:
+        return f"{self.key} in [{', '.join(sorted(map(str, self.one_of)))}]"
+
     def narrow(self, other: "Allow") -> "Allow":
         # admits fewer values -> stricter: set intersection.
         return Allow(self.key, self.one_of & frozenset(other.one_of), self.field)
@@ -295,6 +320,9 @@ class Deny:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
                                      sorted(self.not_one_of, key=str), val))
 
+    def describe(self) -> str:
+        return f"{self.key} not in [{', '.join(sorted(map(str, self.not_one_of)))}]"
+
     def narrow(self, other: "Deny") -> "Deny":
         # denying MORE values is stricter: set union.
         return Deny(self.key, self.not_one_of | frozenset(other.not_one_of), self.field)
@@ -330,6 +358,9 @@ class Prefix:
         if val is None or str(val).startswith(self.prefix):
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val))
+
+    def describe(self) -> str:
+        return f"{self.key} startswith {self.prefix}"
 
     def narrow(self, other: "Prefix") -> "Prefix":
         # If one prefix is a prefix of the other, the longer (more specific)

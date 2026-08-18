@@ -1,7 +1,7 @@
 # delegation-guard x smolagents
 
 Tested against **smolagents 1.26.0** (Apache-2.0), Python 3.12. No changes to
-smolagents or to `delegation_guard` — the adapter is `dg_smolagents.py`, ~120
+smolagents or to `delegation_guard` — the adapter is `delegation_guard.adapters.smolagents`, ~120
 lines of logic you can paste into your own project.
 
 ## What it hooks

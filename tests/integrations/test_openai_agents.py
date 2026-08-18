@@ -45,11 +45,7 @@ from delegation_guard import (  # noqa: E402
 
 # The adapter lives with the runnable example, not in src/ — a developer is
 # meant to be able to copy the single file into their own project.
-_ADAPTER_DIR = Path(__file__).resolve().parents[2] / "examples" / "integrations" / "openai_agents"
-if str(_ADAPTER_DIR) not in sys.path:
-    sys.path.insert(0, str(_ADAPTER_DIR))
-
-from dg_openai_agents import (  # noqa: E402
+from delegation_guard.adapters.openai_agents import (  # noqa: E402
     DelegationGuardHooks,
     GuardRegistry,
     guarded_agent_tool,

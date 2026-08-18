@@ -43,21 +43,7 @@ from delegation_guard import (  # noqa: E402
     RowLimit,
 )
 
-_ADAPTER_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "examples" / "integrations" / "langgraph" / "dg_langgraph.py"
-)
-
-
-def _load_adapter():
-    spec = importlib.util.spec_from_file_location("dg_langgraph_example", _ADAPTER_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-dg_langgraph = _load_adapter()
+import delegation_guard.adapters.langchain as dg_langgraph
 GuardedDelegation = dg_langgraph.GuardedDelegation
 ToolPolicy = dg_langgraph.ToolPolicy
 

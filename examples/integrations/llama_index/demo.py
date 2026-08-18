@@ -28,7 +28,7 @@ from llama_index.core.workflow import Context
 
 from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from dg_llama_index import GuardedAgentWorkflow, guarded_tool, guards_of
+from delegation_guard.adapters.llama_index import GuardedAgentWorkflow, guarded_tool, guards_of
 
 # --------------------------------------------------------------------------
 # The business tools. Each body appends to EXECUTED as its FIRST statement, so

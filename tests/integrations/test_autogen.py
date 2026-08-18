@@ -43,11 +43,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # The adapter lives under examples/ (not shipped in the package yet).
-_EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "integrations" / "autogen"
-if str(_EXAMPLES) not in sys.path:
-    sys.path.insert(0, str(_EXAMPLES))
-
-from dg_autogen import (  # noqa: E402
+from delegation_guard.adapters.autogen import (  # noqa: E402
     Grant,
     GuardedHandoff,
     GuardedWorkbench,

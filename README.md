@@ -82,7 +82,7 @@ invariant — in ten minutes, in your framework, with no proxy and no phone-home
 - **Hash-chained audit log** — an open, versioned [schema](schema/agent-audit.schema.json); `dg view log.jsonl` renders the tree and verifies it; tampering is provable offline.
 - **Wire format** ([`delegation_guard.wire`](src/delegation_guard/wire.py)) — `serialize`/`load` the delegation chain as signed **Delegation Tokens** and verify child ⊆ parent **offline**, across services, with no authorization server in the path. This is the reference implementation of the Internet-Draft in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-00.md); interop test vectors live in [`tests/vectors/`](tests/vectors/).
 - **Scenario harness** — declarative JSON/YAML authorization tests (`dg scenarios file.json`); see [`scenarios/`](scenarios/).
-- **Adapters & integrations** — a LangGraph node adapter ([`delegation_guard.adapters.langgraph`](src/delegation_guard/adapters/langgraph.py)) plus runnable, tested integrations with the major agent frameworks under [`examples/integrations/`](examples/integrations/) — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
+- **Adapters** — shipped, tested integrations for the major agent frameworks as [`delegation_guard.adapters.<name>`](src/delegation_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno — each with an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'delegation-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 ## Prove the safety claims yourself
 

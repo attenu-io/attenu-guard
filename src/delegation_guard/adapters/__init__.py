@@ -1,25 +1,33 @@
 """
-adapters — thin, optional framework integrations for delegation-guard.
+delegation_guard.adapters — thin, optional framework integrations.
 
-Each submodule here wraps ONE framework's node/tool-callable convention
-around the core `Guard.check`/`Guard.enforce` surface (docs/DEVX-REVIEW.md
-principle 7: "framework-agnostic core, thin adapters"). Today that's
-`adapters.langgraph`; MCP and FastAPI are the natural next additions, and
-would live at `adapters/mcp.py` / `adapters/fastapi.py` following the same
-shape.
+Each submodule wraps ONE framework's delegation + tool-invocation hooks around
+the core `Guard` surface (docs/DEVX-REVIEW.md principle 7: "framework-agnostic
+core, thin adapters"). Nothing here is imported by the core package, and this
+`__init__` imports nothing — so `delegation_guard` stays zero-dependency, and a
+framework is only imported when YOU import its adapter:
 
-Two things make these genuinely "thin, optional extras" rather than a back
-door that quietly drags a framework dependency into the core:
+    from delegation_guard.adapters.openai_agents import GuardRegistry, guarded_tool
+    # -> needs `pip install 'delegation-guard[openai-agents]'`
 
-  * This package lives OUTSIDE `src/delegation_guard/` — a sibling of it,
-    not a subpackage — so nothing in the installable core package ever
-    imports `adapters`, regardless of what's installed. `delegation_guard`
-    itself stays exactly as dependency-free with `adapters/` present as
-    without it.
-  * Each adapter submodule lazy-imports its target framework from inside
-    the specific function/method that needs it (never at module import
-    time), so `import adapters.langgraph` — and every bit of its
-    authorization-wrapping logic — works with zero third-party packages
-    installed. Only code paths that hand you back a *real* framework
-    object need the framework itself, and only import it when called.
+Available (see docs/INTEGRATIONS.md for hooks, versions and evidence):
+
+    langgraph        guard_node / DelegatedToolNode — hand-written LangGraph nodes
+                     (importable with NO langgraph installed; lazy imports only)
+    langchain        ToolPolicy / GuardedDelegation — LangGraph ToolNode(wrap_tool_call),
+                     LangChain create_agent middleware, deepagents sub-agents
+    openai_agents    GuardRegistry / DelegationGuardHooks / guarded_tool — handoffs, agents-as-tools
+    google_adk       DelegationGuardPlugin — sub_agents/transfer_to_agent, AgentTool, task mode
+    pydantic_ai      DelegationGuard (capability) / GuardedToolset — agent delegation
+    crewai           CrewAIGuardBridge — allow_delegation / hierarchical crews
+    autogen          GuardedWorkbench / GuardedHandoff — Swarm handoffs, AgentTool
+    claude_sdk       DelegationGuardRegistry — subagents via PreToolUse/SubagentStart hooks
+    smolagents       GuardedTool / DelegatedAgent — managed_agents
+    strands          hooks + InterventionHandler — agents-as-tools, Swarm, Graph
+    llama_index      GuardedAgentWorkflow / guarded_tool — AgentWorkflow handoffs
+    semantic_kernel  attach_guard — HandoffOrchestration via kernel filters
+    agno             tool_hooks — Team member delegation
+
+Each has a runnable offline demo under examples/integrations/<name>/ and a test
+under tests/integrations/ that runs with the framework's own mock model.
 """

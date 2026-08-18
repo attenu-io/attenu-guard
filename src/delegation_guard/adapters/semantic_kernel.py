@@ -1,5 +1,5 @@
 """
-dg_semantic_kernel.py — a thin delegation-guard integration for Microsoft
+delegation_guard.adapters.semantic_kernel — a thin delegation-guard integration for Microsoft
 Semantic Kernel.
 
 Tested against semantic-kernel 1.36.0 (Python >= 3.10).
