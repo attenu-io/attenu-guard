@@ -40,6 +40,43 @@ Versions and file:line references are as of **August 2026**; they will drift.
 
 *Fit = how well the framework's official hooks carry an authorization decision (1–5). Twelve frameworks, twelve offline test suites, 213 tests; the Claude Agent SDK integration was additionally verified live.*
 
+## Why these twelve
+
+Selection criteria (August 2026): (1) a Python framework with an **explicit delegation /
+handoff / sub-agent primitive** — the moment delegation-guard exists to guard; (2) coverage of
+every major vendor's agent stack (OpenAI, Google, Microsoft ×2, AWS, Anthropic, Hugging Face,
+LangChain) plus the leading independents (CrewAI, Pydantic AI, LlamaIndex, Agno); (3) an
+**offline test path** (mock/scripted model) so the integration test can run in CI with no
+API key; (4) at least one real multi-agent *application*, not just a framework (deepagents).
+GitHub stars at selection: CrewAI 57k · AutoGen 60k (in maintenance since 2026-04, superseded by
+Microsoft Agent Framework) · LlamaIndex 52k · Agno 42k · LangGraph 40k · smolagents 29k ·
+OpenAI Agents SDK 29k · Semantic Kernel 28k · deepagents 28k · ADK 21k · Pydantic AI 19k ·
+Claude Agent SDK 8k · Strands 7k. Deliberately not (yet): MCP and A2A (protocols, not
+frameworks — an MCP server-side middleware is the natural next adapter), Microsoft Agent
+Framework (AutoGen+SK successor), CAMEL/MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak
+offline story), Letta/Haystack (no delegation primitive), Dify/Flowise/n8n (not
+Python-embeddable), and every non-Python stack (see "Other languages").
+
+## Status of the framework findings
+
+Nothing above has been reported upstream yet (this repository is private). Each finding is
+pinned as an executable **baseline test** in `tests/integrations/` (e.g.
+`test_autogen_itself_does_not_attenuate`, deepagents' `permissions`-replace test, ADK's
+`disallow_transfer_to_peers` test), so the weekly unpinned `integrations-latest` job will
+flag the day a framework changes the behaviour. When the project goes public the intent is to
+file each as a constructive upstream issue with the repro and a suggested fix (child ⊆ parent
+"meet" semantics; fail-closed hook dispatch), and to keep this document as the citation.
+
+## Other languages
+
+The wire format (`delegation_guard.wire`: signed JWS Delegation Tokens, offline
+child ⊆ parent verification) is the language-neutral contract, and `tests/vectors/` +
+`scenarios/*.json` are its conformance suite. A TypeScript port of the core is the natural
+next language (Vercel AI SDK, LangGraph.js, OpenAI Agents JS, Claude Agent SDK TS, the MCP TS
+SDK); Go/Java/.NET follow the same recipe: port the core against the vectors, then thin
+adapters at the same two hook points. Authority crosses a language boundary as a token, never
+as a network call on the deny path.
+
 ## Denial semantics — one decision every adapter makes
 
 `Guard.check()` returns a `Decision`; the adapter decides what the *framework* sees:
