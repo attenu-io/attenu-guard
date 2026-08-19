@@ -44,6 +44,7 @@ class AuditLog:
     """
 
     path: Path | None = None
+    sinks: tuple = ()                 # local-file sinks (see sinks.py); each gets every entry after the file write
     _prev: str = GENESIS
     _seq: int = 0
     _entries: list[dict] = None  # in-memory mirror
@@ -78,6 +79,8 @@ class AuditLog:
             if self.path:
                 with self.path.open("a") as f:
                     f.write(json.dumps(payload, sort_keys=True) + "\n")
+            for sink in self.sinks:                    # local files only — never the network (see sinks.py)
+                sink.write(payload)
             return payload
 
     @property

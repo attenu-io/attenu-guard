@@ -86,10 +86,11 @@ class Guard:
     @classmethod
     def issue(cls, agent_id: str, authority: Authority, task: str = "root",
               *, chain_id: str = "chain", max_depth: int = 6, max_fanout: int = 16,
-              audit_path=None, clock=None, strict_metering: bool = False, strikes=None) -> "Guard":
+              audit_path=None, clock=None, strict_metering: bool = False, strikes=None,
+              audit_sinks=None) -> "Guard":
         chain = Chain(chain_id, max_depth=max_depth, max_fanout=max_fanout,
                       clock=clock or MonotonicClock())
-        audit = AuditLog(audit_path)
+        audit = AuditLog(audit_path, sinks=tuple(audit_sinks or ()))
         seq = _SeqClock()
         node = chain.add_root(agent_id, authority, task)
         audit.append("root", seq.now(), chain_id=chain_id, node=node.node_id,

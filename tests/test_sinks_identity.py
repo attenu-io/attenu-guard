@@ -42,5 +42,67 @@ class Identity(unittest.TestCase):
             self.assertNotEqual(identity.new_chain_id(), identity.new_chain_id())   # assigned, never inferred
 
 
+class Spool(unittest.TestCase):
+    def _guard(self, sink):
+        from delegation_guard import Authority, Guard
+        return Guard.issue("a", Authority({"crm.read"}, [], ttl=None), task="t", audit_sinks=(sink,))
+
+    def test_spool_is_a_separate_file_that_survives_a_new_audit_log(self):
+        from delegation_guard.sinks import SpoolSink
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "spool.ndjson"
+            g1 = self._guard(SpoolSink(sp, boot="b1")); g1.check("crm.read", tool="q"); g1.check("x.y", tool="z")
+            g2 = self._guard(SpoolSink(sp, boot="b2")); g2.check("crm.read", tool="q")   # a NEW AuditLog (its own file truncates) must not truncate the spool
+            lines = [json.loads(l) for l in sp.read_text().splitlines()]
+            self.assertEqual(len(lines), 3 + 2)                                           # 2 roots + 3 checks
+            self.assertEqual({l["boot_id"] for l in lines}, {"b1", "b2"})
+            self.assertTrue(all({"boot_id", "chain_id", "seq", "hash", "entry"} <= set(l) for l in lines))   # the ingest idempotency key travels with every line
+            self.assertEqual(lines[0]["entry"]["event"], "root")
+
+    def test_spool_is_bounded_and_never_touches_the_log_of_record(self):
+        from delegation_guard.sinks import SpoolSink
+        with tempfile.TemporaryDirectory() as d:
+            sink = SpoolSink(Path(d) / "s.ndjson", boot="b", max_bytes=600)
+            g = self._guard(sink)
+            for _ in range(50):
+                g.check("crm.read", tool="q")
+            self.assertTrue(sink.overflowed and sink.dropped > 0)
+            self.assertEqual(len(g.audit_log().entries), 51)                      # ledger complete regardless
+            sink.flush()
+            self.assertLessEqual((Path(d) / "s.ndjson").stat().st_size, 600)
+
+    def test_read_pending_and_ack_are_resumable(self):
+        from delegation_guard.sinks import SpoolSink
+        with tempfile.TemporaryDirectory() as d:
+            sp = Path(d) / "s.ndjson"; sink = SpoolSink(sp, boot="b"); g = self._guard(sink)
+            for _ in range(5): g.check("crm.read", tool="q")
+            sink.flush()
+            batch = sink.read_pending(max_n=3); self.assertEqual([b["seq"] for b in batch], [0, 1, 2]); sink.ack(3)
+            again = SpoolSink(sp, boot="b")                                        # a fresh uploader process resumes from the offset file
+            self.assertEqual([b["seq"] for b in again.read_pending()], [3, 4, 5])
+
+    def test_fsync_happens_on_flush_and_every_n_writes(self):
+        import os as _os
+        from delegation_guard import sinks
+        calls = []
+        real = _os.fsync
+        _os.fsync = lambda fd: calls.append(fd)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                sink = sinks.SpoolSink(Path(d) / "s.ndjson", boot="b", fsync_every=2); g = self._guard(sink)
+                g.check("crm.read", tool="q")                      # root + allow = 2 writes -> one fsync
+                self.assertEqual(len(calls), 1)
+                sink.flush()
+                self.assertEqual(len(calls), 2)
+        finally:
+            _os.fsync = real
+
+    def test_sink_never_imports_the_network(self):
+        import delegation_guard.sinks as sinks_mod
+        src = Path(sinks_mod.__file__).read_text()
+        for banned in ("socket", "urllib", "http.client", "requests", "httpx"):
+            self.assertNotIn(f"import {banned}", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
