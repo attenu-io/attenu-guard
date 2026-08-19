@@ -358,6 +358,40 @@ def test_undeclared_tool_is_denied_by_default():
 
 
 # ==========================================================================
+# 6b. Slice 1 / Plan A: a denial says WHY — held (waiting on a human) vs
+#     unresolved (no authority known) vs out_of_authority (over-reach) — on
+#     the ledger AND in the dict handed back to the model.
+# ==========================================================================
+def test_denial_carries_disposition_held_vs_unresolved_vs_out_of_authority():
+    from delegation_guard import Disposition
+
+    def run(tools):
+        async def scenario():
+            runner, sessions, root_guard, plugin, calls = _build({
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [_fc("crm_export", destination="x"), _text("done")],
+            }, plugin_kwargs={"tools": tools})
+            session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+            return await _drive(runner, session, "go"), root_guard
+        events, root_guard = asyncio.run(scenario())
+        resp = _function_responses(events)["crm_export"]
+        led = [e for e in root_guard.audit_log().entries if e["event"] == "deny" and e.get("tool") == "crm_export"][-1]
+        return resp, led
+
+    # declared, and the authority source says it is HELD pending an operator grant
+    resp, led = run({"crm_export": dg_adk.ToolAuthority("crm.export", lambda a: {"egress": "any"},
+                                                        disposition=Disposition.HELD_PENDING_GRANT)})
+    assert resp["error"] == "authority_denied" and resp["disposition"] == "held_pending_grant"
+    assert led["disposition"] == "held_pending_grant"
+    # declared, nothing stated: the shim's own truth — the summarizer does not hold crm.export
+    resp, led = run({"crm_export": dg_adk.ToolAuthority("crm.export", lambda a: {"egress": "any"})})
+    assert resp["disposition"] == "out_of_authority" and led["disposition"] == "out_of_authority"
+    # not declared at all: no authority known for the tool
+    resp, led = run({})
+    assert resp["disposition"] == "unresolved" and led["disposition"] == "unresolved"
+
+
+# ==========================================================================
 # 7. raise_on_deny=True is the hard-stop variant.
 # ==========================================================================
 def test_raise_on_deny_aborts_the_run():

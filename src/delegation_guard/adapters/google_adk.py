@@ -93,6 +93,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
 from delegation_guard import Authority, AuthorityDenied, Decision, Guard
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = ["DelegationGuardPlugin", "ToolAuthority", "TRANSFER_TOOL_NAME"]
 
@@ -110,11 +111,17 @@ class ToolAuthority:
     metered:  passed through as `guard.check(metered=...)`; with a Guard issued
               `strict_metering=True`, a metered call carrying no context is
               refused rather than treated as free.
+    disposition: optional `Disposition` value the authority source knows
+              about this tool — `held_pending_grant` (curated, waiting on an
+              operator), `withheld_tier2`, `unresolved`. Recorded on a `deny`
+              (ledger + the denial dict) so "held" never reads as "denied";
+              omit for a grantable tool (a deny is then `out_of_authority`).
     """
 
     scope: str
     context: Optional[Callable[[Mapping[str, Any]], Mapping[str, Any]]] = None
     metered: bool = False
+    disposition: Optional[str] = None
 
 
 class DelegationGuardPlugin(BasePlugin):
@@ -257,8 +264,11 @@ class DelegationGuardPlugin(BasePlugin):
         if declared is not None and declared.context is not None:
             context = declared.context(tool_args)
         metered = declared.metered if declared else False
+        # undeclared tool: no authority is known for it at all -> "unresolved"
+        disposition = declared.disposition if declared is not None else Disposition.UNRESOLVED
         return self._authorize(
-            guard, agent_name, tool.name or "<unnamed>", scope, context, metered=metered
+            guard, agent_name, tool.name or "<unnamed>", scope, context, metered=metered,
+            disposition=disposition,
         )
 
     # ---- internals -------------------------------------------------------
@@ -306,24 +316,31 @@ class DelegationGuardPlugin(BasePlugin):
         context: Mapping[str, Any],
         *,
         metered: bool,
+        disposition: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        decision = guard.check(scope, context=context, metered=metered, tool=tool_name)
+        decision = guard.check(scope, context=context, metered=metered, tool=tool_name,
+                               disposition=disposition)
         if decision:
             return None
         if self._raise:
             raise AuthorityDenied(decision)
-        return self._denial_response(decision, guard, agent_name, tool_name, scope)
+        return self._denial_response(decision, guard, agent_name, tool_name, scope, disposition)
 
     @staticmethod
     def _denial_response(
-        decision: Decision, guard: Guard, agent_name: str, tool_name: str, scope: str
+        decision: Decision, guard: Guard, agent_name: str, tool_name: str, scope: str,
+        disposition: Optional[str] = None,
     ) -> dict[str, Any]:
         """The dict ADK hands back to the model in place of the tool result.
 
         `functions.py:603-625` treats any non-None return as the tool's response
         and skips the call, so this both blocks the body and tells the model,
-        deterministically, what it is not allowed to do.
+        deterministically, what it is not allowed to do. `disposition` mirrors
+        the ledger: held_pending_grant ("waiting on a human") is not
+        out_of_authority ("stopped") — the model and the operator see the same word.
         """
+        if disposition is None and any(r.code == ReasonCode.SCOPE_NOT_GRANTED for r in decision.reasons):
+            disposition = Disposition.OUT_OF_AUTHORITY
         return {
             "error": "authority_denied",
             "agent": agent_name,
@@ -331,5 +348,6 @@ class DelegationGuardPlugin(BasePlugin):
             "scope": scope,
             "node": guard.node_id,
             "reasons": [r.code for r in decision.reasons],
+            "disposition": disposition,
             "detail": decision.explain(),
         }
