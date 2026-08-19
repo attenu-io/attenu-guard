@@ -242,6 +242,17 @@ class DelegationGuardPlugin(BasePlugin):
 
         target = self._delegation_target(tool, tool_args)
         if target is not None:
+            # A transfer BACK to an ancestor (ADK's `transfer_to_agent` to the parent/root) is control flow
+            # returning up, not a new delegation: no `agent.delegate.<ancestor>` check, no new Guard; the
+            # returning child is marked done on the ledger and control moves to the ancestor.
+            ancestor = self._guards.get(target)
+            if ancestor is not None and guard.is_descendant_of(ancestor):
+                try:
+                    guard.complete()
+                except Exception:  # noqa: BLE001 - informational lifecycle event must never block control flow
+                    pass
+                self._current = target
+                return None
             self._pending_parent[target] = agent_name
             request = tool_args.get("request")
             if isinstance(request, str) and request:

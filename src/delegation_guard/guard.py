@@ -118,6 +118,17 @@ class Guard:
     def authority(self) -> Authority:
         return self._node.authority
 
+    def is_descendant_of(self, other: "Guard") -> bool:
+        """True if `other` is an ancestor of this guard in the same chain (parent, grandparent, …)."""
+        if other._chain is not self._chain:
+            return False
+        node = self._node
+        while node.parent_id is not None:
+            if node.parent_id == other._node.node_id:
+                return True
+            node = self._chain.nodes[node.parent_id]
+        return False
+
     @property
     def agent_id(self) -> str:
         """The `agent_id` this Guard was issued/delegated to. Adapters key

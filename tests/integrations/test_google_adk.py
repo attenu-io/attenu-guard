@@ -392,6 +392,40 @@ def test_denial_carries_disposition_held_vs_unresolved_vs_out_of_authority():
 
 
 # ==========================================================================
+# 6c. A transfer BACK to an ancestor is control flow returning up, not a new
+#     delegation: it must not be checked as agent.delegate.<ancestor> (found
+#     live on travel-concierge, 2026-08-19) — and the child is marked done.
+# ==========================================================================
+def test_transfer_back_to_the_parent_is_a_return_not_a_delegation():
+    async def scenario():
+        calls: list = []
+        model = demo.ScriptedLlm(script={
+            "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer"), _text("thanks")],
+            "summarizer": [_fc("crm_query", rows=4), _fc("transfer_to_agent", agent_name="orchestrator"), _text("back")],
+        })
+        summarizer = LlmAgent(name="summarizer", model=model, description="Summarizes CRM data.",
+                              tools=[demo.make_crm_query(calls), demo.make_crm_export(calls)])
+        orchestrator = LlmAgent(name="orchestrator", model=model, description="Routes work.", sub_agents=[summarizer])
+        root_guard = Guard.issue("orchestrator", Authority(scopes={"crm.*", "mail.send", "agent.delegate.summarizer"},
+                                                           ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600), task="root")
+        plugin = dg_adk.DelegationGuardPlugin(root_guard, root_agent_name="orchestrator", delegations={"summarizer": SUMMARIZER_REQUEST},
+                                              tools=demo.TOOL_AUTHORITIES, delegation_scope="agent.delegate")
+        app = App(name="dg-adk-ret", root_agent=orchestrator, plugins=[plugin])
+        sessions = InMemorySessionService(); runner = Runner(app=app, session_service=sessions)
+        session = await sessions.create_session(app_name="dg-adk-ret", user_id="u")
+        return await _drive(runner, session, "go"), root_guard, plugin
+    events, root_guard, plugin = asyncio.run(scenario())
+    ents = root_guard.audit_log().entries
+    denies = [e for e in ents if e["event"] == "deny"]
+    assert not [d for d in denies if d.get("scope") == "agent.delegate.orchestrator"], "a return to the parent must not be denied as a delegation"
+    spawns = [e for e in ents if e["event"] == "spawn"]
+    assert [e["agent"] for e in spawns] == ["summarizer"]                              # one real delegation, no 'orchestrator' child
+    done = [e for e in ents if e["event"] == "done" and e.get("agent") == "summarizer"]
+    assert done, "the child that hands control back is marked done"
+    assert plugin.guard_for("orchestrator") is root_guard
+
+
+# ==========================================================================
 # 7. raise_on_deny=True is the hard-stop variant.
 # ==========================================================================
 def test_raise_on_deny_aborts_the_run():

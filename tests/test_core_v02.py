@@ -1045,6 +1045,17 @@ def test_denials_fold_groups_deny_events_for_the_decisions_screen():
     bundle2 = evidence.export_bundle(root.audit_log(), HS256TestSigner(secret=b"k", kid="k"))
     assert evidence.delegation_graph(bundle2)["nodes"][child.node_id]["denials_by_disposition"].get("revoked") == 1
 
+
+def test_is_descendant_of_walks_the_chain_and_rejects_foreign_chains():
+    from delegation_guard import Authority, Guard
+    root = Guard.issue("a", Authority({"agent.delegate.b", "agent.delegate.c", "x.y"}, [], ttl=None), task="t")
+    b = root.delegate("b", Authority({"agent.delegate.c", "x.y"}, [], ttl=None), task="t")
+    c = b.delegate("c", Authority({"x.y"}, [], ttl=None), task="t")
+    assert c.is_descendant_of(b) and c.is_descendant_of(root) and b.is_descendant_of(root)
+    assert not root.is_descendant_of(c) and not b.is_descendant_of(c) and not root.is_descendant_of(root)
+    other = Guard.issue("a", Authority({"x.y"}, [], ttl=None), task="t")
+    assert not c.is_descendant_of(other)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -56,6 +56,11 @@ Driven by integration PoCs against twelve real agent frameworks
 - **`wire.Ed25519Verifier`** — public-key-only verification for consoles/auditors/ingest (cannot sign);
   `Ed25519Signer.private_bytes_raw()` / `from_private_bytes()` for key files.
 
+- **`Guard.is_descendant_of(other)`**; the **Google ADK adapter treats `transfer_to_agent` back to an ancestor as a
+  return**, not a delegation: no `agent.delegate.<ancestor>` check, the returning child is marked `done`, control
+  moves up (found live on a 21-agent app where the planner transferred back to root and was denied).
+- `evidence.delegation_graph` names a disposition-less deny by its reason (`revoked`, `ceiling_exceeded`).
+
 ### Changed
 - Version 0.3.0 (ledger schema gains an optional `disposition` field on deny; wire and hash chain unchanged).
 - `ReasonCode.NO_AUTHORITY` — the principal holds no Authority in this chain
