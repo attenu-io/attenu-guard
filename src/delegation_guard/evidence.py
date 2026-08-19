@@ -22,10 +22,48 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from delegation_guard.audit import SCHEMA_VERSION, AuditLog
+from delegation_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from delegation_guard.authority import Authority
 
-__all__ = ["export_bundle", "verify_bundle", "delegation_graph"]
+__all__ = ["export_bundle", "verify_bundle", "delegation_graph", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS"]
+
+# The COMPLETE set of top-level ledger field names the shim emits. Custody guarantee (A2b): an exported bundle may
+# carry ONLY these — an unknown field is exactly where a raw tool argument would be smuggled, so it is a leak, not a
+# curiosity. This is a test, not a habit: `export_bundle(strict=True)` raises on any field outside this set.
+LEDGER_FIELDS = frozenset({
+    "v", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
+    "scope", "tool", "context", "reason", "reasons", "authority", "requested", "granted", "target",
+    "revoked", "strikes", "mode",
+})
+# `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
+
+
+class EvidenceLeakError(RuntimeError):
+    """Raised by export_bundle(strict=True) when a bundle would carry a field or context key outside the allow-list —
+    i.e. potential customer data the custody contract says must not leave the premises."""
+
+
+def _redact_task(t):
+    import hashlib
+    if not t:
+        return t
+    return f"redacted:len={len(str(t))}:h={hashlib.sha256(str(t).encode()).hexdigest()[:12]}"
+
+
+def redaction_report(entries: list[dict], *, context_allowlist=None) -> dict:
+    """Every top-level field must be in LEDGER_FIELDS; if `context_allowlist` is given, every context key must be in it.
+    Returns {ok, violations:[{event_index, field|context_key, ...}]}. `task` free-text is allowed structurally but is
+    redacted by export_bundle(redact_task=True) for transport (its raw value is the caller's, not the shim's, to keep)."""
+    violations = []
+    for i, e in enumerate(entries):
+        for f in e:
+            if f not in LEDGER_FIELDS:
+                violations.append({"event_index": i, "event": e.get("event"), "field": f})
+        if context_allowlist is not None:
+            for k in (e.get("context") or {}):
+                if k not in context_allowlist:
+                    violations.append({"event_index": i, "event": e.get("event"), "context_key": k})
+    return {"ok": not violations, "violations": violations}
 
 
 def _chain_id(entries: list[dict]) -> str:
@@ -47,14 +85,34 @@ def _anchor_for(entries: list[dict], signer, ts: int = 0) -> dict:
     return {**body, "kid": getattr(signer, "kid", None), "sig": signer.sign(signing_input).hex()}
 
 
-def export_bundle(audit_log: AuditLog, signer, ts: int = 0) -> dict:
-    """A self-contained evidence bundle: the full ledger + a signed anchor over its head."""
-    entries = audit_log.entries
+def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist=None, redact_task: bool = False,
+                  strict: bool = False) -> dict:
+    """A self-contained evidence bundle: the full ledger + a signed anchor over its head.
+
+    Custody (A2b): with `redact_task=True`, free-text `task` fields are replaced by a length+hash marker BEFORE the
+    anchor is computed, so the transported bundle carries no raw prompt text yet still verifies. With `strict=True`
+    the bundle is checked against LEDGER_FIELDS (and `context_allowlist` if given) and an `EvidenceLeakError` is
+    raised on any field/context key outside the allow-list — the flywheel transport ships nothing unvetted."""
+    import copy
+    entries = copy.deepcopy(audit_log.entries)
+    if redact_task:
+        for e in entries:
+            if "task" in e:
+                e["task"] = _redact_task(e["task"])
+        # re-hash the chain so the redacted form is what the anchor covers (redaction is not tampering: it only ever removes)
+        prev = _GENESIS
+        for e in entries:
+            e["prev_hash"] = prev
+            payload = {k: v for k, v in e.items() if k != "hash"}
+            e["hash"] = _rehash(prev, payload); prev = e["hash"]
+    report = redaction_report(entries, context_allowlist=context_allowlist)
+    if strict and not report["ok"]:
+        raise EvidenceLeakError(f"{len(report['violations'])} field(s) outside the ledger allow-list: {report['violations'][:5]}")
     anchor = _anchor_for(entries, signer, ts)
     from delegation_guard import AuditLog as _AL
     anchor["verified"] = _AL.verify_anchor(entries, anchor, signer)[0]
     return {"v": SCHEMA_VERSION, "chain_id": _chain_id(entries), "entries": entries, "anchor": anchor,
-            "note": "offline-verifiable: delegation_guard.evidence.verify_bundle(bundle, signer)"}
+            "redaction": report, "note": "offline-verifiable: delegation_guard.evidence.verify_bundle(bundle, signer)"}
 
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, list]:

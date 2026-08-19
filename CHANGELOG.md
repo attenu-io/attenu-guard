@@ -67,6 +67,12 @@ Driven by integration PoCs against twelve real agent frameworks
   without the hooks. The ADK plugin now records the `AgentTool` `request` as the
   child's task text on the spawn record (was `"delegated to <name>"`).
 
+- **Bundle redaction guarantee (`evidence.redaction_report`, `export_bundle(strict=, context_allowlist=, redact_task=)`,
+  `EvidenceLeakError`).** The exported bundle is customer data in transit, so custody is a test not a habit: a top-level
+  `LEDGER_FIELDS` allow-list (an unknown field is where a raw argument would hide → `strict=True` raises), an optional
+  caller `context_allowlist` (a raw tool-arg value under a non-feature context key is caught), and `redact_task=True`
+  replaces free-text prompts with a length+hash marker before the anchor, so the transport carries no raw prompt yet
+  still verifies. Nothing unvetted leaves the premises.
 - **Offline evidence bundle + verifier (`delegation_guard.evidence`).** `export_bundle(audit_log, signer)`
   produces a self-contained bundle (the hash-chained ledger + a signed anchor); `verify_bundle(bundle, signer)`
   checks three invariants from the bundle ALONE, no engine: **integrity** (hash chain + anchor — a consistent

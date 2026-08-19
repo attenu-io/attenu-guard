@@ -1162,3 +1162,54 @@ def test_delegation_graph_view_from_the_bundle():
     assert g["edges"] == [{"parent": root.node_id, "child": next(n for n in g["nodes"] if g["nodes"][n]["agent"] == "summarizer")}]
     summ = next(v for v in g["nodes"].values() if v["agent"] == "summarizer")
     assert summ["scopes"] == ["crm.read"] and summ["allows"] == 1 and summ["denies"] == 1 and summ["complete"] is True
+
+
+# ---- Bundle redaction guarantee (attenu-derive A2b): the flywheel transports customer data, so "nothing leaks" is a -----
+# TEST, not a habit. Field allow-list + a caller context allow-list + free-text redaction; a raw argument in a bundle fails.
+def test_export_rejects_an_unknown_ledger_field():
+    from delegation_guard import Authority, Guard, evidence
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"k", kid="k")
+    root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
+    # simulate an adapter smuggling a raw value as a NEW field (exactly where a leak would hide)
+    root.audit_log().append("allow", 9, chain_id="chain", node="chain:n0", scope="crm.read", customer_email="alice@bank.example")
+    rep = evidence.redaction_report(root.audit_log().entries)
+    assert not rep["ok"] and any(v["field"] == "customer_email" for v in rep["violations"])
+    import pytest
+    with pytest.raises(evidence.EvidenceLeakError):
+        evidence.export_bundle(root.audit_log(), signer, strict=True)
+
+
+def test_raw_argument_in_context_is_caught_by_the_context_allowlist():
+    from delegation_guard import Authority, Guard, evidence
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"k", kid="k")
+    root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
+    root.check("crm.read", context={"rows": 5}, tool="q")                          # redacted feature: fine
+    root.check("crm.read", context={"to": "victim@evil.example"}, tool="send")     # a RAW arg value in context
+    FEATURES = {"rows", "spend", "egress", "calls", "arg_shape", "quantities", "str_len_buckets", "arg_hashes", "arg_keys"}
+    rep = evidence.redaction_report(root.audit_log().entries, context_allowlist=FEATURES)
+    assert not rep["ok"] and any(v.get("context_key") == "to" for v in rep["violations"])
+    import pytest
+    with pytest.raises(evidence.EvidenceLeakError):
+        evidence.export_bundle(root.audit_log(), signer, context_allowlist=FEATURES, strict=True)
+    # the clean-feature bundle passes
+    root2 = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t"); root2.check("crm.read", context={"rows": 5}, tool="q")
+    assert evidence.redaction_report(root2.audit_log().entries, context_allowlist=FEATURES)["ok"]
+
+
+def test_free_text_task_is_redacted_for_transport():
+    import json
+    from delegation_guard import Authority, Guard, evidence
+    from delegation_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"k", kid="k")
+    root = Guard.issue("orchestrator", Authority({"agent.delegate.s"}, [], ttl=None), task="Wire $10k to account 4821 for customer Alice Smith")
+    root.delegate("s", Authority(set(), [], ttl=None), task="pay the invoice for alice@bank.example")
+    bundle = evidence.export_bundle(root.audit_log(), signer, redact_task=True)
+    blob = json.dumps(bundle)
+    assert "Alice Smith" not in blob and "alice@bank.example" not in blob and "4821" not in blob   # no raw task text leaves
+    # the bundle still verifies (redaction happens before the anchor, so the hashes cover the redacted form)
+    assert evidence.verify_bundle(bundle, signer)["ok"] is True
+    # and a task field is present as a length/hash marker, not raw
+    tasks = [e["task"] for e in bundle["entries"] if e.get("task")]                 # root events carry no task in the ledger; spawns do
+    assert tasks and all(t.startswith("redacted:") for t in tasks)
