@@ -63,7 +63,7 @@ from .authority import Authority
 from .reasons import Decision, ReasonCode
 
 __all__ = [
-    "Signer", "HS256TestSigner", "Ed25519Signer", "Ed25519Verifier",
+    "Signer", "HS256TestSigner", "Ed25519Signer", "Ed25519Verifier", "ECDSAP256Verifier",
     "WireError", "WireReasonCode", "VerifiedChain",
     "serialize", "serialize_chain", "load",
     "b64url_encode", "b64url_decode",
@@ -236,6 +236,29 @@ class Ed25519Signer:
         """Rebuild a signer from the 32 raw bytes `private_bytes_raw()` produced."""
         ed25519 = _require_ed25519()
         return cls(ed25519.Ed25519PrivateKey.from_private_bytes(raw), kid=kid)
+
+
+class ECDSAP256Verifier:
+    """Public-key-only verifier for ECDSA P-256 / SHA-256 (JOSE "ES256") — what a cloud KMS signs with (AWS KMS,
+    GCP KMS have no Ed25519). Takes the SubjectPublicKeyInfo DER bytes a KMS `GetPublicKey` returns and verifies DER
+    signatures. Lives in the shim so an auditor verifying a KMS-anchored bundle needs no cloud SDK."""
+    alg = "ES256"
+
+    def __init__(self, spki_der: bytes, *, kid: str = "kms-1"):
+        from cryptography.hazmat.primitives import serialization
+        self._public_key = serialization.load_der_public_key(spki_der); self.kid = kid
+
+    def sign(self, signing_input: bytes) -> bytes:
+        raise RuntimeError("ECDSAP256Verifier holds no private key and cannot sign")
+
+    def verify(self, signing_input: bytes, sig: bytes, key_id: str | None = None) -> bool:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        try:
+            self._public_key.verify(sig, signing_input, ec.ECDSA(hashes.SHA256()))
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
 
 class Ed25519Verifier:

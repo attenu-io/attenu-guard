@@ -539,6 +539,20 @@ class TestEd25519Signer(unittest.TestCase):
         other = wire.Ed25519Signer.generate(kid="other")
         self.assertFalse(wire.Ed25519Verifier(other.public_bytes_raw(), kid="other").verify(b"m", self.signer.sign(b"m")))
 
+    def test_ecdsa_p256_verifier_accepts_a_der_signature_over_the_anchor_input(self):
+        """What a KMS-backed anchor looks like to a verifier: ECDSA P-256 (KMS has no Ed25519), SPKI DER public key,
+        DER signature. The verifier side lives in the shim so an auditor needs no cloud SDK."""
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        sk = ec.generate_private_key(ec.SECP256R1())
+        spki = sk.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+        v = wire.ECDSAP256Verifier(spki, kid="kms-1")
+        msg = b'{"chain_id":"c","head":"h","seq":3,"ts":0,"v":1}'
+        sig = sk.sign(msg, ec.ECDSA(hashes.SHA256()))
+        self.assertTrue(v.verify(msg, sig)); self.assertFalse(v.verify(msg + b"x", sig))
+        with self.assertRaises(RuntimeError):
+            v.sign(b"x")
+
     def test_private_key_round_trips_through_raw_bytes(self):
         raw = self.signer.private_bytes_raw()                             # what a key file stores (32 bytes)
         self.assertEqual(len(raw), 32)
