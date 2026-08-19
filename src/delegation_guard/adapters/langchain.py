@@ -78,6 +78,7 @@ from langchain_core.messages import ToolMessage
 from delegation_guard import (
     Authority, AuthorityDenied, AuthorityError, Decision, Guard, Reason,
 )
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "ToolPolicy",
@@ -124,11 +125,16 @@ class ToolPolicy:
     metered: forwarded to `Guard.check(metered=...)` — set True for calls that
              consume a metered budget, so `strict_metering` guards can refuse
              an undeclared quantity instead of treating it as free.
+    disposition: optional `Disposition` the authority source knows about this
+             tool (`held_pending_grant` · `withheld_tier2` · `unresolved`);
+             recorded on a `deny` so "held" never reads as "denied". Omit for a
+             grantable tool (a deny is then `out_of_authority`).
     """
 
     scope: str
     context: Optional[Callable[[Mapping[str, Any]], Mapping[str, Any]]] = None
     metered: bool = False
+    disposition: Optional[str] = None
 
     def context_for(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
         return self.context(args) if self.context else {}
@@ -287,16 +293,20 @@ class GuardedDelegation:
         if policy is None:
             if self.allow_unlisted:
                 return self._Gate()
-            return self._Gate(denial=self._deny(request, Decision.deny(
-                Reason("undeclared_tool", requested=name,
+            # No authority is known for this tool: the refusal goes on the
+            # ledger (record_denial) as `unresolved` — an operator's Decisions
+            # queue is a fold over the ledger, not over this adapter's memory.
+            return self._Gate(denial=self._deny(request, guard.record_denial(
+                Reason(ReasonCode.NO_AUTHORITY, requested=name,
                        message=f"no delegation-guard policy declared for tool {name!r}"),
-                node=guard.node_id)))
+                tool=name, disposition=Disposition.UNRESOLVED)))
 
         decision = guard.check(
             policy.scope,
             context=policy.context_for(args),
             metered=policy.metered,
             tool=name,
+            disposition=policy.disposition,
         )
         if not decision:
             return self._Gate(denial=self._deny(request, decision))

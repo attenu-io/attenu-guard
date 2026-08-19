@@ -85,6 +85,7 @@ from delegation_guard import (
     Guard,
     ReasonCode,
 )
+from delegation_guard.reasons import Disposition
 
 __all__ = ["ToolPolicy", "Denial", "CrewAIGuardBridge", "DELEGATION_TOOLS"]
 
@@ -133,10 +134,15 @@ class ToolPolicy:
                 ``lambda args: {"rows": args["rows"]}``. Whatever it returns is
                 handed to `Guard.check(context=...)` and evaluated against the
                 ceilings. Omit it for a scope-only check.
+    disposition: optional `Disposition` the authority source knows about this
+                tool (`held_pending_grant` · `withheld_tier2` · `unresolved`);
+                recorded on a `deny` so "held" never reads as "denied". Omit
+                for a grantable tool (a deny is then `out_of_authority`).
     """
 
     scope: str
     context_fn: Optional[Callable[[Mapping[str, Any]], Mapping[str, Any]]] = None
+    disposition: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -294,15 +300,26 @@ class CrewAIGuardBridge:
         if policy is None and self._default_policy is not None:
             policy = self._default_policy(tool_name)
         if policy is None:
+            # No authority is known for this tool: put the refusal on the
+            # ledger (record_denial) as `unresolved`, not only in `denials` —
+            # an operator's Decisions queue is a fold over the ledger.
+            decision = guard.record_denial(
+                ReasonCode.NO_AUTHORITY,
+                f"no tool policy declared for {tool_name!r}",
+                tool=tool_name,
+                disposition=Disposition.UNRESOLVED,
+            )
             self._deny(
                 role,
                 tool_name,
                 args,
                 f"no tool policy declared for {tool_name!r}",
+                decision=decision,
             )
 
         context = dict(policy.context_fn(args)) if policy.context_fn else {}
-        decision = guard.check(policy.scope, context=context, tool=tool_name)
+        decision = guard.check(policy.scope, context=context, tool=tool_name,
+                               disposition=policy.disposition)
         if not decision:
             self._deny(role, tool_name, args, decision.explain(), decision=decision)
 
