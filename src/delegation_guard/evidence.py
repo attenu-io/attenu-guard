@@ -33,7 +33,7 @@ __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "redaction_repo
 LEDGER_FIELDS = frozenset({
     "v", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
     "scope", "tool", "context", "reason", "reasons", "authority", "requested", "granted", "target",
-    "revoked", "strikes", "mode",
+    "revoked", "strikes", "mode", "disposition",
 })
 # `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
 

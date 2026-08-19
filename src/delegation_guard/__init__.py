@@ -22,7 +22,7 @@ call — enforced in code, offline-verifiable, with a hash-chained audit log.
 
     summarizer.enforce("crm.export", context={"egress": "any"})  # raises AuthorityDenied
 """
-from .reasons import Decision, Reason, ReasonCode
+from .reasons import Decision, Reason, ReasonCode, Disposition
 from .ceilings import (
     Ceiling, RowLimit, SpendCap, CallLimit, EgressRank, Allow, Deny, Prefix,
     register_ceiling,
@@ -35,7 +35,7 @@ from . import wire, scenarios, evidence          # stdlib-only submodules (wire 
 
 __version__ = "0.2.0"
 __all__ = [
-    "Authority", "Guard", "Decision", "Reason", "ReasonCode",
+    "Authority", "Guard", "Decision", "Reason", "ReasonCode", "Disposition",
     "AuthorityError", "AuthorityDenied", "AuditLog",
     "Ceiling", "RowLimit", "SpendCap", "CallLimit", "EgressRank", "StrikePolicy",
     "Allow", "Deny", "Prefix", "register_ceiling",

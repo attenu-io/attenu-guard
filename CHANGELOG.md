@@ -31,6 +31,13 @@ Driven by integration PoCs against twelve real agent frameworks
   guarantee — importing the adapter does not import langgraph.
 
 ### Added
+- **`deny` ledger entries carry a `disposition` — held is not over-reach.** `Guard.check(..., disposition=)` and
+  `Guard.record_denial(..., disposition=)` accept a `Disposition` value (`held_pending_grant` · `withheld_tier2` ·
+  `unresolved` · `out_of_authority`); a plain `scope_not_granted` deny the caller did not explain records
+  `out_of_authority` (the shim's own truth); unknown values are refused before anything reaches the ledger; `allow`
+  entries never carry it. `Disposition` is exported; `evidence.LEDGER_FIELDS` and `schema/agent-audit.schema.json`
+  gained the field so a strict export still passes. Closes the threat model's "held pending curation must render
+  distinct from denied" item at the ledger, where every UI reads it.
 - `ReasonCode.NO_AUTHORITY` — the principal holds no Authority in this chain
   (adapter-level: undelegated agent, unmapped tool, unparseable args).
 - `Guard.record_denial(reason, message, *, scope, tool, context)` — put an

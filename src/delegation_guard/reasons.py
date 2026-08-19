@@ -48,6 +48,22 @@ class ReasonCode:
                                                 # tool, unparseable args) — upstream of scope/ceilings
 
 
+class Disposition:
+    """WHY a denied scope was not in the node's authority — the ledger's answer to "held, or over-reach?".
+
+    The shim records what its caller states; it never derives. The default for a policy deny with
+    `scope_not_granted` is OUT_OF_AUTHORITY, which is literally true for the shim (the scope was not
+    held by this node). An authority source (e.g. a derivation engine) states the richer reason it
+    knows: held pending an operator grant, withheld tier-2, or an unresolved tool. Held means
+    "waiting on you"; out_of_authority means "we stopped something". Never rename a value.
+    """
+    HELD_PENDING_GRANT = "held_pending_grant"   # known, curated, waiting on a human decision
+    WITHHELD_TIER2 = "withheld_tier2"           # resolvable only to a tier-2 heuristic that is never granted
+    UNRESOLVED = "unresolved"                   # no authority known for this tool at all
+    OUT_OF_AUTHORITY = "out_of_authority"       # resolved and grantable, but not held by THIS node — real over-reach
+    ALL = frozenset({HELD_PENDING_GRANT, WITHHELD_TIER2, UNRESOLVED, OUT_OF_AUTHORITY})
+
+
 @dataclass(frozen=True)
 class Reason:
     """One specific cause of a denial (or, in principle, an informational

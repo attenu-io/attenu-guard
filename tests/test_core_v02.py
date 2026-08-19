@@ -982,6 +982,47 @@ class TestPublicExports(unittest.TestCase):
         self.assertTrue(ok, reason)
 
 
+
+# ---- Slice 1 / Plan A, Task 1: deny entries say WHY (held != over-reach) -----------------------------------
+def test_deny_entries_carry_a_disposition_and_allow_entries_do_not():
+    from delegation_guard import Authority, Guard, Disposition
+    g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
+    g.check("crm.read", tool="lookup")                                   # allowed
+    g.check("payments.transfer", tool="charge_card")                     # not held -> denied, caller said nothing
+    g.check("mail.send", tool="send_care", disposition=Disposition.HELD_PENDING_GRANT)
+    g.record_denial("no_authority", "undeclared tool", tool="mystery", disposition=Disposition.UNRESOLVED)
+    ents = g.audit_log().entries
+    allow = [e for e in ents if e["event"] == "allow"]
+    deny = [e for e in ents if e["event"] == "deny"]
+    assert allow and all("disposition" not in e for e in allow)
+    by_tool = {e["tool"]: e for e in deny}
+    assert by_tool["charge_card"]["disposition"] == Disposition.OUT_OF_AUTHORITY   # the shim's own truth: not in this node's authority
+    assert by_tool["send_care"]["disposition"] == Disposition.HELD_PENDING_GRANT      # the caller's stated reason survives
+    assert by_tool["mystery"]["disposition"] == Disposition.UNRESOLVED
+    assert Disposition.ALL == {"held_pending_grant", "withheld_tier2", "unresolved", "out_of_authority"}
+
+
+def test_unknown_disposition_is_rejected_fail_closed():
+    from delegation_guard import Authority, Guard
+    g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
+    try:
+        g.check("x.y", tool="t", disposition="made_up")
+    except ValueError as exc:
+        assert "disposition" in str(exc)
+    else:
+        raise AssertionError("an unknown disposition must be refused, never written to the ledger")
+    assert not [e for e in g.audit_log().entries if e["event"] == "deny"]          # nothing reached the ledger
+
+
+def test_disposition_survives_strict_export_and_the_bundle_verifies():
+    from delegation_guard import Authority, Guard, Disposition, evidence
+    from delegation_guard.wire import HS256TestSigner
+    g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
+    g.check("mail.send", tool="send_care", disposition=Disposition.HELD_PENDING_GRANT)
+    bundle = evidence.export_bundle(g.audit_log(), HS256TestSigner(secret=b"k", kid="k"), strict=True)   # must not raise EvidenceLeakError
+    assert evidence.verify_bundle(bundle, HS256TestSigner(secret=b"k", kid="k"))["ok"] is True
+    assert [e for e in bundle["entries"] if e["event"] == "deny"][0]["disposition"] == "held_pending_grant"
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

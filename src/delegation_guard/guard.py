@@ -40,7 +40,7 @@ from typing import Mapping
 from .authority import Authority, AuthorityError
 from .chain import Chain, Node, MonotonicClock
 from .audit import AuditLog
-from .reasons import Decision, Reason, ReasonCode
+from .reasons import Decision, Reason, ReasonCode, Disposition
 from .ceilings import ctx_field_of, is_metered
 
 __all__ = ["Guard", "AuthorityDenied"]
@@ -264,8 +264,14 @@ class Guard:
             decision = Decision(decision.allowed, decision.reasons, nid)
         return decision
 
+    @staticmethod
+    def _check_disposition(disposition: str | None) -> None:
+        if disposition is not None and disposition not in Disposition.ALL:
+            raise ValueError(f"unknown disposition {disposition!r}; expected one of {sorted(Disposition.ALL)}")
+
     def _log_decision(self, decision: Decision, scope: str,
-                       tool: str | None, context: Mapping) -> None:
+                       tool: str | None, context: Mapping,
+                       disposition: str | None = None) -> None:
         event = "allow" if decision else "deny"
         fields = dict(chain_id=self.chain_id, node=self._node.node_id, scope=scope,
                      tool=tool, context=dict(context))
@@ -278,6 +284,15 @@ class Guard:
             # just the first.
             fields["reason"] = decision.reasons[0].code if decision.reasons else None
             fields["reasons"] = [r.to_dict() for r in decision.reasons]
+            # "disposition": WHY the scope was absent — the caller's statement
+            # (held pending grant / withheld tier-2 / unresolved) or, for a plain
+            # scope_not_granted the caller did not explain, the shim's own truth:
+            # out_of_authority. Allow entries never carry it.
+            self._check_disposition(disposition)
+            d = disposition or (Disposition.OUT_OF_AUTHORITY
+                                if fields["reason"] == ReasonCode.SCOPE_NOT_GRANTED else None)
+            if d is not None:
+                fields["disposition"] = d
         self._append(event, **fields)
 
     # ---- enforcement ---------------------------------------------------
@@ -301,7 +316,8 @@ class Guard:
 
     def check(self, scope: str, *, context: Mapping | None = None,
               metered: bool = False, tool: str | None = None,
-              rows=None, spend=None, egress=None) -> Decision:
+              rows=None, spend=None, egress=None,
+              disposition: str | None = None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
 
@@ -309,14 +325,21 @@ class Guard:
         not supply `calls`, the guard supplies the running count for
         (node, scope) itself — including this call — and increments it on
         allow. An explicit `calls` in the context always wins.
+
+        `disposition` (optional, a `Disposition` value): what the caller knows
+        about WHY this scope would be absent from the node's authority —
+        held pending an operator grant, withheld tier-2, unresolved tool. It
+        is recorded on a `deny` entry only; on a plain `scope_not_granted`
+        deny with no statement the ledger records `out_of_authority`.
         """
+        self._check_disposition(disposition)                      # refuse before anything reaches the ledger
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         filled = self._auto_meter(scope, ctx)
         decision = self._evaluate(scope, ctx, metered)
         if decision:
             for c in filled:
                 self._chain.count_call(self._node.node_id, getattr(c, "meter_key", "*"))
-        self._log_decision(decision, scope, tool, ctx)
+        self._log_decision(decision, scope, tool, ctx, disposition)
         if not decision and self._strikes is not None and self._strikes.enabled and not self._chain.is_revoked(self._node.node_id):
             count = self._chain.record_strike(self._strikes.key(self._node.node_id, scope))
             if count >= self._strikes.n:
@@ -345,7 +368,8 @@ class Guard:
         return self._evaluate(scope, ctx, metered)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,
-                      tool: str | None = None, context: Mapping | None = None) -> Decision:
+                      tool: str | None = None, context: Mapping | None = None,
+                      disposition: str | None = None) -> Decision:
         """Put an ADAPTER-LEVEL refusal on the audit trail as a `deny` event
         and return it as a Decision — for denials that happen UPSTREAM of
         policy evaluation (an agent the chain never delegated to, a tool
@@ -359,10 +383,11 @@ class Guard:
         given. `scope` defaults to `tool` (or "-") because the published
         audit schema requires a string scope on allow/deny events.
         """
+        self._check_disposition(disposition)
         r = reason if isinstance(reason, Reason) else Reason(str(reason), message=message)
         decision = Decision.deny(r, node=self._node.node_id)
         self._log_decision(decision, scope if scope is not None else (tool or "-"),
-                           tool, dict(context) if context else {})
+                           tool, dict(context) if context else {}, disposition)
         return decision
 
     @contextmanager
