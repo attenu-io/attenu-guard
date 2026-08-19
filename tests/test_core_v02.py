@@ -1040,6 +1040,10 @@ def test_denials_fold_groups_deny_events_for_the_decisions_screen():
     graph = evidence.delegation_graph(bundle)
     assert graph["nodes"][child.node_id]["denials_by_disposition"] == {"held_pending_grant": 2, "out_of_authority": 1}
     assert graph["nodes"][root.node_id]["denials_by_disposition"] == {}
+    # a deny with no disposition is named by its reason (e.g. revoked) rather than lumped as "unstated"
+    child.revoke(); child.check("crm.read", tool="q")
+    bundle2 = evidence.export_bundle(root.audit_log(), HS256TestSigner(secret=b"k", kid="k"))
+    assert evidence.delegation_graph(bundle2)["nodes"][child.node_id]["denials_by_disposition"].get("revoked") == 1
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -145,7 +145,7 @@ def delegation_graph(bundle: dict) -> dict:
         elif ev == "allow" and n in meta: meta[n]["allows"] += 1
         elif ev == "deny" and n in meta:
             meta[n]["denies"] += 1
-            d = e.get("disposition") or "unstated"
+            d = e.get("disposition") or e.get("reason") or "unstated"     # a deny without a disposition is named by its reason (revoked, ceiling_exceeded…)
             meta[n]["denials_by_disposition"][d] = meta[n]["denials_by_disposition"].get(d, 0) + 1
         elif ev == "done" and n in meta: meta[n]["complete"] = True
         elif ev == "kill":
