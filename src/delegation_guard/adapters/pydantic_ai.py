@@ -62,6 +62,7 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from delegation_guard import Authority, AuthorityDenied, Guard
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "ToolPolicy",
@@ -135,6 +136,7 @@ class ToolPolicy:
     scope: str | None
     context: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
     metered: bool = False
+    disposition: str | None = None        # see delegation_guard.Disposition
 
 
 UNGUARDED = ToolPolicy(scope=None)
@@ -219,7 +221,8 @@ def authorize_tool_call(
 
     context = dict(policy.context(args)) if policy.context is not None else {}
     decision = guard.check(
-        policy.scope, context=context, metered=policy.metered, tool=tool_name
+        policy.scope, context=context, metered=policy.metered, tool=tool_name,
+        disposition=policy.disposition,
     )
     if decision:
         return
@@ -246,11 +249,14 @@ def _resolve(
     if policy is None:
         if on_unmapped == "allow":
             return None
-        raise UnmappedToolError(
-            f"{label}: tool {tool_name!r} has no ToolPolicy, so the authority it "
-            f"consumes is undeclared and the call cannot be authorized. Add it to "
-            f"`policies`, mark it `UNGUARDED`, or pass `on_unmapped='allow'`."
-        )
+        msg = (f"{label}: tool {tool_name!r} has no ToolPolicy, so the authority it "
+               f"consumes is undeclared and the call cannot be authorized. Add it to "
+               f"`policies`, mark it `UNGUARDED`, or pass `on_unmapped='allow'`.")
+        # No authority is known for this tool: on the ledger as `unresolved` when a Guard exists.
+        g = get_guard(ctx)
+        if g is not None:
+            g.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=tool_name, disposition=Disposition.UNRESOLVED)
+        raise UnmappedToolError(msg)
 
     guard = get_guard(ctx)
     if guard is None:

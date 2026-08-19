@@ -61,6 +61,7 @@ from autogen_core.tools import (
 from pydantic import BaseModel, ConfigDict
 
 from delegation_guard import Authority, AuthorityDenied, AuthorityError, Guard
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "Grant",
@@ -107,6 +108,7 @@ class ToolPolicy:
     metered: bool = False
     delegates_to: Optional[str] = None
     grant: Optional[Grant] = None
+    disposition: Optional[str] = None     # see delegation_guard.Disposition
 
 
 # ---------------------------------------------------------------------------
@@ -202,12 +204,13 @@ class GuardedWorkbench(StaticStreamWorkbench):
         original = self._override_name_to_original.get(name, name)
         policy = self._policies.get(original)
         if policy is None:
-            return self._deny(
-                name,
-                f"delegation-guard: no ToolPolicy declared for tool {original!r} "
-                f"(fail-closed).",
-                decision=None,
-            )
+            # No authority is known for this tool: put it on the ledger as
+            # `unresolved` when a Guard exists (the Decisions queue folds the ledger).
+            g = self._registry.get(self._agent_name)
+            msg = f"delegation-guard: no ToolPolicy declared for tool {original!r} (fail-closed)."
+            decision = (g.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=original,
+                                        disposition=Disposition.UNRESOLVED) if g is not None else None)
+            return self._deny(name, msg, decision=decision)
 
         guard = self._registry.get(self._agent_name)
         if guard is None:
@@ -220,7 +223,8 @@ class GuardedWorkbench(StaticStreamWorkbench):
 
         context = policy.context(arguments) if policy.context else {}
         decision = guard.check(
-            policy.scope, context=context, tool=original, metered=policy.metered
+            policy.scope, context=context, tool=original, metered=policy.metered,
+            disposition=policy.disposition,
         )
         if not decision:
             return self._deny(

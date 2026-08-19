@@ -96,6 +96,7 @@ from semantic_kernel.filters.filter_types import FilterTypes
 from semantic_kernel.functions.function_result import FunctionResult
 
 from delegation_guard import Authority, AuthorityDenied, Decision, Guard, ReasonCode
+from delegation_guard.reasons import Disposition
 
 # Reason code for "this principal holds no Authority in the chain at all".
 # `getattr` because older delegation-guard releases predate the constant; the
@@ -193,6 +194,7 @@ class ToolPolicy:
     scope: str
     context: Callable[[Mapping[str, Any]], Mapping[str, Any]] | Mapping[str, Any] | None = None
     metered: bool = False
+    disposition: str | None = None        # see delegation_guard.Disposition
 
     def context_for(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         if self.context is None:
@@ -294,7 +296,8 @@ class DelegationChain:
         if self._trace:
             self.decisions.append(GuardedCall(agent, tool, scope, decision))
 
-    def record_refusal(self, agent: str, tool: str, reason: str, message: str) -> Decision | None:
+    def record_refusal(self, agent: str, tool: str, reason: str, message: str,
+                       disposition: str | None = None) -> Decision | None:
         """Put an ADAPTER-level refusal (unmapped tool, unknown agent, undeclared
         handoff target) on the audit trail.
 
@@ -310,7 +313,7 @@ class DelegationChain:
         recorder = getattr(self._root, "record_denial", None)
         decision = None
         if recorder is not None:
-            decision = recorder(reason, message, scope=tool, tool=tool)
+            decision = recorder(reason, message, scope=tool, tool=tool, disposition=disposition)
         if self._trace and decision is not None:
             self.decisions.append(GuardedCall(agent, tool, tool, decision))
         return decision
@@ -401,7 +404,7 @@ def attach_guard(
                        f"{function.fully_qualified_name!r}; refusing to run it. Declare its "
                        f"scope, map it to UNGUARDED, or pass on_unmapped='allow'.")
             chain.record_refusal(agent_name, function.fully_qualified_name,
-                                 "unmapped_tool", message)
+                                 "unmapped_tool", message, disposition=Disposition.UNRESOLVED)
             raise UnmappedToolError(message)
         if policy is UNGUARDED:
             await next(context)
@@ -421,6 +424,7 @@ def attach_guard(
             context=policy.context_for(context.arguments),
             metered=policy.metered,
             tool=function.fully_qualified_name,
+            disposition=policy.disposition,
         )
         chain._record(agent_name, function.fully_qualified_name, policy.scope, decision)
 

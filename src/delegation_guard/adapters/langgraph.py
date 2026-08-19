@@ -81,7 +81,7 @@ __all__ = ["guard_node", "DelegatedToolNode", "add_guarded_node", "is_langgraph_
 # =========================================================================
 
 def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
-               tool: Optional[str] = None):
+               tool: Optional[str] = None, disposition: Optional[str] = None):
     """Return a decorator that authorizes every call to the wrapped
     callable through `guard` before letting it run.
 
@@ -121,7 +121,8 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
         @functools.wraps(fn)
         def wrapped(*args, **kwargs):
             context: Mapping = context_fn(*args, **kwargs) if context_fn else {}
-            decision = guard.check(tool_scope, context=context, tool=resolved_tool)
+            decision = guard.check(tool_scope, context=context, tool=resolved_tool,
+                                   disposition=disposition)
             if not decision:
                 raise AuthorityDenied(decision)
             return fn(*args, **kwargs)
@@ -159,13 +160,16 @@ class DelegatedToolNode:
     """
 
     def __init__(self, guard, tool_scope: str, fn: Callable, *,
-                 context_fn: Optional[Callable] = None, tool: Optional[str] = None):
+                 context_fn: Optional[Callable] = None, tool: Optional[str] = None,
+                 disposition: Optional[str] = None):
         self.guard = guard
         self.tool_scope = tool_scope
         self.fn = fn
         self.context_fn = context_fn
         self.tool = tool if tool is not None else getattr(fn, "__name__", None)
-        self._call = guard_node(guard, tool_scope, context_fn=context_fn, tool=tool)(fn)
+        self.disposition = disposition
+        self._call = guard_node(guard, tool_scope, context_fn=context_fn, tool=tool,
+                                disposition=disposition)(fn)
 
     def __call__(self, *args, **kwargs):
         return self._call(*args, **kwargs)
@@ -193,7 +197,8 @@ def is_langgraph_available() -> bool:
 
 
 def add_guarded_node(graph, name: str, guard, tool_scope: str, fn: Callable, *,
-                     context_fn: Optional[Callable] = None, tool: Optional[str] = None):
+                     context_fn: Optional[Callable] = None, tool: Optional[str] = None,
+                     disposition: Optional[str] = None):
     """Convenience one-liner for real LangGraph usage: build the guarded
     wrapper and register it on a graph in one call.
 
@@ -210,6 +215,7 @@ def add_guarded_node(graph, name: str, guard, tool_scope: str, fn: Callable, *,
     plain fake graph object, no langgraph install required (see
     tests/test_langgraph_adapter.py).
     """
-    node = DelegatedToolNode(guard, tool_scope, fn, context_fn=context_fn, tool=tool)
+    node = DelegatedToolNode(guard, tool_scope, fn, context_fn=context_fn, tool=tool,
+                            disposition=disposition)
     graph.add_node(name, node)
     return node

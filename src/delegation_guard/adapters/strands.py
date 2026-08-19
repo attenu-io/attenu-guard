@@ -59,7 +59,7 @@ write `authority_for`. Whatever it returns is only ever an *input* to
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 
 from strands.hooks import (
     BeforeNodeCallEvent,
@@ -93,6 +93,7 @@ class ScopeRequest:
     scope: str
     context: Mapping[str, Any] = field(default_factory=dict)
     metered: bool = False
+    disposition: Optional[str] = None     # see delegation_guard.Disposition
 
 
 # (tool_use) -> ScopeRequest, or None meaning "this tool needs no authority"
@@ -255,6 +256,7 @@ class DelegationGuard(HookProvider):
                 context=dict(request.context),
                 metered=request.metered,
                 tool=tool_name,
+                disposition=request.disposition,
             )
             if self._on_decision is not None:
                 self._on_decision(self._agent_name(agent), tool_name, decision)

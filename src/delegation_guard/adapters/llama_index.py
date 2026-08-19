@@ -197,6 +197,7 @@ def guarded_tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
     return_direct: Optional[bool] = None,
+    disposition: Optional[str] = None,
 ) -> FunctionTool:
     """Wrap a callable (or an existing `BaseTool`) so that
     ``guard.check(scope, context=..., tool=...)`` runs before its body.
@@ -236,7 +237,8 @@ def guarded_tool(
                 f"refusing tool {tool_name!r}",
             )
         decision = guard.check(
-            scope, context=_context_for(kwargs), metered=metered, tool=tool_name
+            scope, context=_context_for(kwargs), metered=metered, tool=tool_name,
+            disposition=disposition,
         )
         if not decision:
             # Raised, not returned: AgentWorkflow._call_tool converts it into

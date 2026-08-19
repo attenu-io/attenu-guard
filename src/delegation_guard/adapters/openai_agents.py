@@ -260,6 +260,7 @@ def guarded_tool(
     metered: bool = False,
     on_denied: OnDenied = "reject",
     tool_label: Optional[str] = None,
+    disposition: Optional[str] = None,
 ) -> FunctionTool:
     """Authorize every invocation of `tool` against the RUNNING agent's Guard.
 
@@ -309,7 +310,8 @@ def guarded_tool(
             return _outcome(decision, on_denied)
 
         check_context = dict(context_fn(arguments)) if context_fn else {}
-        decision = guard.check(scope, context=check_context, metered=metered, tool=tool_name)
+        decision = guard.check(scope, context=check_context, metered=metered, tool=tool_name,
+                               disposition=disposition)
         if decision:
             return ToolGuardrailFunctionOutput.allow(output_info=decision.to_dict())
 

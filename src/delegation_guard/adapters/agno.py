@@ -68,6 +68,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
 from delegation_guard import Authority, AuthorityDenied, Decision, Guard
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "DELEGATION_TOOLS",
@@ -108,6 +109,7 @@ class ToolPolicy:
     scope: str
     context: ContextSpec = None
     metered: bool = False
+    disposition: Optional[str] = None     # see delegation_guard.Disposition
 
     def context_for(self, arguments: Mapping[str, Any]) -> Dict[str, Any]:
         if self.context is None:
@@ -207,13 +209,18 @@ def guarded_tool_hook(
 
         policy = policies.get(function_name)
         if policy is None:
-            _deny(_denied(f"no ToolPolicy declared for tool {function_name!r}"), on_deny)
+            # No authority is known for this tool: on the ledger as `unresolved`
+            # (record_denial), not only raised — the Decisions queue folds the ledger.
+            _deny(guard.record_denial(ReasonCode.NO_AUTHORITY,
+                                      f"no ToolPolicy declared for tool {function_name!r}",
+                                      tool=function_name, disposition=Disposition.UNRESOLVED), on_deny)
 
         decision = guard.check(
             policy.scope,
             context=policy.context_for(arguments),
             metered=policy.metered,
             tool=function_name,
+            disposition=policy.disposition,
         )
         if not decision:
             _deny(decision, on_deny)

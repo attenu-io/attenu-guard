@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional
 
 from delegation_guard import Authority, Guard
+from delegation_guard.reasons import Disposition, ReasonCode
 
 __all__ = ["ToolPolicy", "AgentGrant", "DelegationGuardRegistry", "DELEGATION_TOOLS"]
 
@@ -117,6 +118,7 @@ class ToolPolicy:
     scope: str
     context_fn: Optional[Callable[[Mapping[str, Any]], Mapping[str, Any]]] = None
     metered: bool = False
+    disposition: Optional[str] = None     # see delegation_guard.Disposition
 
     def context(self, tool_input: Mapping[str, Any]) -> Mapping[str, Any]:
         return dict(self.context_fn(tool_input)) if self.context_fn else {}
@@ -320,13 +322,16 @@ class DelegationGuardRegistry:
 
         policy = self.policy_for(tool_name)
         if policy is None:
-            return self._deny(
-                tool_name, agent_id,
-                f"tool {tool_name!r} has no delegation-guard ToolPolicy; "
-                f"refusing to authorize an unmapped capability")
+            # No authority is known for this tool: on the ledger as `unresolved`.
+            msg = (f"tool {tool_name!r} has no delegation-guard ToolPolicy; "
+                   f"refusing to authorize an unmapped capability")
+            guard.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=tool_name,
+                                disposition=Disposition.UNRESOLVED)
+            return self._deny(tool_name, agent_id, msg)
 
         decision = guard.check(policy.scope, context=policy.context(tool_input),
-                               metered=policy.metered, tool=tool_name)
+                               metered=policy.metered, tool=tool_name,
+                               disposition=policy.disposition)
         if not decision:
             return self._deny(tool_name, agent_id, decision.explain())
         return True, f"{policy.scope} authorized"

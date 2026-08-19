@@ -194,7 +194,8 @@ class GuardedTool(Tool):
     def __init__(self, inner: Tool, guard: GuardLike, scope: str, *,
                  context_fn: Optional[Callable[..., Mapping]] = None,
                  metered: bool = False,
-                 on_denied: str = "raise"):
+                 on_denied: str = "raise",
+                 disposition: Optional[str] = None):
         if on_denied not in ("raise", "return"):
             raise ValueError('on_denied must be "raise" or "return"')
         super().__init__()
@@ -204,6 +205,7 @@ class GuardedTool(Tool):
         self.context_fn = context_fn
         self.metered = metered
         self.on_denied = on_denied
+        self.disposition = disposition      # see delegation_guard.Disposition
 
         # Mirror the model-facing schema so the wrapper is invisible upstream.
         self.name = inner.name
@@ -218,7 +220,8 @@ class GuardedTool(Tool):
         guard = _resolve(self.guard)
         context: Mapping = self.context_fn(*args, **kwargs) if self.context_fn else {}
         decision = guard.check(self.scope, context=context,
-                               metered=self.metered, tool=self.name)
+                               metered=self.metered, tool=self.name,
+                               disposition=self.disposition)
         if not decision:
             if self.on_denied == "return":
                 return f"AUTHORITY DENIED: {decision.explain()}"
