@@ -524,6 +524,28 @@ class TestEd25519Signer(unittest.TestCase):
             wire.load([tampered], self.signer)
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.SIGNATURE_INVALID)
 
+    # ---- Slice 1 / Plan A, Task 8: public-key-only verification + key-file round trip ----
+    def test_verifier_checks_an_anchor_with_the_public_key_only(self):
+        from delegation_guard import evidence
+        pub = self.signer.public_bytes_raw()
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=None), task="t"); g.check("crm.read", tool="q")
+        bundle = evidence.export_bundle(g.audit_log(), self.signer)
+        verifier = wire.Ed25519Verifier(pub, kid="prod-1")               # what a console / auditor / ingest server holds
+        self.assertTrue(evidence.verify_bundle(bundle, verifier)["ok"])
+        bundle["entries"][-1]["tool"] = "tampered"                        # any rewrite fails under the public key
+        self.assertFalse(evidence.verify_bundle(bundle, verifier)["ok"])
+        with self.assertRaises(RuntimeError):
+            verifier.sign(b"x")                                           # a verifier must not be able to sign
+        other = wire.Ed25519Signer.generate(kid="other")
+        self.assertFalse(wire.Ed25519Verifier(other.public_bytes_raw(), kid="other").verify(b"m", self.signer.sign(b"m")))
+
+    def test_private_key_round_trips_through_raw_bytes(self):
+        raw = self.signer.private_bytes_raw()                             # what a key file stores (32 bytes)
+        self.assertEqual(len(raw), 32)
+        again = wire.Ed25519Signer.from_private_bytes(raw, kid="prod-1")
+        self.assertEqual(again.public_bytes_raw(), self.signer.public_bytes_raw())
+        self.assertTrue(self.signer.verify(b"m", again.sign(b"m")))
+
 
 class TestEd25519SignerMissingDependency(unittest.TestCase):
     """Simulate `cryptography` being unavailable (regardless of whether it

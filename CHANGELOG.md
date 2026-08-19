@@ -38,6 +38,26 @@ Driven by integration PoCs against twelve real agent frameworks
   entries never carry it. `Disposition` is exported; `evidence.LEDGER_FIELDS` and `schema/agent-audit.schema.json`
   gained the field so a strict export still passes. Closes the threat model's "held pending curation must render
   distinct from denied" item at the ledger, where every UI reads it.
+- **`evidence.denials(bundle)`** — deny events grouped by (node, tool, scope, disposition) with counts and first/last
+  seq: the rows a Decisions queue renders, as a pure fold over the ledger; `delegation_graph` nodes gain
+  `denials_by_disposition`.
+- **Disposition contract across all 12 adapters** (`ToolPolicy` / `ToolAuthority` / `ScopeRequest` fields and the
+  `guarded_tool` / `guard_node` / `GuardedTool` kwargs), passed to `Guard.check`; the ADK denial dict returned to the
+  model carries `disposition`. **Undeclared tools now land on the ledger** as `unresolved` via
+  `Guard.record_denial` in every policy-map adapter (previously only in the adapter's memory / an exception).
+  `tests/test_adapters_contract.py` pins the contract stdlib-only in CI.
+- **`delegation_guard.identity`** — a product has an identity before it has a key: `.attenu/product.json`
+  discovery (`ATTENU_PRODUCT_DIR` or walk-up), per-process `boot_id()`, assigned `new_chain_id()`, and
+  `ledger_path` / `spool_path` under the product dir.
+- **`AuditLog(sinks=...)` + `sinks.SpoolSink`** — local-file sinks fed after the ledger write (never the network);
+  the spool is a separate append-only file (a new AuditLog never truncates it), bounded, flushed per line,
+  fsync'd every N + on `flush()`, resumable (`read_pending` / `ack`), and every line carries the ingest
+  idempotency key (boot_id, chain_id, seq, hash). `Guard.issue(audit_sinks=)`.
+- **`wire.Ed25519Verifier`** — public-key-only verification for consoles/auditors/ingest (cannot sign);
+  `Ed25519Signer.private_bytes_raw()` / `from_private_bytes()` for key files.
+
+### Changed
+- Version 0.3.0 (ledger schema gains an optional `disposition` field on deny; wire and hash chain unchanged).
 - `ReasonCode.NO_AUTHORITY` — the principal holds no Authority in this chain
   (adapter-level: undelegated agent, unmapped tool, unparseable args).
 - `Guard.record_denial(reason, message, *, scope, tool, context)` — put an

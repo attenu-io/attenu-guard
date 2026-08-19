@@ -63,7 +63,7 @@ from .authority import Authority
 from .reasons import Decision, ReasonCode
 
 __all__ = [
-    "Signer", "HS256TestSigner", "Ed25519Signer",
+    "Signer", "HS256TestSigner", "Ed25519Signer", "Ed25519Verifier",
     "WireError", "WireReasonCode", "VerifiedChain",
     "serialize", "serialize_chain", "load",
     "b64url_encode", "b64url_decode",
@@ -215,6 +215,53 @@ class Ed25519Signer:
         anchor out of band or embedding in a JWK. Lazily imports
         `cryptography.hazmat.primitives.serialization`, same discipline as
         `__init__`."""
+        from cryptography.hazmat.primitives import serialization
+        return self._public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+
+    def private_bytes_raw(self) -> bytes:
+        """The 32-byte raw Ed25519 private key — what a key FILE stores (mode
+        0600, never in a repo). Lazy import, same discipline as `__init__`."""
+        from cryptography.hazmat.primitives import serialization
+        return self._private_key.private_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+
+    @classmethod
+    def from_private_bytes(cls, raw: bytes, *, kid: str = "ed25519-1") -> "Ed25519Signer":
+        """Rebuild a signer from the 32 raw bytes `private_bytes_raw()` produced."""
+        ed25519 = _require_ed25519()
+        return cls(ed25519.Ed25519PrivateKey.from_private_bytes(raw), kid=kid)
+
+
+class Ed25519Verifier:
+    """Public-key-only counterpart of `Ed25519Signer` — what a console, an
+    auditor, or an ingest server holds. It can `verify` anchors and tokens
+    signed by the matching private key and can never sign: `sign()` raises.
+    Satisfies the `Signer` protocol's verify half, so `evidence.verify_bundle`
+    and `AuditLog.verify_anchor` accept it unchanged."""
+    alg = "EdDSA"
+
+    def __init__(self, public_bytes_raw: bytes, *, kid: str = "ed25519-1"):
+        ed25519 = _require_ed25519()
+        self._public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_bytes_raw)
+        self.kid = kid
+
+    def sign(self, signing_input: bytes) -> bytes:
+        raise RuntimeError("Ed25519Verifier holds no private key and cannot sign")
+
+    def verify(self, signing_input: bytes, sig: bytes, key_id: str | None = None) -> bool:
+        try:
+            self._public_key.verify(sig, signing_input)
+            return True
+        except Exception:
+            return False
+
+    def public_bytes_raw(self) -> bytes:
         from cryptography.hazmat.primitives import serialization
         return self._public_key.public_bytes(
             encoding=serialization.Encoding.Raw,
