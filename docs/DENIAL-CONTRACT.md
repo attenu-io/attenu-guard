@@ -19,6 +19,24 @@ machine-readable, ordered list of `Reason`s. Every reason has a stable `code` (a
 Every allow **and** every deny is appended to the hash-chained audit log, so a denial is always
 independently verifiable after the fact.
 
+### `disposition` — *why* the scope was absent (held is not over-reach)
+
+A `deny` entry — and the denial an adapter hands back to the model — carries a `disposition`
+(`Disposition` constants), stated by the authority source and recorded by the shim, never derived by it:
+
+| disposition | meaning | what it tells a human |
+|---|---|---|
+| `held_pending_grant` | a known, curated tool whose tier-2 scope awaits an explicit operator grant | **waiting on you** |
+| `withheld_tier2` | resolvable only to a tier-2 heuristic the deriver never grants | curate it, or leave it held |
+| `unresolved` | no authority is known for this tool at all (no policy / no catalog entry) | declare it |
+| `out_of_authority` | resolved and grantable, but not held by **this** node | **we stopped something** — real over-reach |
+
+A plain `scope_not_granted` deny the caller did not explain records `out_of_authority` (the shim's own truth);
+unknown values are refused before anything reaches the ledger; `allow` entries never carry it. An undeclared
+tool is put on the ledger by every policy-map adapter as `unresolved` via `Guard.record_denial` — never only
+in the adapter's memory. The Decisions queue of a console is `evidence.denials(bundle)`, a fold over exactly
+these fields.
+
 ## What an adapter MUST do on a denial
 
 1. **Block before the tool body runs** — the denial is a pre-condition, not a post-hoc log line.
