@@ -1023,6 +1023,24 @@ def test_disposition_survives_strict_export_and_the_bundle_verifies():
     assert evidence.verify_bundle(bundle, HS256TestSigner(secret=b"k", kid="k"))["ok"] is True
     assert [e for e in bundle["entries"] if e["event"] == "deny"][0]["disposition"] == "held_pending_grant"
 
+
+# ---- Slice 1 / Plan A, Task 2: the Decisions-screen fold ------------------------------------------------------
+def test_denials_fold_groups_deny_events_for_the_decisions_screen():
+    from delegation_guard import Authority, Guard, Disposition, evidence
+    from delegation_guard.wire import HS256TestSigner
+    root = Guard.issue("planner", Authority({"agent.delegate.booker", "crm.read"}, [], ttl=None), task="plan")
+    child = root.delegate("booker", Authority({"crm.read"}, [], ttl=None), task="book")
+    child.check("payments.transfer", tool="book_flight", disposition=Disposition.HELD_PENDING_GRANT)
+    child.check("payments.transfer", tool="book_flight", disposition=Disposition.HELD_PENDING_GRANT)
+    child.check("fs.write", tool="write_file")                               # out_of_authority by default
+    bundle = evidence.export_bundle(root.audit_log(), HS256TestSigner(secret=b"k", kid="k"))
+    rows = evidence.denials(bundle)
+    assert [(r["tool"], r["disposition"], r["count"]) for r in rows] == [("book_flight", "held_pending_grant", 2), ("write_file", "out_of_authority", 1)]
+    assert rows[0]["agent"] == "booker" and rows[0]["scope"] == "payments.transfer" and rows[0]["first_seq"] < rows[0]["last_seq"]
+    graph = evidence.delegation_graph(bundle)
+    assert graph["nodes"][child.node_id]["denials_by_disposition"] == {"held_pending_grant": 2, "out_of_authority": 1}
+    assert graph["nodes"][root.node_id]["denials_by_disposition"] == {}
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

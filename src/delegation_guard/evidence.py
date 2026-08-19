@@ -25,7 +25,7 @@ from typing import Any
 from delegation_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from delegation_guard.authority import Authority
 
-__all__ = ["export_bundle", "verify_bundle", "delegation_graph", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS"]
+__all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS"]
 
 # The COMPLETE set of top-level ledger field names the shim emits. Custody guarantee (A2b): an exported bundle may
 # carry ONLY these — an unknown field is exactly where a raw tool argument would be smuggled, so it is a leak, not a
@@ -140,15 +140,40 @@ def delegation_graph(bundle: dict) -> dict:
         ev = e.get("event"); n = e.get("node")
         if ev in ("root", "spawn"):
             meta[n] = {"agent": e.get("agent"), "task": e.get("task"), "parent": e.get("parent"),
-                       "scopes": sorted(auth[n].scopes) if n in auth else [], "allows": 0, "denies": 0, "revoked": False, "complete": False}
+                       "scopes": sorted(auth[n].scopes) if n in auth else [], "allows": 0, "denies": 0, "revoked": False, "complete": False,
+                       "denials_by_disposition": {}}
         elif ev == "allow" and n in meta: meta[n]["allows"] += 1
-        elif ev == "deny" and n in meta: meta[n]["denies"] += 1
+        elif ev == "deny" and n in meta:
+            meta[n]["denies"] += 1
+            d = e.get("disposition") or "unstated"
+            meta[n]["denials_by_disposition"][d] = meta[n]["denials_by_disposition"].get(d, 0) + 1
         elif ev == "done" and n in meta: meta[n]["complete"] = True
         elif ev == "kill":
             for r in (e.get("revoked") or []):
                 if r in meta: meta[r]["revoked"] = True
     return {"chain_id": bundle.get("chain_id"), "nodes": meta,
             "edges": [{"parent": p, "child": c} for c, p in parent.items() if p]}
+
+
+def denials(bundle: dict) -> list[dict]:
+    """Deny events grouped by (node, tool, scope, disposition) — the rows a Decisions queue renders: "should this
+    agent be allowed to <tool>?" with how often it asked and why it was refused. A pure fold over the ledger; no
+    engine, no state. Ordered by first occurrence."""
+    entries = bundle.get("entries") or []
+    agent_of = {e.get("node"): e.get("agent") for e in entries if e.get("event") in ("root", "spawn")}
+    rows: dict[tuple, dict] = {}
+    for e in entries:
+        if e.get("event") != "deny":
+            continue
+        key = (e.get("node"), e.get("tool"), e.get("scope"), e.get("disposition"))
+        r = rows.get(key)
+        if r is None:
+            rows[key] = {"node": e.get("node"), "agent": agent_of.get(e.get("node")), "tool": e.get("tool"),
+                         "scope": e.get("scope"), "disposition": e.get("disposition"), "reason": e.get("reason"),
+                         "count": 1, "first_seq": e.get("seq"), "last_seq": e.get("seq")}
+        else:
+            r["count"] += 1; r["last_seq"] = e.get("seq")
+    return sorted(rows.values(), key=lambda r: r["first_seq"])
 
 
 def verify_bundle(bundle: dict, signer) -> dict:
