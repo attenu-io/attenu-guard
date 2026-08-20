@@ -5,9 +5,9 @@ hands work to another, the child inherits *only* what its task needs — never t
 parent's full authority. Chains have hard ceilings. Any subtree can be revoked in
 one call. Every decision lands on a tamper-evident log you can verify offline.
 
-The open answer to [OWASP ASI07 (insecure inter-agent communication) and ASI08
-(cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) —
-the two agentic risks that none of the twelve frameworks or three platforms we audited enforces today.
+An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08
+(cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
+delegated authority stays inside the parent's limits, and every decision remains verifiable offline.
 
 ![dg demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](docs/assets/demo.gif)
 
