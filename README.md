@@ -7,7 +7,7 @@ one call. Every decision lands on a tamper-evident log you can verify offline.
 
 The open answer to [OWASP ASI07 (insecure inter-agent communication) and ASI08
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) —
-the two agentic risks that no framework or platform enforces today.
+the two agentic risks that none of the twelve frameworks or three platforms we audited enforces today.
 
 ![dg demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](docs/assets/demo.gif)
 
@@ -47,9 +47,9 @@ summarizer.enforce("crm.export", context={"egress": "any"})        # raises Auth
 `check()` returns a rich **`Decision`** (with machine-readable reason codes for
 your audit trail); `enforce()` is the hard-stop gate that raises; `would_allow()`
 is a dry-run that writes nothing. The `crm.export` call is refused no matter what
-the agent was tricked into trying — because the sub-agent *physically lacks* the
-authority. **No CVE required: this is default behaviour once authority is
-attenuated at the handoff.**
+the agent was tricked into trying — because the sub-agent never held that
+authority in the first place — an injected instruction has nothing to escalate.
+This is default behaviour once authority is attenuated at the handoff.
 
 ## Why this doesn't exist anywhere else
 
@@ -71,7 +71,7 @@ moment authority is handed down.
 | A2A | authenticates the hop, carries **no** delegated authority |
 
 delegation-guard makes child ⊆ parent a computed, enforced, offline-verifiable
-invariant — in ten minutes, in your framework, with no proxy and no phone-home.
+invariant — in your framework, in your process — no proxy, and no network call in the deny path.
 
 ## What you get
 
