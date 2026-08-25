@@ -1,5 +1,7 @@
 # attenu-guard
 
+[attenu.io](https://attenu.io) · [Docs](docs/) · [The engine that computes the permission set](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
+
 **Enforced authority attenuation for multi-agent AI systems.** When one AI agent
 hands work to another, the child inherits *only* what its task needs — never the
 parent's full authority. Chains have hard ceilings. Any subtree can be revoked in
@@ -111,12 +113,13 @@ and the [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md).
 
 ## What this is *not*
 
-This library deliberately does **not** decide authority *for* you — you write the
-`Authority` for each delegation. Automatically *deriving* the right authority from
-a task, scoring plan-vs-action divergence, fleet management, and regulator-shaped
-evidence exports are the commercial [Attenu](https://attenu.io) authority
-plane. The library is the enforcement shim and the open schema; it is useful
-entirely on its own, forever, with no account and no network.
+This library does **not** decide authority *for* you. You write the `Authority` for
+each delegation — or you let [`attenu-derive`](https://github.com/attenu-io/attenu-derive),
+the open engine, compute it from your app's declared structure (agents, roster, tools,
+what each task calls) and approve it before it is enforced. The library is the
+enforcement shim and the open schema; it is useful entirely on its own, forever, with
+no account and no network. The [Attenu console](https://attenu.io) is optional: a
+place to see denials, decide, and verify — never in the deny path.
 
 ## License
 
