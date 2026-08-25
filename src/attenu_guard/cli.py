@@ -1,5 +1,5 @@
 """
-dg — command-line tool.
+attenu-guard — command-line tool.
 
   attenu-guard demo                  run the poisoned-summariser demo
   attenu-guard view <log.jsonl>      render an audit log as a delegation tree + verify it
@@ -75,10 +75,8 @@ def main(argv=None):
         return 1
     cmd, *rest = argv
     if cmd == "demo":
-        from pathlib import Path
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples"))
-        import poisoned_summarizer
-        poisoned_summarizer.main()
+        from attenu_guard._demo import main as demo_main
+        demo_main()
         return 0
     if cmd == "view" and rest:
         return _view(rest[0])
