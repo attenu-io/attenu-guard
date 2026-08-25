@@ -17,6 +17,6 @@ Permissions come from declared structure, never from prompt text.
 
 **Working in this repo.** Python ≥3.9, no runtime dependencies in the core. Run the suite with
 `PYTHONPATH=src python3 tests/run_properties.py` (plus the other files under `tests/`); CI runs the full
-matrix. Do not reintroduce the old name `delegation-guard` (a CI gate fails). Keep the wire schema
+matrix. Do not reintroduce the pre-0.4.0 package name (a CI gate fails on it). Keep the wire schema
 (`schema/agent-audit.schema.json`, `$id` fixed) backward compatible. Docs of record: `docs/INTEGRATIONS.md`,
 `docs/DENIAL-CONTRACT.md`, `docs/RED-TEAM.md`, the Internet-Draft in `docs/`.
