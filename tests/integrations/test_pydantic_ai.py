@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x Pydantic AI (pydantic-ai-slim 2.31.1).
+Integration test: attenu-guard x Pydantic AI (pydantic-ai-slim 2.31.1).
 
 Runs entirely offline: the LLM is `pydantic_ai.models.function.FunctionModel`,
 which returns scripted `ToolCallPart`s, so no API key is needed.
@@ -9,7 +9,7 @@ was delegated narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect flags the tool would have set).
 
 The test drives the SHIPPED example (`examples/integrations/pydantic_ai/demo.py`
-+ `delegation_guard.adapters.pydantic_ai`), so a green run also proves the example works.
++ `attenu_guard.adapters.pydantic_ai`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart  # noqa: 
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
 from pydantic_ai.toolsets import FunctionToolset  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     Authority,
     AuthorityDenied,
     AuthorityError,
@@ -57,7 +57,7 @@ def _load(name: str):
     return mod
 
 
-import delegation_guard.adapters.pydantic_ai as dg_pai
+import attenu_guard.adapters.pydantic_ai as dg_pai
 demo = _load("demo")
 
 
@@ -197,7 +197,7 @@ def test_denial_can_instead_be_returned_to_the_model_as_a_tool_failure():
     failed = [p for p in returns if p.tool_name == "crm_export"]
     assert len(failed) == 1
     assert "crm.export" in str(failed[0].content)
-    assert "Denied by delegation-guard" in str(failed[0].content)
+    assert "Denied by attenu-guard" in str(failed[0].content)
 
 
 def test_ceiling_exceeded_is_denied_even_though_the_scope_is_granted():

@@ -47,7 +47,7 @@ from semantic_kernel.contents.function_call_content import FunctionCallContent
 from semantic_kernel.contents.utils.author_role import AuthorRole
 from semantic_kernel.functions import KernelArguments, kernel_function
 
-from delegation_guard import (
+from attenu_guard import (
     AuditLog,
     Authority,
     Decision,
@@ -57,7 +57,7 @@ from delegation_guard import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from delegation_guard.adapters.semantic_kernel import (  # noqa: E402
+from attenu_guard.adapters.semantic_kernel import (  # noqa: E402
     DelegationChain,
     ToolPolicy,
     attach_guard,
@@ -111,7 +111,7 @@ class CrmTools:
 
 
 # What authority does each tool consume? The integrator declares this —
-# delegation-guard deliberately does not infer it.
+# attenu-guard deliberately does not infer it.
 POLICIES = {
     "Crm-crm_query": ToolPolicy("crm.read", context=lambda a: {"rows": int(a["rows"])}, metered=True),
     "Crm-crm_export": ToolPolicy("crm.export", context={"egress": "any"}),
@@ -330,7 +330,7 @@ async def main() -> int:
     # authoritative record of what was blocked.
     logging.getLogger("semantic_kernel").setLevel(logging.CRITICAL)
 
-    _rule("delegation-guard x Semantic Kernel 1.36.0 — the poisoned summarizer")
+    _rule("attenu-guard x Semantic Kernel 1.36.0 — the poisoned summarizer")
     print("Orchestrator authority : scopes={'crm.*','mail.send'} rows<=100000 egress=any")
     print("Summarizer  authority  : scopes={'crm.read'}          rows<=5000   egress=none")
     print("(minted at the handoff, by the AUTO_FUNCTION_INVOCATION filter)")

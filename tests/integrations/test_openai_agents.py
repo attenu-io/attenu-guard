@@ -1,4 +1,4 @@
-"""delegation-guard x OpenAI Agents SDK — integration tests.
+"""attenu-guard x OpenAI Agents SDK — integration tests.
 
 Runs entirely offline: the LLM is `agents.testing.ScriptedModel`, a
 deterministic `Model` implementation shipped by the SDK itself, so no API key
@@ -34,7 +34,7 @@ from agents.testing import (  # noqa: E402
     function_call,
 )
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     Authority,
     AuditLog,
     EgressRank,
@@ -45,7 +45,7 @@ from delegation_guard import (  # noqa: E402
 
 # The adapter lives with the runnable example, not in src/ — a developer is
 # meant to be able to copy the single file into their own project.
-from delegation_guard.adapters.openai_agents import (  # noqa: E402
+from attenu_guard.adapters.openai_agents import (  # noqa: E402
     DelegationGuardHooks,
     GuardRegistry,
     guarded_agent_tool,

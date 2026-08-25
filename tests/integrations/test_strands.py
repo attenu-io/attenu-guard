@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x AWS Strands Agents (strands-agents 1.52.0).
+Integration test: attenu-guard x AWS Strands Agents (strands-agents 1.52.0).
 
 Runs entirely offline: the LLM is `ScriptedModel`, a `strands.models.Model`
 subclass that emits Bedrock-shaped `StreamEvent` dicts for a fixed script of
@@ -14,7 +14,7 @@ written to). Both of Strands' delegation primitives are covered:
   * `strands.multiagent.Swarm` (`handoff_to_agent`)
 
 The test drives the SHIPPED example (`examples/integrations/strands/demo.py` +
-`delegation_guard.adapters.strands`), so a green run also proves the example works.
+`attenu_guard.adapters.strands`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import pytest
 
 pytest.importorskip("strands")
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -55,7 +55,7 @@ def _load(module_name: str, filename: str):
     return mod
 
 
-import delegation_guard.adapters.strands as dg_strands
+import attenu_guard.adapters.strands as dg_strands
 demo = _load("dg_strands_demo", "demo.py")
 
 
@@ -290,7 +290,7 @@ def test_audit_log_is_tamper_evident():
 
 def test_unmapped_tool_fails_closed_and_is_audited():
     """A tool nobody wrote a scope for must be denied, not silently allowed —
-    and the denial must be a real, logged delegation-guard decision."""
+    and the denial must be a real, logged attenu-guard decision."""
     resolve = dg_strands.scope_map({"crm_query": "crm.read"}, unmapped="deny")
     req = resolve({"name": "some_new_tool", "toolUseId": "x", "input": {}})
     assert req is not None

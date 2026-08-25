@@ -1,4 +1,4 @@
-"""delegation-guard × AutoGen (autogen-agentchat 0.7.x) — integration tests.
+"""attenu-guard × AutoGen (autogen-agentchat 0.7.x) — integration tests.
 
 Runs fully offline: the LLM is `ReplayChatCompletionClient` replaying scripted
 `CreateResult`s containing `FunctionCall`s. No API key, no network.
@@ -7,7 +7,7 @@ The story under test is the canonical "poisoned summarizer":
 an orchestrator hands off to a summarizer over an AutoGen `Swarm`; the
 summarizer's *Python* tool list still contains `crm_export`/`send_mail`
 (AutoGen imposes no restriction — see `test_autogen_itself_does_not_attenuate`),
-but its delegation-guard `Authority` does not cover them, so the export is
+but its attenu-guard `Authority` does not cover them, so the export is
 denied before the tool body runs.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ from autogen_core.models import CreateResult, ModelInfo, RequestUsage  # noqa: E
 from autogen_core.tools import FunctionTool  # noqa: E402
 from autogen_ext.models.replay import ReplayChatCompletionClient  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -43,7 +43,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # The adapter lives under examples/ (not shipped in the package yet).
-from delegation_guard.adapters.autogen import (  # noqa: E402
+from attenu_guard.adapters.autogen import (  # noqa: E402
     Grant,
     GuardedHandoff,
     GuardedWorkbench,
@@ -131,7 +131,7 @@ POLICIES = {
 
 
 def _build_team(effects: Effects, summarizer_script, *, guarded: bool, audit_path=None):
-    """Build the orchestrator→summarizer Swarm, with or without delegation-guard."""
+    """Build the orchestrator→summarizer Swarm, with or without attenu-guard."""
     root = Guard.issue(
         "orchestrator", ORCHESTRATOR_AUTHORITY, task="root", audit_path=audit_path
     )
@@ -184,10 +184,10 @@ def _build_team(effects: Effects, summarizer_script, *, guarded: bool, audit_pat
 
 
 def test_autogen_itself_does_not_attenuate():
-    """Without delegation-guard the poisoned export EXECUTES.
+    """Without attenu-guard the poisoned export EXECUTES.
 
     This is the control: it proves the deny in the guarded tests comes from
-    delegation-guard and not from anything AutoGen does on its own.
+    attenu-guard and not from anything AutoGen does on its own.
     """
     effects = Effects()
     team, _, _ = _build_team(
@@ -359,7 +359,7 @@ def test_audit_log_verifies_and_records_the_deny(tmp_path):
     )
     asyncio.run(team.run(task="summarize Q3 pipeline"))
 
-    # NOTE: `entries` is a @property (src/delegation_guard/audit.py:75), not a
+    # NOTE: `entries` is a @property (src/attenu_guard/audit.py:75), not a
     # method — despite reading like one at the call site.
     entries = registry.root.audit_log().entries
     ok, err = AuditLog.verify(entries)
@@ -513,7 +513,7 @@ def test_agent_as_tool_is_a_delegation_point():
     child = registry.get("summarizer")
     assert child is not None
     assert child.is_narrower_than(root)
-    assert "delegation-guard" not in str(result.messages[-1].content)
+    assert "attenu-guard" not in str(result.messages[-1].content)
 
 
 def test_agent_as_tool_denied_never_starts_the_sub_agent():

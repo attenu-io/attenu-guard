@@ -1,6 +1,6 @@
-# delegation-guard × LangGraph / LangChain / deepagents
+# attenu-guard × LangGraph / LangChain / deepagents
 
-`delegation_guard.adapters.langchain` is a ~200-line adapter you can paste into your own project.
+`attenu_guard.adapters.langchain` is a ~200-line adapter you can paste into your own project.
 
 ## What it hooks
 
@@ -9,7 +9,7 @@
 | Tool invocation | `ToolNode(tools, wrap_tool_call=guarded.wrap_tool_call)` | `Guard.check()` runs before the tool body; not calling the handler short-circuits the call |
 | Tool invocation | `create_agent(..., middleware=[guarded.middleware()])` — `AgentMiddleware.wrap_tool_call` | same gate inside the LangChain 1.x agent loop |
 | Child creation | the same hook, filtered on the delegation tool (`task` in deepagents) | mints the child with `parent.delegate(...)` and installs it as the active `Guard` (a `ContextVar`) for the sub-agent's run |
-| Graph nodes | `delegation_guard.adapters.langgraph.guard_node` (shipped) | for hand-written nodes; raises `AuthorityDenied` out of `graph.invoke()` |
+| Graph nodes | `attenu_guard.adapters.langgraph.guard_node` (shipped) | for hand-written nodes; raises `AuthorityDenied` out of `graph.invoke()` |
 
 No monkeypatching: every hook is a documented framework parameter.
 
@@ -38,6 +38,6 @@ undeclared sub-agent is refused; `revoke()` cascades; `AuditLog.verify()` return
 ## Versions tested
 
 `langgraph` 1.2.11 · `langgraph-prebuilt` 1.1.0 · `langchain` 1.3.15 ·
-`langchain-core` 1.5.6 · `deepagents` 0.7.6 · Python 3.12 · delegation-guard 0.2.0.
+`langchain-core` 1.5.6 · `deepagents` 0.7.6 · Python 3.12 · attenu-guard 0.2.0.
 
 Tests: `tests/integrations/test_langgraph.py`, `tests/integrations/test_deepagents.py`.

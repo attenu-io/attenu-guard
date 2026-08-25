@@ -23,7 +23,7 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 
-from delegation_guard import AuditLog, Guard
+from attenu_guard import AuditLog, Guard
 
 from demo import (
     ROOT_AUTHORITY,
@@ -32,7 +32,7 @@ from demo import (
     make_crm_export,
     make_crm_query,
 )
-from delegation_guard.adapters.google_adk import DelegationGuardPlugin
+from attenu_guard.adapters.google_adk import DelegationGuardPlugin
 
 MODEL = os.environ.get("DG_LIVE_MODEL", "gemini-2.5-flash")
 

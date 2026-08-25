@@ -1,10 +1,10 @@
 """
 dg — command-line tool.
 
-  dg demo                  run the poisoned-summariser demo
-  dg view <log.jsonl>      render an audit log as a delegation tree + verify it
-  dg verify <log>          verify a hash-chained audit log, exit non-zero on tamper
-  dg scenarios <file>      run a declarative authorization scenario (JSON/YAML),
+  attenu-guard demo                  run the poisoned-summariser demo
+  attenu-guard view <log.jsonl>      render an audit log as a delegation tree + verify it
+  attenu-guard verify <log>          verify a hash-chained audit log, exit non-zero on tamper
+  attenu-guard scenarios <file>      run a declarative authorization scenario (JSON/YAML),
                            exit non-zero if any assertion fails. --coverage prints
                            which reason codes were exercised.
 """

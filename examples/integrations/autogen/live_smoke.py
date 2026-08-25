@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard.adapters.autogen import (  # noqa: E402
+from attenu_guard.adapters.autogen import (  # noqa: E402
     Grant,
     GuardedHandoff,
     GuardRegistry,
@@ -26,7 +26,7 @@ from delegation_guard.adapters.autogen import (  # noqa: E402
     guarded_agent,
 )
 
-from delegation_guard import Authority, EgressRank, Guard, RowLimit  # noqa: E402
+from attenu_guard import Authority, EgressRank, Guard, RowLimit  # noqa: E402
 
 
 def _require_live() -> None:

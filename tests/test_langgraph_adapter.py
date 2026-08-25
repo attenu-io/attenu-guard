@@ -10,7 +10,7 @@ adapters/langgraph.py's authorization-wrapping logic (`guard_node`,
 `DelegatedToolNode`) is pure Python that wraps an arbitrary callable — it
 never imports `langgraph`, so every test below runs (and must keep running)
 with zero third-party packages installed. That guarantee is itself part of
-what's tested: getting through the module-level `import delegation_guard.adapters.langgraph`
+what's tested: getting through the module-level `import attenu_guard.adapters.langgraph`
 at all, in an environment without langgraph, is the first assertion.
 """
 import sys
@@ -19,16 +19,16 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))        # so adapters/langgraph.py's own
-                                                    # `from delegation_guard import ...` resolves
+                                                    # `from attenu_guard import ...` resolves
 
-from delegation_guard import Authority, AuthorityDenied, Guard, RowLimit
+from attenu_guard import Authority, AuthorityDenied, Guard, RowLimit
 
-from delegation_guard.adapters.langgraph import (
+from attenu_guard.adapters.langgraph import (
     DelegatedToolNode, add_guarded_node, guard_node, is_langgraph_available,
 )
 
 # Captured IMMEDIATELY after importing the adapter, before any test runs: did
-# importing `delegation_guard.adapters.langgraph` drag `langgraph` into the
+# importing `attenu_guard.adapters.langgraph` drag `langgraph` into the
 # process? This is the actual guarantee under test, and it holds whether or
 # not langgraph happens to be installed on this machine (it IS installed in
 # the integration-test venvs — see tests/integrations/test_langgraph.py).
@@ -81,10 +81,10 @@ class TestModuleImportsWithoutLanggraph(unittest.TestCase):
         self.assertEqual(is_langgraph_available(), really)
 
     def test_module_already_imported_successfully(self):
-        # Reaching this line at all proves `import delegation_guard.adapters.langgraph`
+        # Reaching this line at all proves `import attenu_guard.adapters.langgraph`
         # (done at module load, above) succeeded with no langgraph on the
         # path. Make the guarantee an explicit, named assertion too.
-        import delegation_guard.adapters.langgraph as lg
+        import attenu_guard.adapters.langgraph as lg
         self.assertTrue(hasattr(lg, "guard_node"))
         self.assertTrue(hasattr(lg, "DelegatedToolNode"))
 

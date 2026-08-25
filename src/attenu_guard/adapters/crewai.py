@@ -1,4 +1,4 @@
-"""dg_crewai — enforce delegation-guard authority attenuation inside CrewAI.
+"""dg_crewai — enforce attenu-guard authority attenuation inside CrewAI.
 
 Hook points used (CrewAI 1.15.16, paths relative to site-packages/)
 ------------------------------------------------------------------
@@ -27,7 +27,7 @@ escape a hook would therefore be *silently ignored and the tool would run*.
 So this bridge converts every denial — and every internal error of its own —
 into `crewai.hooks.HookAborted`, which CrewAI honours. CrewAI then substitutes
 its own generic "Tool execution blocked by hook." string; a paired
-`after_tool_call` hook replaces that with the machine-readable delegation-guard
+`after_tool_call` hook replaces that with the machine-readable attenu-guard
 reason (CrewAI runs POST_TOOL_CALL even on a blocked call — `tool_utils.py:126`),
 so the model is told *why* it was denied and can adapt instead of retrying.
 
@@ -60,7 +60,7 @@ globally, for the process — and run your crew as usual::
 
 Everything is fail-closed: an agent with no Guard, a tool with no policy, a
 coworker with no configured `Authority`, and any internal error in the bridge
-all deny. delegation-guard never invents authority for you — you write the
+all deny. attenu-guard never invents authority for you — you write the
 `Authority` for each delegation, exactly as the library intends.
 """
 
@@ -78,14 +78,14 @@ from crewai.hooks import (
     unregister_before_tool_call_hook,
 )
 
-from delegation_guard import (
+from attenu_guard import (
     Authority,
     AuthorityError,
     Decision,
     Guard,
     ReasonCode,
 )
-from delegation_guard.reasons import Disposition
+from attenu_guard.reasons import Disposition
 
 __all__ = ["ToolPolicy", "Denial", "CrewAIGuardBridge", "DELEGATION_TOOLS"]
 
@@ -129,7 +129,7 @@ def _normalize_role(name: Any) -> str:
 class ToolPolicy:
     """Maps one CrewAI tool onto the authority it consumes.
 
-    scope:      the delegation-guard scope the tool needs, e.g. "crm.read".
+    scope:      the attenu-guard scope the tool needs, e.g. "crm.read".
     context_fn: reads the request context out of the tool's arguments, e.g.
                 ``lambda args: {"rows": args["rows"]}``. Whatever it returns is
                 handed to `Guard.check(context=...)` and evaluated against the
@@ -162,7 +162,7 @@ class _Pending:
 
 
 class CrewAIGuardBridge:
-    """Installs delegation-guard as CrewAI's tool-authorization layer.
+    """Installs attenu-guard as CrewAI's tool-authorization layer.
 
     Args:
         root_guard: the orchestrator's Guard (from `Guard.issue(...)`).
@@ -417,7 +417,7 @@ class CrewAIGuardBridge:
     def _after_tool_call(self, ctx: Any) -> Optional[str]:
         """POST_TOOL_CALL. CrewAI runs this even for a blocked call, so it is
         where the generic "Tool execution blocked by hook." message gets
-        replaced with the real delegation-guard reason."""
+        replaced with the real attenu-guard reason."""
         pending = self._pending()
         denial = pending.denial
         pending.denial = None

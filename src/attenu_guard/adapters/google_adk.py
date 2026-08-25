@@ -1,5 +1,5 @@
 """
-delegation_guard.adapters.google_adk — a thin delegation-guard integration for Google ADK.
+attenu_guard.adapters.google_adk — a thin attenu-guard integration for Google ADK.
 
 Copy this file into your project. It is one `BasePlugin` subclass; you register
 it once on your `App` and every agent in the tree is covered.
@@ -52,7 +52,7 @@ USAGE
 -----
     from google.adk.apps.app import App
     from google.adk.runners import Runner
-    from delegation_guard import Authority, Guard, RowLimit, EgressRank
+    from attenu_guard import Authority, Guard, RowLimit, EgressRank
     from dg_google_adk import DelegationGuardPlugin, ToolAuthority
 
     root = Guard.issue("orchestrator", Authority(
@@ -75,7 +75,7 @@ USAGE
     ...
     root.revoke(plugin.guard_for("summarizer").node_id)   # cascade kill-switch
 
-delegation-guard deliberately does not decide what authority a task needs — you
+attenu-guard deliberately does not decide what authority a task needs — you
 write the `Authority` for each delegation and the `ToolAuthority` for each tool.
 An agent with no entry in `delegations`, and a tool with no entry in `tools`,
 both fail CLOSED.
@@ -92,8 +92,8 @@ from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-from delegation_guard import Authority, AuthorityDenied, Decision, Guard
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = ["DelegationGuardPlugin", "ToolAuthority", "TRANSFER_TOOL_NAME"]
 
@@ -102,7 +102,7 @@ TRANSFER_TOOL_NAME = "transfer_to_agent"
 
 @dataclass(frozen=True)
 class ToolAuthority:
-    """How one ADK tool maps onto a delegation-guard authorization check.
+    """How one ADK tool maps onto a attenu-guard authorization check.
 
     scope:    the scope string this tool needs, e.g. "crm.read".
     context:  optional callable taking the tool's raw `args` dict and returning
@@ -137,7 +137,7 @@ class DelegationGuardPlugin(BasePlugin):
         exempt_tools: Iterable[str] = (),
         delegation_scope: Optional[str] = None,
         raise_on_deny: bool = False,
-        name: str = "delegation_guard",
+        name: str = "attenu_guard",
         default_tool_authority: Optional[Callable[[str], ToolAuthority]] = None,
         default_delegation: Optional[Callable[[str], Authority]] = None,
     ):

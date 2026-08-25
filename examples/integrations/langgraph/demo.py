@@ -1,4 +1,4 @@
-"""delegation-guard × LangGraph 1.x — runnable demo (no API key needed).
+"""attenu-guard × LangGraph 1.x — runnable demo (no API key needed).
 
     python examples/integrations/langgraph/demo.py
 
@@ -28,10 +28,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from delegation_guard import (
+from attenu_guard import (
     AuditLog, Authority, AuthorityDenied, EgressRank, Guard, RowLimit,
 )
-from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
+from attenu_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 BAR = "=" * 72
 EXECUTED: list[tuple] = []
@@ -190,9 +190,9 @@ def scene_create_agent():
 # ===========================================================================
 def scene_shipped_adapter():
     print(BAR)
-    print("3. shipped adapter — delegation_guard.adapters.langgraph.guard_node")
+    print("3. shipped adapter — attenu_guard.adapters.langgraph.guard_node")
     print(BAR)
-    from delegation_guard.adapters.langgraph import add_guarded_node, guard_node
+    from attenu_guard.adapters.langgraph import add_guarded_node, guard_node
 
     _root, summarizer = new_chain()
     ran: list[str] = []

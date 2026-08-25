@@ -18,7 +18,7 @@ import sys
 
 from llama_index.core.agent.workflow import FunctionAgent
 
-from delegation_guard import Guard
+from attenu_guard import Guard
 
 from demo import (
     ORCHESTRATOR_AUTHORITY,
@@ -28,7 +28,7 @@ from demo import (
     _drive,
     _tools,
 )
-from delegation_guard.adapters.llama_index import guards_of
+from attenu_guard.adapters.llama_index import guards_of
 
 from llama_index.core.workflow import Context
 

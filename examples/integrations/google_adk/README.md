@@ -1,12 +1,12 @@
-# delegation-guard × Google ADK
+# attenu-guard × Google ADK
 
 Tested against **google-adk 2.7.1** (Apache-2.0, requires Python ≥ 3.10) on Python 3.12.
 
 ## What it hooks
 
-One `BasePlugin` (`delegation_guard.adapters.google_adk.DelegationGuardPlugin`), registered once on the `App`:
+One `BasePlugin` (`attenu_guard.adapters.google_adk.DelegationGuardPlugin`), registered once on the `App`:
 
-| delegation-guard step | ADK hook | where it runs |
+| attenu-guard step | ADK hook | where it runs |
 | --- | --- | --- |
 | mint the child `Guard` (`parent.delegate(...)`) | `before_agent_callback` | `google/adk/agents/base_agent.py:483` |
 | `guard.check()` before the tool body | `before_tool_callback` | `google/adk/flows/llm_flows/functions.py:603`, ahead of the call at `:627` |
@@ -20,7 +20,7 @@ for a hard stop instead.
 ## Run it
 
 ```bash
-pip install "google-adk==2.7.1" delegation-guard
+pip install "google-adk==2.7.1" attenu-guard
 python examples/integrations/google_adk/demo.py          # no API key needed
 pytest tests/integrations/test_google_adk.py
 ```

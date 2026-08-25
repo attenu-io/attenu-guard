@@ -125,7 +125,7 @@ def _load_yaml_module():
             "PyYAML is required to load a .yaml/.yml scenario file, and "
             "isn't installed in this environment. Either `pip install "
             "pyyaml`, or write the scenario as JSON instead — the .json "
-            "path of delegation_guard.scenarios is stdlib-only and needs "
+            "path of attenu_guard.scenarios is stdlib-only and needs "
             "no install."
         ) from e
     return yaml
@@ -398,7 +398,7 @@ def _all_reason_codes() -> list:
 
 
 # =========================================================================
-# CLI:  python3 -m delegation_guard.scenarios <path> [<path> ...] [--coverage]
+# CLI:  python3 -m attenu_guard.scenarios <path> [<path> ...] [--coverage]
 # =========================================================================
 
 def main(argv=None) -> int:
@@ -411,7 +411,7 @@ def main(argv=None) -> int:
     show_coverage = "--coverage" in args
     paths = [a for a in args if a != "--coverage"]
     if not paths:
-        print("usage: python3 -m delegation_guard.scenarios <path> [<path> ...] [--coverage]",
+        print("usage: python3 -m attenu_guard.scenarios <path> [<path> ...] [--coverage]",
               file=sys.stderr)
         return 2
 

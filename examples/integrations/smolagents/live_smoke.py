@@ -30,8 +30,8 @@ if os.environ.get("RUN_LIVE") != "1":
 
 from smolagents import InferenceClientModel, Tool, ToolCallingAgent  # noqa: E402
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
-from delegation_guard.adapters.smolagents import DelegatedAgent, GuardRef, guard_tools  # noqa: E402
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
+from attenu_guard.adapters.smolagents import DelegatedAgent, GuardRef, guard_tools  # noqa: E402
 
 EFFECTS: list[tuple] = []
 

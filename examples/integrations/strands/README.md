@@ -1,4 +1,4 @@
-# delegation-guard × AWS Strands Agents
+# attenu-guard × AWS Strands Agents
 
 Tested against **strands-agents 1.52.0** (Apache-2.0, Python >= 3.10) on Python 3.12.
 
@@ -24,7 +24,7 @@ lifecycle method, so a Swarm/Graph still needs the hook registration.
 ## Run it
 
 ```bash
-pip install "strands-agents>=1.52" delegation-guard
+pip install "strands-agents>=1.52" attenu-guard
 python examples/integrations/strands/demo.py
 ```
 

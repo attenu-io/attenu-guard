@@ -1,4 +1,4 @@
-"""delegation-guard × Agno — the "poisoned summarizer", end to end, offline.
+"""attenu-guard × Agno — the "poisoned summarizer", end to end, offline.
 
     python examples/integrations/agno/demo.py
 
@@ -9,7 +9,7 @@ restriction on what a member may do (its `_initialize_member` copies only the
 model and ids; delegation is a task *string*) — but its delegated `Authority`
 covers only `crm.read`, with a 5,000-row ceiling and no egress. The scripted
 model plays a summarizer that has been prompt-injected into attempting an
-exfiltration; delegation-guard denies it before the tool body runs.
+exfiltration; attenu-guard denies it before the tool body runs.
 
 No API key, no network: the LLM is a `ScriptedModel` (an `agno.models.base.Model`
 subclass) replaying pre-baked `ModelResponse`s. Part 1 runs the same attack
@@ -32,7 +32,7 @@ from agno.team import Team
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard.adapters.agno import (  # noqa: E402
+from attenu_guard.adapters.agno import (  # noqa: E402
     Grant,
     GuardRegistry,
     ToolPolicy,
@@ -40,7 +40,7 @@ from delegation_guard.adapters.agno import (  # noqa: E402
     guarded_tool_hook,
 )
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -189,7 +189,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------- PART 2: guarded
-    _rule("PART 2 — the same attack, with delegation-guard on both hook points")
+    _rule("PART 2 — the same attack, with attenu-guard on both hook points")
     EXPORTED.clear(); ROWS_READ.clear()
 
     audit_path = Path(tempfile.gettempdir()) / "dg-agno-demo.jsonl"
@@ -277,7 +277,7 @@ def main() -> None:
 
     print(
         "\nEvery deny is in the log with a machine-readable reason code, and the\n"
-        "chain verifies offline — `dg view` / `dg verify` can render it."
+        "chain verifies offline — `attenu-guard view` / `attenu-guard verify` can render it."
     )
 
 

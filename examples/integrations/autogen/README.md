@@ -1,4 +1,4 @@
-# delegation-guard × AutoGen
+# attenu-guard × AutoGen
 
 Enforced authority attenuation for [AutoGen](https://github.com/microsoft/autogen)
 (`autogen-agentchat`) multi-agent teams. Tested against **0.7.5** on Python 3.12.

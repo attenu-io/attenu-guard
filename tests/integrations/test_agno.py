@@ -1,4 +1,4 @@
-"""delegation-guard × Agno (`agno` 2.9.x) — integration tests.
+"""attenu-guard × Agno (`agno` 2.9.x) — integration tests.
 
 Runs fully offline: the LLM is a `ScriptedModel` (an `agno.models.base.Model`
 subclass) replaying pre-baked `ModelResponse`s carrying OpenAI-shaped tool
@@ -8,7 +8,7 @@ The story under test is the canonical "poisoned summarizer": an `orchestrator`
 `Team` delegates to a `summarizer` member over Agno's own
 `delegate_task_to_member` tool. The summarizer's *Python* tool list still
 contains `crm_export` — Agno imposes no restriction on it (see
-`test_agno_itself_does_not_attenuate`) — but its delegation-guard `Authority`
+`test_agno_itself_does_not_attenuate`) — but its attenu-guard `Authority`
 does not cover that scope, so the export is denied before the tool body runs.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ from agno.models.base import Model  # noqa: E402
 from agno.models.response import ModelResponse  # noqa: E402
 from agno.team import Team  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -38,7 +38,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # The adapter lives under examples/ (not shipped in the package yet).
-from delegation_guard.adapters.agno import (  # noqa: E402
+from attenu_guard.adapters.agno import (  # noqa: E402
     DELEGATION_TOOLS,
     Grant,
     GuardRegistry,
@@ -161,7 +161,7 @@ def _reset_effects():
 
 def build_team(member_script: List[ModelResponse], *, on_deny: str = "error"):
     """The canonical topology: an orchestrator Team delegating to a summarizer
-    Agent, with delegation-guard on both Agno hook points."""
+    Agent, with attenu-guard on both Agno hook points."""
     root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")
     registry = GuardRegistry(root, root_key="orchestrator")
 
@@ -464,7 +464,7 @@ def test_agno_itself_does_not_attenuate():
     task *string* (`_setup_delegate_task_to_member`, team/_default_tools.py:479).
 
     Concretely: a leader with NO tools of its own delegates to a member that
-    can still export the whole CRM. Without delegation-guard the export runs.
+    can still export the whole CRM. Without attenu-guard the export runs.
     """
     unguarded = Agent(
         name="summarizer", id="summarizer",
@@ -490,7 +490,7 @@ def test_agno_itself_does_not_attenuate():
     team.run("summarize")
     assert EFFECTS.exported_to == ["attacker.example"], (
         "baseline: Agno lets the member export freely — this is the gap "
-        "delegation-guard closes"
+        "attenu-guard closes"
     )
 
 
@@ -590,7 +590,7 @@ def test_async_hook_guards_async_tools_under_arun():
     poisoned call is still blocked before its body."""
     import asyncio
 
-    from delegation_guard.adapters.agno import aguarded_tool_hook
+    from attenu_guard.adapters.agno import aguarded_tool_hook
 
     root, registry, agent = _async_agent(aguarded_tool_hook)
     asyncio.run(agent.arun("go"))
@@ -659,7 +659,7 @@ def test_arun_needs_the_async_delegation_hook_but_keeps_the_sync_tool_hook():
     """
     import asyncio
 
-    from delegation_guard.adapters.agno import adelegation_tool_hook
+    from attenu_guard.adapters.agno import adelegation_tool_hook
 
     root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")
     registry = GuardRegistry(root, root_key="orchestrator")

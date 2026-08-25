@@ -1,4 +1,4 @@
-# delegation-guard × LlamaIndex agents
+# attenu-guard × LlamaIndex agents
 
 Enforced authority attenuation for `AgentWorkflow` handoffs. Tested against
 **llama-index-core 0.14.23** (Python 3.12; the framework needs >=3.9).

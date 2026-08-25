@@ -1,4 +1,4 @@
-"""delegation-guard × AutoGen — the "poisoned summarizer", end to end, offline.
+"""attenu-guard × AutoGen — the "poisoned summarizer", end to end, offline.
 
     python examples/integrations/autogen/demo.py
 
@@ -7,7 +7,7 @@ AutoGen `Swarm`. The summarizer's *Python* tool list still contains `crm_export`
 and `send_mail` — AutoGen imposes no restriction on a handoff target's tools — but
 its delegated `Authority` covers only `crm.read` with a 5,000-row ceiling and no
 egress. The scripted model plays a summarizer that has been prompt-injected into
-attempting an exfiltration; delegation-guard denies it before the tool body runs.
+attempting an exfiltration; attenu-guard denies it before the tool body runs.
 
 No API key, no network: the LLM is `ReplayChatCompletionClient` replaying scripted
 `CreateResult`s. Run it twice — once unguarded, once guarded — to see the contrast.
@@ -31,7 +31,7 @@ from autogen_ext.models.replay import ReplayChatCompletionClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard.adapters.autogen import (  # noqa: E402
+from attenu_guard.adapters.autogen import (  # noqa: E402
     Grant,
     GuardedHandoff,
     GuardRegistry,
@@ -39,7 +39,7 @@ from delegation_guard.adapters.autogen import (  # noqa: E402
     guarded_agent,
 )
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -173,7 +173,7 @@ def _rule(title: str) -> None:
 
 async def main() -> None:
     # ---------------------------------------------------------------- part 1
-    _rule("PART 1 — AutoGen alone (no delegation-guard)")
+    _rule("PART 1 — AutoGen alone (no attenu-guard)")
     EXECUTED.clear()
     team, _ = _team(guarded=False)
     await team.run(task="Summarize the Q3 pipeline for the board pack.")
@@ -187,7 +187,7 @@ async def main() -> None:
     )
 
     # ---------------------------------------------------------------- part 2
-    _rule("PART 2 — same team, same script, with delegation-guard")
+    _rule("PART 2 — same team, same script, with attenu-guard")
     EXECUTED.clear()
     audit_path = Path(tempfile.gettempdir()) / "dg-autogen-demo-audit.jsonl"
     if audit_path.exists():
@@ -202,7 +202,7 @@ async def main() -> None:
         if type(message).__name__ != "ToolCallSummaryMessage":
             continue
         content = str(getattr(message, "content", "")).strip()
-        label = "DENIED " if "delegation-guard:" in content else "ALLOWED"
+        label = "DENIED " if "attenu-guard:" in content else "ALLOWED"
         print(f"   {label} {content}")
 
     print("\nTool bodies that actually ran:")
@@ -269,7 +269,7 @@ async def main() -> None:
 
     print(
         "\nEvery deny is in the log with a machine-readable reason code, and the\n"
-        "chain verifies offline — `dg view` / `dg verify` can render it."
+        "chain verifies offline — `attenu-guard view` / `attenu-guard verify` can render it."
     )
 
 

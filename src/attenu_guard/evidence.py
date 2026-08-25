@@ -10,7 +10,7 @@ auditor's ability to check it WITHOUT the engine that produced it. This module e
   containment   every `allow` action's scope was within the acting node's authority — the ledger is internally
                 consistent, no action was authorised outside what the node held.
 
-    from delegation_guard import evidence
+    from attenu_guard import evidence
     bundle = evidence.export_bundle(guard.audit_log(), signer)     # publish this + verify the anchor out-of-band
     rep = evidence.verify_bundle(bundle, signer)                   # {"ok", "checks": {...}, "failures": [...]}
 
@@ -22,8 +22,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from delegation_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
-from delegation_guard.authority import Authority
+from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
+from attenu_guard.authority import Authority
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS"]
 
@@ -109,10 +109,10 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     if strict and not report["ok"]:
         raise EvidenceLeakError(f"{len(report['violations'])} field(s) outside the ledger allow-list: {report['violations'][:5]}")
     anchor = _anchor_for(entries, signer, ts)
-    from delegation_guard import AuditLog as _AL
+    from attenu_guard import AuditLog as _AL
     anchor["verified"] = _AL.verify_anchor(entries, anchor, signer)[0]
     return {"v": SCHEMA_VERSION, "chain_id": _chain_id(entries), "entries": entries, "anchor": anchor,
-            "redaction": report, "note": "offline-verifiable: delegation_guard.evidence.verify_bundle(bundle, signer)"}
+            "redaction": report, "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
 
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, list]:

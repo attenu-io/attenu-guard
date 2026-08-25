@@ -1,11 +1,11 @@
-"""delegation-guard × LangGraph 1.x — integration tests.
+"""attenu-guard × LangGraph 1.x — integration tests.
 
 Runs the canonical "poisoned summarizer" scenario against a REAL, compiled
 LangGraph graph, driven by a scripted offline chat model (no LLM API key, no
 network). Three call paths are covered, because LangGraph 1.x has three:
 
   1. hand-written graph nodes      -> the SHIPPED adapter
-                                      (`delegation_guard.adapters.langgraph`)
+                                      (`attenu_guard.adapters.langgraph`)
   2. `ToolNode(wrap_tool_call=…)`  -> the example adapter's tool gate, on a
                                       hand-rolled `StateGraph`
   3. `create_agent(middleware=…)`  -> the same gate, as LangChain middleware
@@ -32,7 +32,7 @@ from langgraph.graph import END, START, StateGraph  # noqa: E402
 from langgraph.graph.message import add_messages  # noqa: E402
 from langgraph.prebuilt import ToolNode, tools_condition  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -47,7 +47,7 @@ from delegation_guard import (  # noqa: E402
 # its directory is named `langgraph`, so we must NOT put that directory on
 # sys.path — that would shadow nothing today but is a trap waiting to happen.
 # --------------------------------------------------------------------------
-import delegation_guard.adapters.langchain as dg_langgraph
+import attenu_guard.adapters.langchain as dg_langgraph
 GuardedDelegation = dg_langgraph.GuardedDelegation
 ToolPolicy = dg_langgraph.ToolPolicy
 
@@ -139,7 +139,7 @@ def _fresh_chain():
 #    against a fake graph object).
 # ==========================================================================
 def test_shipped_adapter_guards_a_real_compiled_stategraph(side_effects):
-    from delegation_guard.adapters.langgraph import add_guarded_node, guard_node
+    from attenu_guard.adapters.langgraph import add_guarded_node, guard_node
 
     root, summarizer = _fresh_chain()
 
@@ -255,12 +255,12 @@ def test_unlisted_tool_fails_closed(side_effects):
     assert side_effects == []
     denial = next(m for m in out["messages"]
                   if isinstance(m, ToolMessage) and m.status == "error")
-    assert "no delegation-guard policy" in denial.content
+    assert "no attenu-guard policy" in denial.content
 
 
 def test_denials_carry_disposition_on_the_ledger_held_vs_unresolved(side_effects):
     """Slice 1 / Plan A: a held tool says held_pending_grant; an unlisted tool lands on the ledger as unresolved."""
-    from delegation_guard import Disposition
+    from attenu_guard import Disposition
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain()
     guarded = GuardedDelegation(summarizer, tools={

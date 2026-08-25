@@ -1,5 +1,5 @@
 """
-red_team.py — adversarial assessment of the delegation-guard authorization protocol.
+red_team.py — adversarial assessment of the attenu-guard authorization protocol.
 
 We try to BREAK our own attenuation. Two boxes:
 
@@ -42,15 +42,15 @@ import pathlib
 from dataclasses import dataclass, field
 
 try:
-    import delegation_guard  # noqa
+    import attenu_guard  # noqa
 except ModuleNotFoundError:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from delegation_guard import (
+from attenu_guard import (
     Authority, Guard, AuthorityError, Decision, Reason, ReasonCode,
 )
-from delegation_guard.ceilings import RowLimit, EgressRank
-from delegation_guard.audit import AuditLog
+from attenu_guard.ceilings import RowLimit, EgressRank
+from attenu_guard.audit import AuditLog
 
 RESULTS = []
 
@@ -445,7 +445,7 @@ def main():
     marks = {"DEFENDED": "✓ DEFENDED  ", "BROKEN": "✗ BROKEN    ",
              "LIMITATION": "○ LIMITATION"}
     print("=" * 78)
-    print("  delegation-guard — RED TEAM REPORT")
+    print("  attenu-guard — RED TEAM REPORT")
     print("=" * 78)
     for box in ("BLACK", "WHITE"):
         print(f"\n{box}-BOX")

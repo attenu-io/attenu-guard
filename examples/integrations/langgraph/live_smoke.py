@@ -10,7 +10,7 @@ offline demos and pytest suite cover the same behaviour with a scripted model.
 
 The point of running it live is to confirm the one thing a scripted model
 cannot: that a genuinely autonomous model, told to exfiltrate, is stopped by
-delegation-guard rather than by the script that fed it the tool call.
+attenu-guard rather than by the script that fed it the tool call.
 """
 from __future__ import annotations
 
@@ -29,8 +29,8 @@ if not os.environ.get("ANTHROPIC_API_KEY"):
 
 from langchain_core.tools import tool
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
-from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 EXECUTED: list[tuple] = []
 

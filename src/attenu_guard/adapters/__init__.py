@@ -1,14 +1,14 @@
 """
-delegation_guard.adapters — thin, optional framework integrations.
+attenu_guard.adapters — thin, optional framework integrations.
 
 Each submodule wraps ONE framework's delegation + tool-invocation hooks around
 the core `Guard` surface (docs/DEVX-REVIEW.md principle 7: "framework-agnostic
 core, thin adapters"). Nothing here is imported by the core package, and this
-`__init__` imports nothing — so `delegation_guard` stays zero-dependency, and a
+`__init__` imports nothing — so `attenu_guard` stays zero-dependency, and a
 framework is only imported when YOU import its adapter:
 
-    from delegation_guard.adapters.openai_agents import GuardRegistry, guarded_tool
-    # -> needs `pip install 'delegation-guard[openai-agents]'`
+    from attenu_guard.adapters.openai_agents import GuardRegistry, guarded_tool
+    # -> needs `pip install 'attenu-guard[openai-agents]'`
 
 Available (see docs/INTEGRATIONS.md for hooks, versions and evidence):
 

@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x Google ADK (google-adk 2.7.1).
+Integration test: attenu-guard x Google ADK (google-adk 2.7.1).
 
 Runs entirely offline: the model is a `google.adk.models.BaseLlm` subclass that
 yields scripted `LlmResponse`s containing function calls, so the real
@@ -10,12 +10,12 @@ was delegated narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect list the tool would have appended to).
 
 The test drives the SHIPPED example (`examples/integrations/google_adk/demo.py`
-+ `delegation_guard.adapters.google_adk`), so a green run also proves the example works.
++ `attenu_guard.adapters.google_adk`), so a green run also proves the example works.
 
 It additionally pins the ADK behaviour the integration exists to compensate for:
 `disallow_transfer_to_peers=True` does NOT stop a peer transfer on ADK 2.7.1's
 default execution path (google/adk/workflow/utils/_transfer_utils.py has no
-`disallow_transfer_*` check at all), while the delegation-guard chain attenuates
+`disallow_transfer_*` check at all), while the attenu-guard chain attenuates
 the peer's authority anyway.
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ from google.adk.sessions.in_memory_session_service import (  # noqa: E402
 from google.adk.tools.agent_tool import AgentTool  # noqa: E402
 from google.genai import types  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -68,7 +68,7 @@ def _load(name: str):
     return mod
 
 
-import delegation_guard.adapters.google_adk as dg_adk
+import attenu_guard.adapters.google_adk as dg_adk
 demo = _load("demo")
 
 
@@ -363,7 +363,7 @@ def test_undeclared_tool_is_denied_by_default():
 #     the ledger AND in the dict handed back to the model.
 # ==========================================================================
 def test_denial_carries_disposition_held_vs_unresolved_vs_out_of_authority():
-    from delegation_guard import Disposition
+    from attenu_guard import Disposition
 
     def run(tools):
         async def scenario():
@@ -451,7 +451,7 @@ def test_raise_on_deny_aborts_the_run():
 # 8. Evidence pin — ADK's own sub-agent restriction is prompt-only on the
 #    default 2.7.1 path, and the guard chain contains the escalation anyway.
 #
-#    This is the claim delegation-guard's README makes about
+#    This is the claim attenu-guard's README makes about
 #    https://github.com/google/adk-python/issues/3850 (closed, but the peer
 #    transfer still succeeds here). If a future ADK enforces the flag in code
 #    this test goes red — which is the point: it is a pin, not a wish.
@@ -504,7 +504,7 @@ def test_disallow_transfer_to_peers_is_not_enforced_but_authority_still_attenuat
         "ADK 2.7.1 no longer allows the peer transfer — issue #3850 appears fixed"
     assert any(e.author == "exporter" for e in events)
 
-    # (b) delegation-guard contained it: exporter's authority is the meet with
+    # (b) attenu-guard contained it: exporter's authority is the meet with
     #     analyst's, so the export it was nominally allowed is denied.
     exporter_guard = plugin.guard_for("exporter")
     analyst_guard = plugin.guard_for("analyst")
@@ -654,7 +654,7 @@ def test_delegation_scope_allows_a_granted_handoff():
 #     the child's task text on the spawn record (it was "delegated to <name>").
 # ==========================================================================
 def test_observe_mode_hooks_record_undeclared_tools_and_agents():
-    from delegation_guard.adapters.google_adk import ToolAuthority
+    from attenu_guard.adapters.google_adk import ToolAuthority
 
     async def scenario():
         calls: list = []

@@ -1,4 +1,4 @@
-"""delegation-guard × AutoGen (`autogen-agentchat` 0.7.x) — thin integration adapter.
+"""attenu-guard × AutoGen (`autogen-agentchat` 0.7.x) — thin integration adapter.
 
 Hook points used
 ----------------
@@ -32,7 +32,7 @@ that says which scope and context each tool consumes. Wire delegation with
 `GuardedHandoff(target=..., source=..., registry=..., grant=Grant(authority, task))`
 for `Swarm` handoffs, or with `ToolPolicy(delegates_to=..., grant=...)` for the
 agents-as-tools pattern (`AgentTool` / `TeamTool`). Both fail closed: an agent with
-no delegated `Guard`, and a tool with no `ToolPolicy`, are denied. delegation-guard
+no delegated `Guard`, and a tool with no `ToolPolicy`, are denied. attenu-guard
 deliberately does not decide *what* authority a task needs — you write the `Grant`.
 
 Denials are returned to the model as an error `ToolResult` by default
@@ -40,7 +40,7 @@ Denials are returned to the model as an error `ToolResult` by default
 `FunctionExecutionResult(is_error=True)` the model can react to, whereas an
 exception raised from `call_tool` propagates out of `_execute_tool_call`
 uncaught and tears down the whole `team.run()`. Use `on_deny="raise"` when you
-want that hard stop (it raises `delegation_guard.AuthorityDenied`).
+want that hard stop (it raises `attenu_guard.AuthorityDenied`).
 """
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ from autogen_core.tools import (
 )
 from pydantic import BaseModel, ConfigDict
 
-from delegation_guard import Authority, AuthorityDenied, AuthorityError, Guard
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "Grant",
@@ -97,7 +97,7 @@ class ToolPolicy:
     """Maps one AutoGen tool onto the authority it consumes.
 
     `context` turns the tool's JSON arguments into the context dict that
-    delegation-guard's ceilings evaluate (e.g. ``{"rows": 4200}``). If the tool is
+    attenu-guard's ceilings evaluate (e.g. ``{"rows": 4200}``). If the tool is
     itself a delegation point (an `AgentTool`/`TeamTool`), set `delegates_to` to
     the child agent's registry name and `grant` to the authority it should get —
     the child `Guard` is minted after the check passes, before the tool body runs.
@@ -108,7 +108,7 @@ class ToolPolicy:
     metered: bool = False
     delegates_to: Optional[str] = None
     grant: Optional[Grant] = None
-    disposition: Optional[str] = None     # see delegation_guard.Disposition
+    disposition: Optional[str] = None     # see attenu_guard.Disposition
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
             # No authority is known for this tool: put it on the ledger as
             # `unresolved` when a Guard exists (the Decisions queue folds the ledger).
             g = self._registry.get(self._agent_name)
-            msg = f"delegation-guard: no ToolPolicy declared for tool {original!r} (fail-closed)."
+            msg = f"attenu-guard: no ToolPolicy declared for tool {original!r} (fail-closed)."
             decision = (g.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=original,
                                         disposition=Disposition.UNRESOLVED) if g is not None else None)
             return self._deny(name, msg, decision=decision)
@@ -216,7 +216,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
         if guard is None:
             return self._deny(
                 name,
-                f"delegation-guard: agent {self._agent_name!r} holds no delegated "
+                f"attenu-guard: agent {self._agent_name!r} holds no delegated "
                 f"authority (fail-closed).",
                 decision=None,
             )
@@ -229,7 +229,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
         if not decision:
             return self._deny(
                 name,
-                f"delegation-guard: {decision.explain()} "
+                f"attenu-guard: {decision.explain()} "
                 f"(agent={self._agent_name}, tool={original}, scope={policy.scope})",
                 decision=decision,
             )
@@ -244,7 +244,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
             except AuthorityError as exc:
                 return self._deny(
                     name,
-                    f"delegation-guard: cannot delegate to "
+                    f"attenu-guard: cannot delegate to "
                     f"{policy.delegates_to!r}: {exc}",
                     decision=None,
                 )
@@ -321,7 +321,7 @@ class GuardedHandoff(Handoff):
                 # in the tool result keeps the run alive, and the target agent is
                 # left with no Guard — so every tool it tries is fail-closed.
                 return (
-                    f"delegation-guard: refused to delegate to {self.target!r}: {exc}"
+                    f"attenu-guard: refused to delegate to {self.target!r}: {exc}"
                 )
             return self.message
 
@@ -345,7 +345,7 @@ def guarded_agent(
     on_deny: str = "error",
     **assistant_kwargs: Any,
 ) -> AssistantAgent:
-    """Build an `AssistantAgent` whose tools are gated by delegation-guard.
+    """Build an `AssistantAgent` whose tools are gated by attenu-guard.
 
     Note AutoGen rejects `tools=` and `workbench=` together
     (`_assistant_agent.py:829`), so the tools go into the workbench instead.

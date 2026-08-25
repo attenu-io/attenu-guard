@@ -1,7 +1,7 @@
-# delegation-guard x smolagents
+# attenu-guard x smolagents
 
 Tested against **smolagents 1.26.0** (Apache-2.0), Python 3.12. No changes to
-smolagents or to `delegation_guard` — the adapter is `delegation_guard.adapters.smolagents`, ~120
+smolagents or to `attenu_guard` — the adapter is `attenu_guard.adapters.smolagents`, ~120
 lines of logic you can paste into your own project.
 
 ## What it hooks
@@ -19,7 +19,7 @@ agent are the framework's own extension points — no monkeypatching.
 ## Run it
 
 ```bash
-pip install "smolagents==1.26.0" delegation-guard
+pip install "smolagents==1.26.0" attenu-guard
 python examples/integrations/smolagents/demo.py          # offline, no API key
 pytest -q tests/integrations/test_smolagents.py          # 17 tests, offline
 ```

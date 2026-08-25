@@ -1,4 +1,4 @@
-"""delegation-guard × Agno (`agno` 2.9.x) — thin integration adapter.
+"""attenu-guard × Agno (`agno` 2.9.x) — thin integration adapter.
 
 Hook points used
 ----------------
@@ -51,7 +51,7 @@ Build one `GuardRegistry` per run, seeded with the root `Guard`. Put
 `Team`, and `guarded_tool_hook(registry, {tool_name: ToolPolicy(scope, ...)})`
 on every `Agent`. Both fail closed: a member with no `Grant`, an agent with no
 delegated `Guard`, and a tool with no `ToolPolicy` are all denied.
-delegation-guard deliberately does not decide *what* authority a task needs —
+attenu-guard deliberately does not decide *what* authority a task needs —
 you write the `Grant`.
 
 Denials raise `AuthorityDenied` by default (`on_deny="error"`), which
@@ -67,8 +67,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
-from delegation_guard import Authority, AuthorityDenied, Decision, Guard
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "DELEGATION_TOOLS",
@@ -90,7 +90,7 @@ DELEGATION_TOOLS = ("delegate_task_to_member", "delegate_task_to_members")
 
 # Spelled with `Union` rather than `X | Y`: this is a runtime-evaluated module-level
 # assignment, and PEP 604 unions on typing generics only work from Python 3.10 —
-# delegation-guard supports 3.9, as does Agno (Requires-Python >=3.9).
+# attenu-guard supports 3.9, as does Agno (Requires-Python >=3.9).
 ContextSpec = Optional[
     Union[Mapping[str, Any], Callable[[Mapping[str, Any]], Mapping[str, Any]]]
 ]
@@ -100,7 +100,7 @@ ContextSpec = Optional[
 class ToolPolicy:
     """Says what authority one tool consumes.
 
-    `scope` is the delegation-guard scope the tool needs. `context` supplies the
+    `scope` is the attenu-guard scope the tool needs. `context` supplies the
     ceiling dimensions (`{"rows": n}`, `{"egress": "any"}`, ...) — either a
     fixed mapping or a callable taking the model-supplied arguments, so a
     ceiling can depend on what the model actually asked for.
@@ -109,7 +109,7 @@ class ToolPolicy:
     scope: str
     context: ContextSpec = None
     metered: bool = False
-    disposition: Optional[str] = None     # see delegation_guard.Disposition
+    disposition: Optional[str] = None     # see attenu_guard.Disposition
 
     def context_for(self, arguments: Mapping[str, Any]) -> Dict[str, Any]:
         if self.context is None:
@@ -180,7 +180,7 @@ def _denied(reason: str) -> Decision:
     """A synthetic Decision for fail-closed cases the library was never asked
     about (no Guard, no ToolPolicy) — nothing to log against, so it is built
     here rather than by `Guard.check`."""
-    from delegation_guard import Reason
+    from attenu_guard import Reason
 
     return Decision(allowed=False, reasons=(Reason(code="scope_not_granted", message=reason),))
 

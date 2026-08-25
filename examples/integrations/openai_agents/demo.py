@@ -10,7 +10,7 @@ The story:
   a summarizer that should only ever read. The summarizer is then told — by
   poisoned content sitting in the conversation the SDK forwarded to it verbatim —
   to export the CRM to an external host. Both agents share the SAME tool objects,
-  so "just give the child a shorter tool list" is not available. delegation-guard
+  so "just give the child a shorter tool list" is not available. attenu-guard
   denies the export before the tool body runs, denies an over-large read inside an
   allowed scope, and keeps denying everything once the summarizer is revoked.
 """
@@ -24,14 +24,14 @@ from agents.testing import ModelStep, ScriptedModel, assistant_message, function
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
     Guard,
     RowLimit,
 )
-from delegation_guard.adapters.openai_agents import (  # noqa: E402
+from attenu_guard.adapters.openai_agents import (  # noqa: E402
     DelegationGuardHooks,
     GuardRegistry,
     guarded_tool,
@@ -135,7 +135,7 @@ async def main():
     model = script(registry)
 
     print("=" * 78)
-    print("delegation-guard x OpenAI Agents SDK — the poisoned summarizer")
+    print("attenu-guard x OpenAI Agents SDK — the poisoned summarizer")
     print("=" * 78)
     print(f"\n[1] orchestrator authority : {registry.root_guard.authority}")
     print(f"    summarizer REQUESTS    : {registry.grants['summarizer'].authority}")
@@ -174,10 +174,10 @@ async def main():
     ]
     for call_id, who, label in labels:
         text = outputs.get(call_id, "<no output>")
-        verdict = "DENIED " if text.startswith("delegation-guard:") else "ALLOWED"
+        verdict = "DENIED " if text.startswith("attenu-guard:") else "ALLOWED"
         print(f"    {verdict}  {who}  {label}")
         if verdict == "DENIED ":
-            print(f"              -> {text[len('delegation-guard: '):]}")
+            print(f"              -> {text[len('attenu-guard: '):]}")
 
     print("\n[5] tool bodies that actually executed")
     for line in EXECUTED:
@@ -205,7 +205,7 @@ async def main():
         if e["event"] in ("spawn", "deny", "kill"):
             detail = e.get("reason") or e.get("agent") or e.get("target")
             print(f"    seq={e['seq']:<3} {e['event']:<6} {e.get('tool') or '':<11} {detail}")
-    print(f"    written to {audit_path}  ->  `dg view {audit_path}`")
+    print(f"    written to {audit_path}  ->  `attenu-guard view {audit_path}`")
 
     tampered = list(entries)
     tampered[-1] = {**tampered[-1], "tool": "innocent_tool"}

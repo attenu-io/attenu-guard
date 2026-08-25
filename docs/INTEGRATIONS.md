@@ -1,8 +1,8 @@
-# Integrations — delegation-guard inside real agent frameworks
+# Integrations — attenu-guard inside real agent frameworks
 
 Every row below is a **shipped, tested** integration: a thin adapter installed with the
-package as `delegation_guard.adapters.<framework>` (enable its framework with
-`pip install 'delegation-guard[<extra>]'`; the core stays zero-dependency — a framework is
+package as `attenu_guard.adapters.<framework>` (enable its framework with
+`pip install 'attenu-guard[<extra>]'`; the core stays zero-dependency — a framework is
 imported only when you import its adapter), a runnable `demo.py` under
 [`examples/integrations/<framework>/`](../examples/integrations/) that tells the
 poisoned-summariser story end to end, and a pytest under
@@ -43,7 +43,7 @@ Versions and file:line references are as of **August 2026**; they will drift.
 ## Why these twelve
 
 Selection criteria (August 2026): (1) a Python framework with an **explicit delegation /
-handoff / sub-agent primitive** — the moment delegation-guard exists to guard; (2) coverage of
+handoff / sub-agent primitive** — the moment attenu-guard exists to guard; (2) coverage of
 every major vendor's agent stack (OpenAI, Google, Microsoft ×2, AWS, Anthropic, Hugging Face,
 LangChain) plus the leading independents (CrewAI, Pydantic AI, LlamaIndex, Agno); (3) an
 **offline test path** (mock/scripted model) so the integration test can run in CI with no
@@ -69,7 +69,7 @@ file each as a constructive upstream issue with the repro and a suggested fix (c
 
 ## Other languages
 
-The wire format (`delegation_guard.wire`: signed JWS Delegation Tokens, offline
+The wire format (`attenu_guard.wire`: signed JWS Delegation Tokens, offline
 child ⊆ parent verification) is the language-neutral contract, and `tests/vectors/` +
 `scenarios/*.json` are its conformance suite. A TypeScript port of the core is the natural
 next language (Vercel AI SDK, LangGraph.js, OpenAI Agents JS, Claude Agent SDK TS, the MCP TS
@@ -89,7 +89,7 @@ as a network call on the deny path.
   hard-stop policies. Every adapter exposes this as a one-word switch (`on_deny="raise"`).
 
 Either way the denial lands on the hash-chained audit log with a reason code, and
-`dg view` renders it in the delegation tree — that is the only place a *sub-agent's*
+`attenu-guard view` renders it in the delegation tree — that is the only place a *sub-agent's*
 blocked call surfaces in frameworks (deepagents, AutoGen) that collapse the child's
 transcript into a single message for the parent.
 
@@ -132,7 +132,7 @@ python -m pytest -q tests/integrations/test_openai_agents.py
 ```
 
 ```python
-from delegation_guard.adapters.openai_agents import GuardRegistry, DelegationGuardHooks, guarded_tool
+from attenu_guard.adapters.openai_agents import GuardRegistry, DelegationGuardHooks, guarded_tool
 ```
 
 Each directory's `README.md` lists the exact hooks, the version tested, and an

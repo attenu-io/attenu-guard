@@ -337,7 +337,7 @@ acknowledged.
 
 # Reference Implementation and Test Vectors
 
-A permissively licensed reference implementation (the "delegation-guard" library)
+A permissively licensed reference implementation (the "attenu-guard" library)
 and a set of offline-verification test vectors (chains that MUST verify and
 adversarial chains that MUST be rejected: widened scope, exceeded ceiling,
 spliced parent, exceeded depth, non-monotonic expiry, revoked entry, replayed

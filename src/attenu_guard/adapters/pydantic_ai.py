@@ -1,5 +1,5 @@
 """
-delegation_guard.adapters.pydantic_ai — a thin delegation-guard integration for Pydantic AI.
+attenu_guard.adapters.pydantic_ai — a thin attenu-guard integration for Pydantic AI.
 
 Tested against pydantic-ai-slim 2.31.1 (Python >= 3.10).
 
@@ -47,7 +47,7 @@ its body runs, and every allow/deny lands in the chain's hash-chained audit log.
     await agent.run(prompt, deps=GuardedDeps(guard=child_guard, app=my_deps))
 
 This module is deliberately dependency-light: it imports `pydantic_ai` and
-`delegation_guard`, and nothing else. Copy it into your project as-is.
+`attenu_guard`, and nothing else. Copy it into your project as-is.
 """
 from __future__ import annotations
 
@@ -61,8 +61,8 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
-from delegation_guard import Authority, AuthorityDenied, Guard
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Guard
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "ToolPolicy",
@@ -80,7 +80,7 @@ AppDepsT = TypeVar("AppDepsT")
 OnDenial = Literal["raise", "tool_failed"]
 """What to do when the Guard denies a call.
 
-`"raise"`      — re-raise `delegation_guard.AuthorityDenied`. Pydantic AI does not
+`"raise"`      — re-raise `attenu_guard.AuthorityDenied`. Pydantic AI does not
                  catch it (`pydantic_ai/tool_manager.py:477-489` only catches
                  `ValidationError` / `ModelRetry` / `ToolFailed`), so it aborts the
                  whole agent run. Deterministic hard stop; the default, because a
@@ -113,7 +113,7 @@ class UnmappedToolError(UserError):
 # ==========================================================================
 # Policy: what authority does this tool consume?
 #
-# delegation-guard deliberately does not decide this for you — the integrator
+# attenu-guard deliberately does not decide this for you — the integrator
 # declares it, once, per tool.
 # ==========================================================================
 
@@ -136,7 +136,7 @@ class ToolPolicy:
     scope: str | None
     context: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None
     metered: bool = False
-    disposition: str | None = None        # see delegation_guard.Disposition
+    disposition: str | None = None        # see attenu_guard.Disposition
 
 
 UNGUARDED = ToolPolicy(scope=None)
@@ -229,7 +229,7 @@ def authorize_tool_call(
 
     if on_denial == "tool_failed":
         raise ToolFailed(
-            f"Denied by delegation-guard: {decision.explain()} "
+            f"Denied by attenu-guard: {decision.explain()} "
             f"(tool={tool_name!r}, scope={policy.scope!r}). "
             f"This agent does not hold the authority for this action; do not retry it."
         )
@@ -261,7 +261,7 @@ def _resolve(
     guard = get_guard(ctx)
     if guard is None:
         raise MissingGuardError(
-            f"{label}: no delegation-guard `Guard` on the run's deps, so tool "
+            f"{label}: no attenu-guard `Guard` on the run's deps, so tool "
             f"{tool_name!r} cannot be authorized. Run the agent with "
             f"`deps=GuardedDeps(guard=..., app=...)`, or pass a custom `get_guard`."
         )

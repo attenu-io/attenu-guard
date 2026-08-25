@@ -1,4 +1,4 @@
-"""dg_smolagents — a thin delegation-guard integration for smolagents.
+"""dg_smolagents — a thin attenu-guard integration for smolagents.
 
 Tested against smolagents 1.26.0 (Hugging Face, Apache-2.0), Python 3.12.
 
@@ -67,7 +67,7 @@ is the behaviour we want by default; pass `on_denied="return"` if you would
 rather hand the model the denial as ordinary tool output.
 
 This module imports `smolagents` (it subclasses `Tool`), but nothing from
-`delegation_guard` beyond the public API — no library changes are needed.
+`attenu_guard` beyond the public API — no library changes are needed.
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 from smolagents import Tool
 
-from delegation_guard import AuthorityDenied, Guard
+from attenu_guard import AuthorityDenied, Guard
 
 __all__ = [
     "GuardRef",
@@ -205,7 +205,7 @@ class GuardedTool(Tool):
         self.context_fn = context_fn
         self.metered = metered
         self.on_denied = on_denied
-        self.disposition = disposition      # see delegation_guard.Disposition
+        self.disposition = disposition      # see attenu_guard.Disposition
 
         # Mirror the model-facing schema so the wrapper is invisible upstream.
         self.name = inner.name

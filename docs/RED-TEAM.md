@@ -1,6 +1,6 @@
-# Red-Team Report & Threat Model — delegation-guard authorization protocol
+# Red-Team Report & Threat Model — attenu-guard authorization protocol
 
-*Adversarial assessment of the delegation-guard v0.1 authorization protocol.
+*Adversarial assessment of the attenu-guard v0.1 authorization protocol.
 Reproduce with `python tests/red_team.py` (exit code = number of unresolved
 findings; currently 0). This is a living document — every new attack idea
 becomes a case in `tests/red_team.py`, and the harness runs in CI as a gate.*

@@ -1,4 +1,4 @@
-"""delegation-guard × Agno — the same scenario against a REAL model.
+"""attenu-guard × Agno — the same scenario against a REAL model.
 
 Env-gated and NOT run in CI:
 
@@ -25,7 +25,7 @@ from agno.team import Team  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard.adapters.agno import (  # noqa: E402
+from attenu_guard.adapters.agno import (  # noqa: E402
     Grant,
     GuardRegistry,
     ToolPolicy,
@@ -33,7 +33,7 @@ from delegation_guard.adapters.agno import (  # noqa: E402
     guarded_tool_hook,
 )
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
 
 EXPORTED: list[str] = []
 

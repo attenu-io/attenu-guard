@@ -15,9 +15,9 @@ Decision-returning check(), and is_narrower_than() as the subsumption relation.
 """
 from hypothesis import given, settings, strategies as st
 
-from delegation_guard import Authority, Guard, AuthorityError, ReasonCode
-from delegation_guard.ceilings import RowLimit, SpendCap, EgressRank
-from delegation_guard.audit import AuditLog as AL
+from attenu_guard import Authority, Guard, AuthorityError, ReasonCode
+from attenu_guard.ceilings import RowLimit, SpendCap, EgressRank
+from attenu_guard.audit import AuditLog as AL
 
 # ---- strategies --------------------------------------------------------
 scopes_pool = ["crm.read", "crm.write", "crm.export", "mail.send", "mail.read",

@@ -1,5 +1,5 @@
 """
-delegation-guard x AWS Strands Agents — the poisoned-summarizer demo.
+attenu-guard x AWS Strands Agents — the poisoned-summarizer demo.
 
 Runs completely offline. `ScriptedModel` is a `strands.models.Model` subclass
 that emits Bedrock-shaped `StreamEvent` dicts for a fixed list of tool calls, so
@@ -14,7 +14,7 @@ through `strands.multiagent.Swarm`'s `handoff_to_agent`:
   * It delegates a summarization task to a sub-agent, which is granted strictly
     less: read-only, <= 5_000 rows, no egress, 15 minutes.
   * The sub-agent has been poisoned. After a legitimate read it tries to export
-    the CRM to an attacker's bucket. delegation-guard refuses BEFORE the tool
+    the CRM to an attacker's bucket. attenu-guard refuses BEFORE the tool
     body runs, so nothing leaves the building.
   * Revoking the sub-agent stops every later call, and the hash-chained audit
     log verifies offline and names the reason.
@@ -35,9 +35,9 @@ from strands.models import Model
 from strands.multiagent import Swarm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from delegation_guard.adapters.strands import DelegationGuard, ScopeRequest, scope_map  # noqa: E402
+from attenu_guard.adapters.strands import DelegationGuard, ScopeRequest, scope_map  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -46,7 +46,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # ==========================================================================
-# The authorities. delegation-guard does NOT derive these — you write them.
+# The authorities. attenu-guard does NOT derive these — you write them.
 # ==========================================================================
 
 ORCHESTRATOR_AUTHORITY = Authority(
@@ -75,7 +75,7 @@ AUTHORITIES = {
 }
 
 # What each tool call is asking for. `unmapped="deny"` makes an unknown tool
-# resolve to a scope nobody granted, so it is refused through delegation-guard's
+# resolve to a scope nobody granted, so it is refused through attenu-guard's
 # normal path and shows up in the audit log.
 SCOPE_FOR = scope_map(
     {
@@ -502,7 +502,7 @@ def _print_calls(run: Run) -> None:
 
 def main() -> None:
     print("=" * 78)
-    print("delegation-guard x Strands Agents — the poisoned summarizer")
+    print("attenu-guard x Strands Agents — the poisoned summarizer")
     print("=" * 78)
 
     print("\n1. Agents as tools  (Agent.as_tool() -> _AgentAsTool)")

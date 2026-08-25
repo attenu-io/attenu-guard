@@ -3,15 +3,15 @@
 A scenario file describes a delegation tree (who delegates to whom, and how
 each delegation attenuates authority) plus a list of assertions ("this
 node, checking this scope in this context, must allow/deny — and if it
-denies, for exactly this reason"). It's run by `delegation_guard.scenarios`:
+denies, for exactly this reason"). It's run by `attenu_guard.scenarios`:
 
 ```bash
-PYTHONPATH=src python3 -m delegation_guard.scenarios scenarios/crm_summarizer.json
-PYTHONPATH=src python3 -m delegation_guard.scenarios scenarios/crm_summarizer.json --coverage
+PYTHONPATH=src python3 -m attenu_guard.scenarios scenarios/crm_summarizer.json
+PYTHONPATH=src python3 -m attenu_guard.scenarios scenarios/crm_summarizer.json --coverage
 ```
 
 Exit code is `0` iff every assertion in every file given passed. `--coverage`
-additionally prints which `ReasonCode` values (from `delegation_guard.ReasonCode`
+additionally prints which `ReasonCode` values (from `attenu_guard.ReasonCode`
 — `scope_not_granted`, `ceiling_exceeded`, `expired`, `revoked`, ...) were
 actually exercised by the file(s), so you can see at a glance which denial
 paths your scenario suite does and doesn't cover.
@@ -22,7 +22,7 @@ a summarizer):
 
 - **`crm_summarizer.json`** — stdlib-only, always loadable.
 - **`crm_summarizer.yaml`** — identical content, YAML; requires `pyyaml`
-  (`pip install pyyaml`). `delegation_guard.scenarios` imports `yaml` lazily,
+  (`pip install pyyaml`). `attenu_guard.scenarios` imports `yaml` lazily,
   only when a `.yaml`/`.yml` file is actually loaded, so the library never
   requires it and gives you a clear "install pyyaml or use JSON" error if
   you point it at a `.yaml` file without PyYAML installed.
@@ -34,7 +34,7 @@ a summarizer):
    `crm_summarizer` example, change the scopes/ceilings/assertions, run it.
 2. **A living authorization test.** Check scenario files into your own repo
    next to the code they protect and run them in CI
-   (`python3 -m delegation_guard.scenarios policies/*.json` — non-zero exit
+   (`python3 -m attenu_guard.scenarios policies/*.json` — non-zero exit
    fails the build) the same way you'd run any other regression test — except
    the "test" is a policy fixture a security reviewer can read without
    knowing Python.
@@ -138,7 +138,7 @@ revocation-based outcomes aren't expressible as static file content) — use
 the composable pieces `run_scenarios()` is built from directly:
 
 ```python
-from delegation_guard.scenarios import build_tree, run_assertions, run_scenarios
+from attenu_guard.scenarios import build_tree, run_assertions, run_scenarios
 
 # run_scenarios() also accepts an already-parsed dict, not just a path:
 result = run_scenarios({"root": {...}, "delegations": [...], "assertions": [...]})

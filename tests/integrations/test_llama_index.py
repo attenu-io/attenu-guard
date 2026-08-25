@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x LlamaIndex agents (llama-index-core 0.14.23).
+Integration test: attenu-guard x LlamaIndex agents (llama-index-core 0.14.23).
 
 Runs entirely offline: the LLM is `llama_index.core.llms.MockFunctionCallingLLM`
 driven by a scripted `response_generator` that emits `ToolCallBlock`s, so no API
@@ -10,7 +10,7 @@ was handed off narrow authority tries to exfiltrate, and the tool body is proven
 never to have run (via the side-effect list the tool body would have appended to).
 
 The test drives the SHIPPED example (`examples/integrations/llama_index/demo.py`
-+ `delegation_guard.adapters.llama_index`), so a green run also proves the example works.
++ `attenu_guard.adapters.llama_index`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import pytest
 
 pytest.importorskip("llama_index.core")
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -54,7 +54,7 @@ def _load(name: str):
     return mod
 
 
-import delegation_guard.adapters.llama_index as dg_li
+import attenu_guard.adapters.llama_index as dg_li
 demo = _load("demo")
 
 
@@ -157,7 +157,7 @@ def test_the_met_down_grant_is_enforced_at_the_point_of_use(greedy):
 
 
 def test_handoff_without_a_grant_is_refused_and_control_stays_put(ungranted):
-    """`can_handoff_to` allows the route; delegation-guard refuses it because
+    """`can_handoff_to` allows the route; attenu-guard refuses it because
     no Authority was written for the target — and clearing `next_agent` keeps
     control with the sender instead of handing it to an unguarded agent."""
     assert sorted(ungranted.guards) == ["orchestrator"]

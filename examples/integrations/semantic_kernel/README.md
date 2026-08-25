@@ -1,4 +1,4 @@
-# delegation-guard × Microsoft Semantic Kernel
+# attenu-guard × Microsoft Semantic Kernel
 
 Tested against **semantic-kernel 1.36.0** (MIT, Python ≥ 3.10) on Python 3.12.
 

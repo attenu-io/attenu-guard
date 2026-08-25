@@ -1,5 +1,5 @@
 """
-tests/test_scenarios.py — unit tests for delegation_guard.scenarios.
+tests/test_scenarios.py — unit tests for attenu_guard.scenarios.
 
 stdlib-only (unittest), no pytest, runs with bare `python3`:
 
@@ -28,8 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from delegation_guard import AuthorityError, ReasonCode
-from delegation_guard.scenarios import (
+from attenu_guard import AuthorityError, ReasonCode
+from attenu_guard.scenarios import (
     ScenarioError, AssertionOutcome, ScenarioResult,
     load_spec, build_tree, run_assertions, run_scenarios, main,
 )

@@ -17,7 +17,7 @@ model, and real subagent spawning, so it proves the wiring itself: that the
 hooks fire, that `agent_id` really is populated inside a subagent, and that the
 denial reaches the model as a blocked tool call.
 
-It is also set up so that delegation-guard is the ONLY thing standing between
+It is also set up so that attenu-guard is the ONLY thing standing between
 the summarizer and the exfiltration: `crm_export` is deliberately placed in the
 summarizer's `AgentDefinition.tools` allowlist (set DG_LIVE_NARROW=1 to remove
 it and let the framework's own allowlist block it first). The subagent's prompt
@@ -42,7 +42,7 @@ from claude_agent_sdk import (  # noqa: E402
     query,
 )
 
-from delegation_guard import AuditLog  # noqa: E402
+from attenu_guard import AuditLog  # noqa: E402
 
 from demo import SIDE_EFFECTS, build_registry, crm_export, crm_query, send_mail  # noqa: E402
 
@@ -66,7 +66,7 @@ async def main() -> int:
     narrow = os.environ.get("DG_LIVE_NARROW") == "1"
     summarizer_tools = ["mcp__crm__crm_query"]
     if not narrow:
-        # Deliberately widen the FRAMEWORK's allowlist so delegation-guard is
+        # Deliberately widen the FRAMEWORK's allowlist so attenu-guard is
         # the only layer that can stop the exfiltration.
         summarizer_tools.append("mcp__crm__crm_export")
 
@@ -133,7 +133,7 @@ async def main() -> int:
 
     entries = reg.root.audit_log().entries
     ok, err = AuditLog.verify(entries)
-    print("\n--- delegation-guard ---")
+    print("\n--- attenu-guard ---")
     print(f"framework allowlist for summarizer : {summarizer_tools}")
     print(f"denials                            : {reg.denials}")
     print(f"tool bodies that ran               : {sorted(SIDE_EFFECTS)}")

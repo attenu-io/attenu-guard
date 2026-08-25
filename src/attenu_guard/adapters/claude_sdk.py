@@ -1,5 +1,5 @@
 """
-delegation_guard.adapters.claude_sdk — a thin delegation-guard integration for the Claude Agent SDK
+attenu_guard.adapters.claude_sdk — a thin attenu-guard integration for the Claude Agent SDK
 (``claude-agent-sdk``, PyPI, tested against 0.2.139).
 
 WHAT IT HOOKS
@@ -7,7 +7,7 @@ WHAT IT HOOKS
 The Claude Agent SDK delegates through **subagents**: the parent calls the
 built-in ``Agent`` tool (named ``Task`` before Claude Code v2.1.63) with a
 ``subagent_type``, and the CLI runs that subagent in a fresh context. The SDK
-exposes both of the hook points delegation-guard needs, as plain ``async``
+exposes both of the hook points attenu-guard needs, as plain ``async``
 Python callbacks the CLI invokes over its JSON control channel
 (``claude_agent_sdk/_internal/query.py:427-500``):
 
@@ -76,8 +76,8 @@ DESIGN NOTES (both are security-relevant)
 * **Allow is silence.** On an allow this hook returns ``{}`` rather than
   ``permissionDecision: "allow"``. Returning an explicit allow would *skip*
   the CLI's remaining permission machinery, including ``can_use_tool`` — so
-  delegation-guard would end up widening the session's effective permissions.
-  Returning ``{}`` means "delegation-guard has no objection"; the framework's
+  attenu-guard would end up widening the session's effective permissions.
+  Returning ``{}`` means "attenu-guard has no objection"; the framework's
   own rules still apply on top.
 
 This module imports ``claude_agent_sdk`` only lazily, from inside the two
@@ -90,8 +90,8 @@ import fnmatch
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional
 
-from delegation_guard import Authority, Guard
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, Guard
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = ["ToolPolicy", "AgentGrant", "DelegationGuardRegistry", "DELEGATION_TOOLS"]
 
@@ -118,7 +118,7 @@ class ToolPolicy:
     scope: str
     context_fn: Optional[Callable[[Mapping[str, Any]], Mapping[str, Any]]] = None
     metered: bool = False
-    disposition: Optional[str] = None     # see delegation_guard.Disposition
+    disposition: Optional[str] = None     # see attenu_guard.Disposition
 
     def context(self, tool_input: Mapping[str, Any]) -> Mapping[str, Any]:
         return dict(self.context_fn(tool_input)) if self.context_fn else {}
@@ -237,7 +237,7 @@ class DelegationGuardRegistry:
         still correct (it comes from the grant, met with a parent that holds
         the delegate scope) but the audit tree's parent edge may name the wrong
         sibling. See the findings report; this is an SDK payload gap, not a
-        delegation-guard one.
+        attenu-guard one.
         """
         for i, p in enumerate(self._pending):
             if p.subagent_type == agent_type:
@@ -262,7 +262,7 @@ class DelegationGuardRegistry:
             # still starts — but with no Guard registered, every tool call it
             # makes is denied by `pre_tool_use` below.
             return {"systemMessage":
-                    f"delegation-guard: no authority grant declared for agent_type "
+                    f"attenu-guard: no authority grant declared for agent_type "
                     f"{agent_type!r}; all of its tool calls will be denied."}
         return {}
 
@@ -302,7 +302,7 @@ class DelegationGuardRegistry:
                 return self._deny(
                     tool_name, agent_id,
                     f"unknown sub-agent {agent_id!r} of type {agent_type!r}: "
-                    f"no delegation-guard authority grant is declared for it")
+                    f"no attenu-guard authority grant is declared for it")
 
         if tool_name in self.delegation_tools:
             subagent_type = str(tool_input.get("subagent_type") or "")
@@ -323,7 +323,7 @@ class DelegationGuardRegistry:
         policy = self.policy_for(tool_name)
         if policy is None:
             # No authority is known for this tool: on the ledger as `unresolved`.
-            msg = (f"tool {tool_name!r} has no delegation-guard ToolPolicy; "
+            msg = (f"tool {tool_name!r} has no attenu-guard ToolPolicy; "
                    f"refusing to authorize an unmapped capability")
             guard.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=tool_name,
                                 disposition=Disposition.UNRESOLVED)
@@ -365,9 +365,9 @@ class DelegationGuardRegistry:
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": f"delegation-guard: {reason}",
+                "permissionDecisionReason": f"attenu-guard: {reason}",
             },
-            "systemMessage": f"delegation-guard denied {tool_name}: {reason}",
+            "systemMessage": f"attenu-guard denied {tool_name}: {reason}",
         }
 
     # ---- the second gate: ClaudeAgentOptions.can_use_tool ----------------
@@ -390,7 +390,7 @@ class DelegationGuardRegistry:
         allowed, reason = self.authorize(tool_name, dict(tool_input), agent_id, None)
         if allowed:
             return PermissionResultAllow()
-        return PermissionResultDeny(message=f"delegation-guard: {reason}")
+        return PermissionResultDeny(message=f"attenu-guard: {reason}")
 
     # ---- wiring ---------------------------------------------------------
     def hooks(self) -> dict:
@@ -412,9 +412,9 @@ class DelegationGuardRegistry:
     def agent_definitions(self, **common: Any) -> dict:
         """Derive ``ClaudeAgentOptions.agents`` from the same ``AgentGrant``
         declarations, so the SDK's own per-agent ``tools`` allowlist and
-        delegation-guard's authority grants cannot drift apart.
+        attenu-guard's authority grants cannot drift apart.
 
-        ``common`` supplies the per-agent fields delegation-guard has no
+        ``common`` supplies the per-agent fields attenu-guard has no
         opinion about (``description``, ``prompt``, ``model``, ...) as
         ``{agent_type: {field: value}}``.
         """

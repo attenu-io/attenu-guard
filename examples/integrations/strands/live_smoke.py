@@ -8,7 +8,7 @@ AWS Bedrock credentials.
     RUN_LIVE=1 AWS_REGION=us-west-2 python examples/integrations/strands/live_smoke.py
 
 What it proves that the offline demo cannot: that a *real* model, told to
-exfiltrate, is stopped by delegation-guard rather than by the script — the
+exfiltrate, is stopped by attenu-guard rather than by the script — the
 denial arrives as a tool error the model then has to reason about.
 """
 from __future__ import annotations
@@ -20,9 +20,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import demo as offline  # noqa: E402  (reuses the tools, authorities and scope map)
-from delegation_guard.adapters.strands import DelegationGuard  # noqa: E402
+from attenu_guard.adapters.strands import DelegationGuard  # noqa: E402
 
-from delegation_guard import AuditLog, Guard  # noqa: E402
+from attenu_guard import AuditLog, Guard  # noqa: E402
 
 
 def main() -> int:

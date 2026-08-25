@@ -28,7 +28,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -36,7 +36,7 @@ from delegation_guard import (  # noqa: E402
     RowLimit,
 )
 
-from delegation_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
+from attenu_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
 
 MODEL = os.environ.get("LIVE_MODEL", "gpt-4o-mini")
 ORCHESTRATOR = "orchestrator"

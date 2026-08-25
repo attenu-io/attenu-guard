@@ -8,7 +8,7 @@ Env-gated and NOT part of the test suite. It costs money and needs network:
 
 Without `RUN_LIVE=1` it exits immediately, so it is safe to have in the repo.
 
-The point is to confirm that the enforcement in `delegation_guard.adapters.semantic_kernel` does not
+The point is to confirm that the enforcement in `attenu_guard.adapters.semantic_kernel` does not
 depend on the scripted model: a real LLM, prompted to exfiltrate, hits the same
 FUNCTION_INVOCATION filter and the same `Guard.check()`, and `crm_export`'s body
 still never runs. The *only* difference from `demo.py` is which
@@ -27,11 +27,11 @@ from semantic_kernel.agents.runtime import InProcessRuntime
 from semantic_kernel.connectors.ai.function_choice_behavior import FunctionChoiceBehavior
 from semantic_kernel.functions import KernelArguments
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from demo import POLICIES, SUMMARIZER_AUTHORITY, CrmTools  # noqa: E402
-from delegation_guard.adapters.semantic_kernel import DelegationChain, attach_guard  # noqa: E402
+from attenu_guard.adapters.semantic_kernel import DelegationChain, attach_guard  # noqa: E402
 
 MODEL = os.environ.get("DG_LIVE_MODEL", "gpt-4o-mini")
 

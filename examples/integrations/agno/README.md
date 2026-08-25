@@ -1,4 +1,4 @@
-# delegation-guard × Agno
+# attenu-guard × Agno
 
 Enforced authority attenuation for [Agno](https://github.com/agno-agi/agno) teams.
 **Tested against `agno` 2.9.0 (Apache-2.0), Python 3.12.**

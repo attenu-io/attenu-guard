@@ -14,12 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 class Identity(unittest.TestCase):
     def test_boot_id_is_stable_in_process_and_hex(self):
-        from delegation_guard import identity
+        from attenu_guard import identity
         a, b = identity.boot_id(), identity.boot_id()
         self.assertEqual(a, b); self.assertEqual(len(a), 16); int(a, 16)
 
     def test_product_is_found_by_walking_up_and_identity_needs_no_key(self):
-        from delegation_guard import identity
+        from attenu_guard import identity
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "proj"; (root / ".attenu").mkdir(parents=True)
             (root / ".attenu" / "product.json").write_text(json.dumps(
@@ -44,11 +44,11 @@ class Identity(unittest.TestCase):
 
 class Spool(unittest.TestCase):
     def _guard(self, sink):
-        from delegation_guard import Authority, Guard
+        from attenu_guard import Authority, Guard
         return Guard.issue("a", Authority({"crm.read"}, [], ttl=None), task="t", audit_sinks=(sink,))
 
     def test_spool_is_a_separate_file_that_survives_a_new_audit_log(self):
-        from delegation_guard.sinks import SpoolSink
+        from attenu_guard.sinks import SpoolSink
         with tempfile.TemporaryDirectory() as d:
             sp = Path(d) / "spool.ndjson"
             g1 = self._guard(SpoolSink(sp, boot="b1")); g1.check("crm.read", tool="q"); g1.check("x.y", tool="z")
@@ -60,7 +60,7 @@ class Spool(unittest.TestCase):
             self.assertEqual(lines[0]["entry"]["event"], "root")
 
     def test_spool_is_bounded_and_never_touches_the_log_of_record(self):
-        from delegation_guard.sinks import SpoolSink
+        from attenu_guard.sinks import SpoolSink
         with tempfile.TemporaryDirectory() as d:
             sink = SpoolSink(Path(d) / "s.ndjson", boot="b", max_bytes=600)
             g = self._guard(sink)
@@ -72,7 +72,7 @@ class Spool(unittest.TestCase):
             self.assertLessEqual((Path(d) / "s.ndjson").stat().st_size, 600)
 
     def test_read_pending_and_ack_are_resumable(self):
-        from delegation_guard.sinks import SpoolSink
+        from attenu_guard.sinks import SpoolSink
         with tempfile.TemporaryDirectory() as d:
             sp = Path(d) / "s.ndjson"; sink = SpoolSink(sp, boot="b"); g = self._guard(sink)
             for _ in range(5): g.check("crm.read", tool="q")
@@ -83,7 +83,7 @@ class Spool(unittest.TestCase):
 
     def test_fsync_happens_on_flush_and_every_n_writes(self):
         import os as _os
-        from delegation_guard import sinks
+        from attenu_guard import sinks
         calls = []
         real = _os.fsync
         _os.fsync = lambda fd: calls.append(fd)
@@ -98,7 +98,7 @@ class Spool(unittest.TestCase):
             _os.fsync = real
 
     def test_sink_never_imports_the_network(self):
-        import delegation_guard.sinks as sinks_mod
+        import attenu_guard.sinks as sinks_mod
         src = Path(sinks_mod.__file__).read_text()
         for banned in ("socket", "urllib", "http.client", "requests", "httpx"):
             self.assertNotIn(f"import {banned}", src)

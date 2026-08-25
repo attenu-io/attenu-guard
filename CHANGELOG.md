@@ -6,6 +6,12 @@ All notable changes to delegation-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-24
+
+### Changed — BREAKING
+- **Renamed: `delegation-guard` → `attenu-guard`.** Distribution `attenu-guard`, module `attenu_guard`, CLI `dg` → `attenu-guard`. Versions before 0.4.0 were published under the old name; nothing else in the API changed in the rename itself. Everything below was unreleased 0.3.0 work and ships here.
+
+
 Driven by integration PoCs against twelve real agent frameworks
 (`examples/integrations/`, `docs/INTEGRATIONS.md`): the library integrated
 **unmodified** everywhere; what follows is what those integrations asked for.

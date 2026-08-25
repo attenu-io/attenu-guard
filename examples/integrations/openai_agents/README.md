@@ -1,4 +1,4 @@
-# delegation-guard × OpenAI Agents SDK
+# attenu-guard × OpenAI Agents SDK
 
 Tested against **openai-agents 0.21.1** (MIT, requires Python ≥ 3.10) on Python 3.12.
 
@@ -33,7 +33,7 @@ summarizer's legitimate read runs; a 60k-row read is denied for
 `ceiling_exceeded` inside an *allowed* scope; the poisoned `crm_export` is denied
 for `scope_not_granted` before its body runs; after `registry.revoke("summarizer")`
 everything is denied `revoked`. The run still reaches a final answer, and the
-hash-chained ledger verifies — `dg view <path>` renders it.
+hash-chained ledger verifies — `attenu-guard view <path>` renders it.
 
 The SDK forwards the **entire** conversation to a handoff target by default
 (`Handoff.input_filter` is `None` and `RunConfig.nest_handoff_history` is `False`,

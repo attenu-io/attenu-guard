@@ -1,4 +1,4 @@
-# delegation-guard
+# attenu-guard
 
 **Enforced authority attenuation for multi-agent AI systems.** When one AI agent
 hands work to another, the child inherits *only* what its task needs — never the
@@ -9,12 +9,12 @@ An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) 
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
 delegated authority stays inside the parent's limits, and every decision remains verifiable offline.
 
-![dg demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](docs/assets/demo.gif)
+![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](docs/assets/demo.gif)
 
 ```bash
 # From a clone (pre-publish): install in editable mode, zero runtime deps.
-pip install -e .        # gives you the `dg` command too
-# Once published to PyPI this becomes: pip install delegation-guard
+pip install -e .        # gives you the `attenu-guard` command too
+# Once published to PyPI this becomes: pip install attenu-guard
 ```
 
 > **Just want to see it run?** From the repo root, no install needed:
@@ -23,7 +23,7 @@ pip install -e .        # gives you the `dg` command too
 > invariants the same way.
 
 ```python
-from delegation_guard import Authority, Guard, RowLimit, EgressRank
+from attenu_guard import Authority, Guard, RowLimit, EgressRank
 
 # The orchestrator holds broad authority.
 orchestrator = Guard.issue("orchestrator", Authority(
@@ -70,7 +70,7 @@ moment authority is handed down.
 | MCP | scope flow is **accumulation**-biased (step-up unions) |
 | A2A | authenticates the hop, carries **no** delegated authority |
 
-delegation-guard makes child ⊆ parent a computed, enforced, offline-verifiable
+attenu-guard makes child ⊆ parent a computed, enforced, offline-verifiable
 invariant — in your framework, in your process — no proxy, and no network call in the deny path.
 
 ## What you get
@@ -79,10 +79,10 @@ invariant — in your framework, in your process — no proxy, and no network ca
 - **`Guard`** — `issue()` a root, `delegate()` a sub-agent with attenuated authority, `check()` → `Decision`, `enforce()` → raises, `would_allow()` → dry-run, `revoke()` a whole subtree.
 - **Typed ceilings** — `RowLimit`, `SpendCap`, `CallLimit`, `EgressRank`, `Allow`, `Deny`, `Prefix`, or your own via `register_ceiling`. Unknown ceiling types **fail closed**, never silently unbounded.
 - **Chain invariants** — depth, fanout, and aggregate budget ceilings; **cascade revocation** (revoke any node, every descendant denies immediately).
-- **Hash-chained audit log** — an open, versioned [schema](schema/agent-audit.schema.json); `dg view log.jsonl` renders the tree and verifies it; tampering is provable offline. Every `deny` says **why** (`disposition`: `held_pending_grant` — waiting on a human · `withheld_tier2` · `unresolved` — no authority known for the tool · `out_of_authority` — real over-reach), so "held" never reads as "denied"; `evidence.export_bundle` / `verify_bundle` / `delegation_graph` / `denials` give an auditor an **offline-verifiable** bundle and the folds a console renders. `AuditLog(sinks=…)` copies entries to local **sinks** after the write (never the network) — `sinks.SpoolSink` is a bounded, fsync'd, resumable write-ahead spool carrying the ingest idempotency key `(boot_id, chain_id, seq, hash)`; [`delegation_guard.identity`](src/delegation_guard/identity.py) gives a product an identity before it has a key (`.attenu/product.json`, per-process `boot_id`, assigned chain ids).
-- **Wire format** ([`delegation_guard.wire`](src/delegation_guard/wire.py)) — `serialize`/`load` the delegation chain as signed **Delegation Tokens** and verify child ⊆ parent **offline**, across services, with no authorization server in the path. This is the reference implementation of the Internet-Draft in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-00.md); interop test vectors live in [`tests/vectors/`](tests/vectors/).
-- **Scenario harness** — declarative JSON/YAML authorization tests (`dg scenarios file.json`); see [`scenarios/`](scenarios/).
-- **Adapters** — shipped, tested integrations for the major agent frameworks as [`delegation_guard.adapters.<name>`](src/delegation_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno — each with an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'delegation-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
+- **Hash-chained audit log** — an open, versioned [schema](schema/agent-audit.schema.json); `attenu-guard view log.jsonl` renders the tree and verifies it; tampering is provable offline. Every `deny` says **why** (`disposition`: `held_pending_grant` — waiting on a human · `withheld_tier2` · `unresolved` — no authority known for the tool · `out_of_authority` — real over-reach), so "held" never reads as "denied"; `evidence.export_bundle` / `verify_bundle` / `delegation_graph` / `denials` give an auditor an **offline-verifiable** bundle and the folds a console renders. `AuditLog(sinks=…)` copies entries to local **sinks** after the write (never the network) — `sinks.SpoolSink` is a bounded, fsync'd, resumable write-ahead spool carrying the ingest idempotency key `(boot_id, chain_id, seq, hash)`; [`attenu_guard.identity`](src/attenu_guard/identity.py) gives a product an identity before it has a key (`.attenu/product.json`, per-process `boot_id`, assigned chain ids).
+- **Wire format** ([`attenu_guard.wire`](src/attenu_guard/wire.py)) — `serialize`/`load` the delegation chain as signed **Delegation Tokens** and verify child ⊆ parent **offline**, across services, with no authorization server in the path. This is the reference implementation of the Internet-Draft in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-00.md); interop test vectors live in [`tests/vectors/`](tests/vectors/).
+- **Scenario harness** — declarative JSON/YAML authorization tests (`attenu-guard scenarios file.json`); see [`scenarios/`](scenarios/).
+- **Adapters** — shipped, tested integrations for the major agent frameworks as [`attenu_guard.adapters.<name>`](src/attenu_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno — each with an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'attenu-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 ## Prove the safety claims yourself
 
@@ -90,7 +90,7 @@ invariant — in your framework, in your process — no proxy, and no network ca
 python tests/run_properties.py      # 4,000 random delegation trees per invariant, zero deps
 python tests/red_team.py            # 17 adversarial attacks, black- & white-box; 0 must break
 python examples/poisoned_summarizer.py
-dg demo
+attenu-guard demo
 ```
 
 The property suite asserts — over thousands of random chains — that attenuation

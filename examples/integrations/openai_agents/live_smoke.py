@@ -14,8 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
-from delegation_guard.adapters.openai_agents import DelegationGuardHooks, GuardRegistry, guarded_tool  # noqa: E402
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit  # noqa: E402
+from attenu_guard.adapters.openai_agents import DelegationGuardHooks, GuardRegistry, guarded_tool  # noqa: E402
 
 EXECUTED: list = []
 

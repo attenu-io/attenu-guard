@@ -152,7 +152,7 @@ class HS256TestSigner:
 def _require_ed25519():
     """Lazily import the one `cryptography` submodule Ed25519Signer needs.
     Called only from inside Ed25519Signer's methods (see the class) — never
-    at module import time, so `import delegation_guard.wire` and
+    at module import time, so `import attenu_guard.wire` and
     `HS256TestSigner` never require `cryptography` to be installed."""
     try:
         from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -162,7 +162,7 @@ def _require_ed25519():
             "which is not installed in this environment. Install it with:\n\n"
             "    pip install cryptography\n\n"
             "For dependency-free tests/dev with no install required, use "
-            "delegation_guard.wire.HS256TestSigner instead — but note that "
+            "attenu_guard.wire.HS256TestSigner instead — but note that "
             "signer is symmetric (HMAC) and explicitly NOT for production; "
             "see its docstring."
         ) from e
@@ -424,7 +424,7 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
-def serialize(guard_or_node, signer: Signer, *, iss: str = "delegation-guard",
+def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
               aud=None, jti: str | None = None, iat: int = 0,
               max_depth: int | None = None) -> str:
     """Emit ONE Delegation Token for `guard_or_node` (a `Guard`, or a bare
@@ -481,7 +481,7 @@ def _root_to_leaf_path(chain, leaf_node_id: str) -> list:
     return path
 
 
-def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "delegation-guard",
+def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "attenu-guard",
                     aud=None, iat: int = 0) -> list[str]:
     """Serialize every node from root to `leaf_guard`, inclusive, as a
     Delegation Chain: `[DT_0, DT_1, ..., DT_n]` (draft {{chain-linkage}}).

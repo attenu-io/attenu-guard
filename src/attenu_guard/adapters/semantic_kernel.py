@@ -1,5 +1,5 @@
 """
-delegation_guard.adapters.semantic_kernel — a thin delegation-guard integration for Microsoft
+attenu_guard.adapters.semantic_kernel — a thin attenu-guard integration for Microsoft
 Semantic Kernel.
 
 Tested against semantic-kernel 1.36.0 (Python >= 3.10).
@@ -83,7 +83,7 @@ Every tool call is then checked against *that agent's* authority before its body
 runs, and every allow/deny lands in the chain's hash-chained audit log.
 `chain.revoke("Summarizer")` cascades to the whole subtree immediately.
 
-This module imports `semantic_kernel` and `delegation_guard` and nothing else.
+This module imports `semantic_kernel` and `attenu_guard` and nothing else.
 Copy it into your project as-is.
 """
 from __future__ import annotations
@@ -95,11 +95,11 @@ from semantic_kernel.exceptions.function_exceptions import FunctionExecutionExce
 from semantic_kernel.filters.filter_types import FilterTypes
 from semantic_kernel.functions.function_result import FunctionResult
 
-from delegation_guard import Authority, AuthorityDenied, Decision, Guard, ReasonCode
-from delegation_guard.reasons import Disposition
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard, ReasonCode
+from attenu_guard.reasons import Disposition
 
 # Reason code for "this principal holds no Authority in the chain at all".
-# `getattr` because older delegation-guard releases predate the constant; the
+# `getattr` because older attenu-guard releases predate the constant; the
 # wire value is the contract, not the Python name.
 NO_AUTHORITY = getattr(ReasonCode, "NO_AUTHORITY", "no_authority")
 
@@ -124,7 +124,7 @@ HANDOFF_FUNCTION_PREFIX = "transfer_to_"
 OnDenial = Literal["raise", "result"]
 """What to do when the Guard denies a tool call.
 
-`"raise"`  — raise `delegation_guard.AuthorityDenied`. The default.
+`"raise"`  — raise `attenu_guard.AuthorityDenied`. The default.
              In a direct `kernel.invoke(...)` this propagates to the caller,
              so a denial can never be mistaken for a successful call. Inside
              the LLM's auto-tool-calling loop, Semantic Kernel catches it in
@@ -167,7 +167,7 @@ class UnmappedToolError(FunctionExecutionException):
 # ==========================================================================
 # Policy: what authority does this tool consume?
 #
-# delegation-guard deliberately does not decide this for you — the integrator
+# attenu-guard deliberately does not decide this for you — the integrator
 # declares it, once, per tool.
 # ==========================================================================
 
@@ -194,7 +194,7 @@ class ToolPolicy:
     scope: str
     context: Callable[[Mapping[str, Any]], Mapping[str, Any]] | Mapping[str, Any] | None = None
     metered: bool = False
-    disposition: str | None = None        # see delegation_guard.Disposition
+    disposition: str | None = None        # see attenu_guard.Disposition
 
     def context_for(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
         if self.context is None:
@@ -268,7 +268,7 @@ class DelegationChain:
         """Mint `target`'s Guard as an attenuation of `sender`'s and bind it.
 
         Raises `MissingGuardError` if the sender holds no Guard, and
-        `delegation_guard.AuthorityError` if the chain refuses the delegation
+        `attenu_guard.AuthorityError` if the chain refuses the delegation
         structurally (revoked/expired parent, depth or fanout overflow).
         """
         parent = self.guard_for(sender)
@@ -306,7 +306,7 @@ class DelegationChain:
         as never having happened — precisely the events an incident responder
         most wants. Recorded against the chain root, which always exists.
 
-        Uses `Guard.record_denial` where the installed delegation-guard has it,
+        Uses `Guard.record_denial` where the installed attenu-guard has it,
         and degrades to trace-only otherwise, so this adapter works against
         v0.2.0 as tagged. See the findings note on this API gap.
         """
@@ -337,7 +337,7 @@ def attach_guard(
     delegation_plugin: str = HANDOFF_PLUGIN_NAME,
     delegation_prefix: str = HANDOFF_FUNCTION_PREFIX,
 ):
-    """Register delegation-guard's two filters on one agent's `Kernel`.
+    """Register attenu-guard's two filters on one agent's `Kernel`.
 
     Call this once per agent, on `agent.kernel`, before handing the agents to an
     orchestration — `HandoffOrchestration` clones each agent's kernel at actor
@@ -376,9 +376,9 @@ def attach_guard(
 
     Returns the kernel, so it can be used inline.
     """
-    if getattr(kernel, "_delegation_guard_agent", None) is not None:
+    if getattr(kernel, "_attenu_guard_agent", None) is not None:
         raise ValueError(
-            f"this Kernel is already guarded as {kernel._delegation_guard_agent!r}; "
+            f"this Kernel is already guarded as {kernel._attenu_guard_agent!r}; "
             f"give {agent_name!r} its own Kernel (filters are per-kernel, not per-agent)")
 
     exempt = frozenset(exempt_plugins)
@@ -438,7 +438,7 @@ def attach_guard(
                 function=metadata,
                 value=f"Authorization denied for {function.fully_qualified_name}: "
                       f"{decision.explain()}",
-                metadata={"delegation_guard": decision.to_dict()},
+                metadata={"attenu_guard": decision.to_dict()},
             )
             return
 
@@ -486,7 +486,7 @@ def attach_guard(
     # Marker so a double-attach is caught rather than silently doubling every
     # check (and every audit entry). Kernel is a pydantic model, so this goes
     # through object.__setattr__ rather than field assignment.
-    object.__setattr__(kernel, "_delegation_guard_agent", agent_name)
+    object.__setattr__(kernel, "_attenu_guard_agent", agent_name)
     return kernel
 
 

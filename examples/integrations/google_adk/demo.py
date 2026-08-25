@@ -29,9 +29,9 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from delegation_guard.adapters.google_adk import DelegationGuardPlugin, ToolAuthority
+from attenu_guard.adapters.google_adk import DelegationGuardPlugin, ToolAuthority
 
 # ==========================================================================
 # The offline model: yields scripted LlmResponses, keyed by which agent asks.

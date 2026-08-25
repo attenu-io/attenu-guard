@@ -1,7 +1,7 @@
 """
 reasons.py — the machine-readable outcome vocabulary for authorization decisions.
 
-Every policy evaluation in delegation-guard produces a `Decision`: a bool-coercible
+Every policy evaluation in attenu-guard produces a `Decision`: a bool-coercible
 result carrying zero or more `Reason`s. A denial without a reason is a bug (see
 docs/DEVX-REVIEW.md principle 2) — so every deny path in this library attaches at
 least one `Reason` with a stable, machine-readable `code` from `ReasonCode`.

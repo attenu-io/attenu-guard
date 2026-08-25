@@ -1,11 +1,11 @@
 # tools/
 
-Build-time helpers. Nothing here is imported by `delegation_guard` or by the
+Build-time helpers. Nothing here is imported by `attenu_guard` or by the
 test suite, and nothing here needs network access.
 
 ## `render_demo_gif.py` — regenerate `docs/assets/demo.gif`
 
-Runs the library's own `dg demo` and replays its output as a terminal-recording
+Runs the library's own `attenu-guard demo` and replays its output as a terminal-recording
 GIF (960x620, 100x28 character grid, per-frame timing, auto-scrolling).
 
 ```bash

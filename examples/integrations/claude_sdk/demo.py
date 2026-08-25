@@ -1,5 +1,5 @@
 """
-demo.py — the "poisoned summarizer" story, enforced by delegation-guard inside
+demo.py — the "poisoned summarizer" story, enforced by attenu-guard inside
 the Claude Agent SDK's own hook contract.
 
     python examples/integrations/claude_sdk/demo.py
@@ -37,9 +37,9 @@ from typing import Any, Mapping, Optional
 
 from claude_agent_sdk import tool
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from delegation_guard.adapters.claude_sdk import AgentGrant, DelegationGuardRegistry, ToolPolicy
+from attenu_guard.adapters.claude_sdk import AgentGrant, DelegationGuardRegistry, ToolPolicy
 
 # --------------------------------------------------------------------------
 # The tools. Each records a side effect the moment its body runs — that flag is
@@ -75,7 +75,7 @@ TOOL_BODIES = {
 
 
 # --------------------------------------------------------------------------
-# The authority model. This is the part a developer writes; delegation-guard
+# The authority model. This is the part a developer writes; attenu-guard
 # deliberately does not infer it.
 # --------------------------------------------------------------------------
 def build_registry(audit_path: Optional[str] = None) -> DelegationGuardRegistry:
@@ -208,7 +208,7 @@ async def _run(quiet: bool) -> dict:
     SUB = "agent_summarizer_01"
 
     say("=" * 74)
-    say("delegation-guard x Claude Agent SDK — the poisoned summarizer")
+    say("attenu-guard x Claude Agent SDK — the poisoned summarizer")
     say("=" * 74)
     say(f"\norchestrator authority : {reg.root.authority}")
 
@@ -217,7 +217,7 @@ async def _run(quiet: bool) -> dict:
                                      "prompt": "Summarize the Q3 pipeline."})
     say(f"    -> {'DENIED: ' + r.reason if r.denied else 'allowed'}")
 
-    say("\n[2] SubagentStart fires: delegation-guard mints the child Guard")
+    say("\n[2] SubagentStart fires: attenu-guard mints the child Guard")
     await session.start_subagent(SUB, "summarizer")
     child = reg.guard_for(SUB)
     say(f"    summarizer authority   : {child.authority}")

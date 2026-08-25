@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Render the README demo GIF for delegation-guard.
+"""Render the README demo GIF for attenu-guard.
 
-Runs the library's own demo (`dg demo` / `python -m delegation_guard.cli demo`),
+Runs the library's own demo (`attenu-guard demo` / `python -m attenu_guard.cli demo`),
 captures its plain-text output, and replays it as a terminal-recording-style
 animated GIF at ``docs/assets/demo.gif``.
 
@@ -66,7 +66,7 @@ MS_STEP_PAUSE = 600     # extra hold at the end of each [n] block
 MS_FINAL_HOLD = 2500    # hold on the last frame before the loop restarts
 
 PROMPT = "$ "
-COMMAND = "dg demo"
+COMMAND = "attenu-guard demo"
 
 # --------------------------------------------------------------------------
 # Palette (GitHub-dark-ish).
@@ -149,10 +149,10 @@ def capture_demo(repo_root: Path) -> list[str]:
         COLUMNS="200",
     )
     venv_py = repo_root / ".venv" / "bin" / "python"
-    venv_dg = repo_root / ".venv" / "bin" / "dg"
+    venv_dg = repo_root / ".venv" / "bin" / "attenu-guard"
     candidates = [
-        [sys.executable, "-m", "delegation_guard.cli", "demo"],
-        [str(venv_py), "-m", "delegation_guard.cli", "demo"],
+        [sys.executable, "-m", "attenu_guard.cli", "demo"],
+        [str(venv_py), "-m", "attenu_guard.cli", "demo"],
         [str(venv_dg), "demo"],
         ["dg", "demo"],
     ]
@@ -203,7 +203,7 @@ def classify(line: str) -> str:
         return "dim"
     if STEP_RE.match(line):
         return "step"
-    if "delegation-guard demo" in s:
+    if "attenu-guard demo" in s:
         return "title"
     if f"ALLOWED {CHECK}" in s or s.endswith(CHECK):
         return "ok"
@@ -291,7 +291,7 @@ class Renderer:
         for i, colour in enumerate((DOT_RED, DOT_YELLOW, DOT_GREEN)):
             cx = 18 + i * 19
             d.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=colour)
-        label = "delegation-guard — demo"
+        label = "attenu-guard — demo"
         w = self.chrome.getlength(label)
         d.text(((FRAME_W - w) / 2, cy - CHROME_FONT_SIZE / 2 - 1),
                label, font=self.chrome, fill=CHROME_TEXT)
@@ -486,7 +486,7 @@ def main() -> int:
     workdir = Path(args.workdir) if args.workdir else out.parent / ".render-cache"
     workdir.mkdir(parents=True, exist_ok=True)
 
-    print("delegation-guard demo GIF")
+    print("attenu-guard demo GIF")
     regular, bold, chrome, char_w, font_name, glyphs_ok = pick_font()
     cols = int((FRAME_W - 2 * PAD_X) // char_w)
     print(f"  font: {font_name}  advance={char_w:.3f}px  "

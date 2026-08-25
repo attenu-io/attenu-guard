@@ -1,4 +1,4 @@
-"""delegation-guard x CrewAI integration test.
+"""attenu-guard x CrewAI integration test.
 
 Runs a REAL CrewAI crew fully offline (a scripted `BaseLLM` subclass, no API
 key, no network) and proves that the `dg_crewai` bridge:
@@ -37,7 +37,7 @@ from crewai.hooks import clear_all_global_hooks  # noqa: E402
 from crewai.llms.base_llm import BaseLLM  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     Authority,
     AuditLog,
     EgressRank,
@@ -47,7 +47,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-import delegation_guard.adapters.crewai as dg_crewai
+import attenu_guard.adapters.crewai as dg_crewai
 CrewAIGuardBridge = dg_crewai.CrewAIGuardBridge
 ToolPolicy = dg_crewai.ToolPolicy
 
@@ -261,7 +261,7 @@ def test_crewai_alone_does_not_attenuate_a_delegated_coworker(effects, tools):
     assert "crm_query" in effects.names()
     assert "crm_export" in effects.names(), (
         "baseline expectation: unguarded CrewAI lets the delegated coworker "
-        "exfiltrate -- this is the gap delegation-guard closes"
+        "exfiltrate -- this is the gap attenu-guard closes"
     )
 
 
@@ -349,7 +349,7 @@ def test_poisoned_summarizer_is_denied_before_the_tool_body_runs(effects, tools)
 def test_denial_reason_is_surfaced_to_the_model(effects, tools):
     """CrewAI's built-in block message is the generic
     'Tool execution blocked by hook.'; the bridge's after-hook replaces it
-    with the machine-readable delegation-guard reason so the agent can react.
+    with the machine-readable attenu-guard reason so the agent can react.
     """
     root = _root_guard()
     bridge = _bridge(root)
@@ -519,7 +519,7 @@ def test_unknown_tool_is_denied(effects, tools):
 def test_denials_carry_disposition_on_the_ledger_held_vs_unresolved(effects, tools):
     """Slice 1 / Plan A: held_pending_grant (declared, waiting on an operator) vs unresolved (no policy) — both
     on the ledger, so the Decisions queue can tell 'waiting on you' from 'we stopped something'."""
-    from delegation_guard import Disposition
+    from attenu_guard import Disposition
     root = _root_guard()
     bridge = CrewAIGuardBridge(
         root_guard=root,

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-import delegation_guard.adapters as adapters_pkg  # noqa: E402
+import attenu_guard.adapters as adapters_pkg  # noqa: E402
 
 ADAPTERS_DIR = Path(adapters_pkg.__path__[0])
 ADAPTER_MODULES = sorted(m.name for m in pkgutil.iter_modules([str(ADAPTERS_DIR)]) if not m.name.startswith("_"))

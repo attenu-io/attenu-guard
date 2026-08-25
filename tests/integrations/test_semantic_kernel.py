@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x Microsoft Semantic Kernel (semantic-kernel 1.36.0).
+Integration test: attenu-guard x Microsoft Semantic Kernel (semantic-kernel 1.36.0).
 
 Runs entirely offline: the LLM is a `ChatCompletionClientBase` subclass that
 replays scripted `ChatMessageContent`s carrying `FunctionCallContent` items, so
@@ -12,7 +12,7 @@ CRM data, and the tool body is proven never to have run (via the side-effect
 flags the tool would have set).
 
 The test drives the SHIPPED example (`examples/integrations/semantic_kernel/demo.py`
-+ `delegation_guard.adapters.semantic_kernel`), so a green run also proves the example works.
++ `attenu_guard.adapters.semantic_kernel`), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from semantic_kernel.contents.function_call_content import FunctionCallContent  
 from semantic_kernel.exceptions.kernel_exceptions import KernelInvokeException  # noqa: E402
 from semantic_kernel.functions import KernelArguments, kernel_function  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -62,7 +62,7 @@ def _load(name: str):
     return mod
 
 
-import delegation_guard.adapters.semantic_kernel as dg_sk
+import attenu_guard.adapters.semantic_kernel as dg_sk
 demo = _load("demo")
 
 
@@ -282,7 +282,7 @@ def test_fail_closed_refusals_land_in_the_audit_log():
     """
     root = Guard.issue("orchestrator", Authority(scopes={"crm.*"}, ceilings=[], ttl=3600))
     if not hasattr(root, "record_denial"):
-        pytest.skip("installed delegation-guard predates Guard.record_denial")
+        pytest.skip("installed attenu-guard predates Guard.record_denial")
 
     chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
     kernel = Kernel()
@@ -331,7 +331,7 @@ def test_on_denial_result_returns_a_tool_result_without_running_the_body():
         arguments=KernelArguments(destination="s3://attacker")))
     assert result is not None
     assert "Authorization denied" in str(result.value)
-    assert result.metadata["delegation_guard"]["allowed"] is False
+    assert result.metadata["attenu_guard"]["allowed"] is False
     assert tools.exported_to == []
 
 

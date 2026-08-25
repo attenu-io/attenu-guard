@@ -25,7 +25,7 @@ __all__ = ["SpoolSink"]
 
 class SpoolSink:
     def __init__(self, path, *, boot: str | None = None, max_bytes: int = 64 * 1024 * 1024, fsync_every: int = 64):
-        from delegation_guard.identity import boot_id
+        from attenu_guard.identity import boot_id
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.boot = boot or boot_id()

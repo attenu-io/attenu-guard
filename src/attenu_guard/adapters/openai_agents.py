@@ -1,7 +1,7 @@
-"""delegation_guard.adapters.openai_agents — delegation-guard x the OpenAI Agents SDK.
+"""attenu_guard.adapters.openai_agents — attenu-guard x the OpenAI Agents SDK.
 
 Copy this single file into your project. It needs `openai-agents` and
-`delegation-guard`, and nothing else.
+`attenu-guard`, and nothing else.
 
 Hook points used (openai-agents 0.21.1)
 ---------------------------------------
@@ -47,8 +47,8 @@ Usage
     await Runner.run(orchestrator, "...", context=registry, hooks=DelegationGuardHooks())
 
 `context=` is the registry itself here; if you already pass your own context
-object, hang the registry off it as `.delegation_guard` (attribute) or
-`["delegation_guard"]` (mapping key) instead — `_resolve_registry` finds all three.
+object, hang the registry off it as `.attenu_guard` (attribute) or
+`["attenu_guard"]` (mapping key) instead — `_resolve_registry` finds all three.
 
 Fail-closed by design: if the registry is missing, if the running agent has no
 minted guard, or if the tool arguments cannot be parsed, the call is DENIED.
@@ -56,7 +56,7 @@ An agent nobody delegated to holds no authority — it does not fall back to its
 parent's.
 
 This adapter deliberately does not decide *what* authority a task needs. You
-write the `Authority` for each sub-agent; delegation-guard only guarantees the
+write the `Authority` for each sub-agent; attenu-guard only guarantees the
 child can never exceed the parent, and proves it in the audit ledger.
 """
 from __future__ import annotations
@@ -78,7 +78,7 @@ from agents import (
     handoff,
 )
 
-from delegation_guard import Authority, AuthorityError, Decision, Guard, Reason
+from attenu_guard import Authority, AuthorityError, Decision, Guard, Reason
 
 __all__ = [
     "GuardRegistry",
@@ -93,7 +93,7 @@ __all__ = [
 
 # Reason code for the adapter's own fail-closed paths — the running agent holds
 # no Authority object at all, which is upstream of any scope/ceiling question.
-# (delegation-guard's `ReasonCode` has no constant for this; see the PoC report.)
+# (attenu-guard's `ReasonCode` has no constant for this; see the PoC report.)
 NO_AUTHORITY = "no_delegated_authority"
 
 OnDenied = str  # "reject" (tell the model) | "raise" (halt the run)
@@ -124,7 +124,7 @@ class GuardRegistry:
     """Maps agent NAME -> the `Guard` minted for that agent in this run.
 
     Pass it as `Runner.run(..., context=registry)` (or hang it off your own
-    context object as `.delegation_guard`). It holds the root guard, the
+    context object as `.attenu_guard`). It holds the root guard, the
     declared grants, the minted child guards, and the denial record.
     """
 
@@ -174,7 +174,7 @@ class GuardRegistry:
         A revoked guard is deliberately still returned: `guard.check()` is the
         enforcement point, and it is the chain — not this registry — that knows
         the node and its whole subtree are revoked. Hiding the guard here would
-        replace delegation-guard's authoritative `revoked` reason code with a
+        replace attenu-guard's authoritative `revoked` reason code with a
         vaguer adapter-level one and would skip the cascade entirely.
         """
         return self._guards.get(agent_name)
@@ -201,11 +201,11 @@ def _resolve_registry(context_obj: Any) -> Optional[GuardRegistry]:
     """Find the registry on whatever the developer passed as `context=`."""
     if isinstance(context_obj, GuardRegistry):
         return context_obj
-    attached = getattr(context_obj, "delegation_guard", None)
+    attached = getattr(context_obj, "attenu_guard", None)
     if isinstance(attached, GuardRegistry):
         return attached
     if isinstance(context_obj, Mapping):
-        value = context_obj.get("delegation_guard")
+        value = context_obj.get("attenu_guard")
         if isinstance(value, GuardRegistry):
             return value
     return None
@@ -217,7 +217,7 @@ def _deny(message: str, code: str = NO_AUTHORITY) -> Decision:
 
 def _outcome(decision: Decision, on_denied: OnDenied) -> ToolGuardrailFunctionOutput:
     info = decision.to_dict()
-    message = f"delegation-guard: {decision.explain()}"
+    message = f"attenu-guard: {decision.explain()}"
     if on_denied == "raise":
         # Halts the run with ToolInputGuardrailTripwireTriggered.
         return ToolGuardrailFunctionOutput.raise_exception(output_info=info)
@@ -290,7 +290,7 @@ def guarded_tool(
         registry = _resolve_registry(tool_context.context)
         if registry is None:
             return _outcome(
-                _deny("no delegation-guard registry on the run context; refusing "
+                _deny("no attenu-guard registry on the run context; refusing "
                       f"{tool_name!r}"),
                 on_denied,
             )
@@ -320,7 +320,7 @@ def guarded_tool(
 
     return _with_guardrail(
         tool,
-        ToolInputGuardrail(guardrail_function=_authorize, name=f"delegation_guard[{scope}]"),
+        ToolInputGuardrail(guardrail_function=_authorize, name=f"attenu_guard[{scope}]"),
     )
 
 
@@ -353,7 +353,7 @@ def guarded_agent_tool(
         registry = _resolve_registry(tool_context.context)
         if registry is None:
             return _outcome(
-                _deny(f"no delegation-guard registry on the run context; refusing to "
+                _deny(f"no attenu-guard registry on the run context; refusing to "
                       f"start {child_name!r}"),
                 on_denied,
             )
@@ -382,7 +382,7 @@ def guarded_agent_tool(
     return _with_guardrail(
         agent_tool,
         ToolInputGuardrail(guardrail_function=_delegate,
-                           name=f"delegation_guard[delegate:{child_name}]"),
+                           name=f"attenu_guard[delegate:{child_name}]"),
     )
 
 

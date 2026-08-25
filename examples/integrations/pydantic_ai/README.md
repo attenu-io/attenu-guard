@@ -1,4 +1,4 @@
-# delegation-guard x Pydantic AI
+# attenu-guard x Pydantic AI
 
 Enforced authority attenuation for Pydantic AI's **agent delegation** pattern.
 Tested against **pydantic-ai-slim 2.31.1** (MIT, requires Python >= 3.10).

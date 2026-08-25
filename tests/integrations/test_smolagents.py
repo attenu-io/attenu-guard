@@ -1,4 +1,4 @@
-"""delegation-guard x smolagents (Hugging Face) — integration tests.
+"""attenu-guard x smolagents (Hugging Face) — integration tests.
 
 Runs fully offline: the LLM is a scripted `smolagents.models.Model` subclass
 that returns pre-baked `ChatMessage`s with tool calls, so `agent.run(...)`
@@ -30,7 +30,7 @@ from smolagents.models import (  # noqa: E402
 from smolagents.monitoring import LogLevel, TokenUsage  # noqa: E402
 from smolagents.utils import AgentToolExecutionError  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityDenied,
@@ -42,7 +42,7 @@ from delegation_guard import (  # noqa: E402
 
 # The adapter lives under examples/, which is not an installed package.
 
-from delegation_guard.adapters.smolagents import (  # noqa: E402
+from attenu_guard.adapters.smolagents import (  # noqa: E402
     DelegatedAgent,
     GuardedTool,
     GuardRef,
@@ -220,7 +220,7 @@ def build_stack(ledger, sub_script=None, root=None, **delegated_kwargs):
 # 0. Baseline — what smolagents enforces on its own: nothing.
 # ===========================================================================
 def test_unguarded_smolagents_lets_the_poisoned_subagent_exfiltrate():
-    """Evidence test. Without delegation-guard, a managed agent's authority
+    """Evidence test. Without attenu-guard, a managed agent's authority
     is bounded only by the tool list its *author* gave it: smolagents has no
     code-level notion of "the child may do less than the parent". Here the
     manager holds NO tools at all, yet its sub-agent still exports the CRM.

@@ -1,7 +1,7 @@
 """
 The canonical demo: one poisoned input tries to turn a read-only summariser
 into a data-exfiltration tool. Without attenuation it succeeds. With
-delegation-guard the same attack dies — because the sub-agent physically lacks
+attenu-guard the same attack dies — because the sub-agent physically lacks
 the authority, and the attempt is recorded in a tamper-evident log.
 
 v0.2: Guard.issue/delegate/revoke (authority vocabulary) replace v0.1's
@@ -10,24 +10,24 @@ of raising, so a blocked action is inspected via `if not decision`, not a
 try/except.
 
 Run:  python examples/poisoned_summarizer.py     (no install needed)
-  or: pip install -e .  &&  dg demo
+  or: pip install -e .  &&  attenu-guard demo
 """
 # Make the demo runnable straight from a fresh clone, before any install:
-# add the src/ layout to the path if delegation_guard isn't installed yet.
+# add the src/ layout to the path if attenu_guard isn't installed yet.
 import sys as _sys
 import pathlib as _pathlib
 try:
-    import delegation_guard  # noqa: F401
+    import attenu_guard  # noqa: F401
 except ModuleNotFoundError:
     _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[1] / "src"))
 
-from delegation_guard import Authority, Guard, RowLimit, EgressRank
-from delegation_guard.audit import AuditLog
+from attenu_guard import Authority, Guard, RowLimit, EgressRank
+from attenu_guard.audit import AuditLog
 
 
 def main():
     print("=" * 68)
-    print("  delegation-guard demo — the poisoned summariser")
+    print("  attenu-guard demo — the poisoned summariser")
     print("=" * 68)
 
     # The orchestrator legitimately holds broad authority.

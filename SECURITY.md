@@ -1,6 +1,6 @@
 # Security Policy
 
-delegation-guard is a security library; we hold ourselves to the standard we
+attenu-guard is a security library; we hold ourselves to the standard we
 ask of the ecosystem.
 
 ## Reporting a vulnerability

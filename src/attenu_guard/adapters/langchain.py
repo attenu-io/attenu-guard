@@ -1,4 +1,4 @@
-"""delegation_guard.adapters.langchain — delegation-guard × LangGraph 1.x / LangChain 1.x / deepagents.
+"""attenu_guard.adapters.langchain — attenu-guard × LangGraph 1.x / LangChain 1.x / deepagents.
 
 A thin, paste-into-your-project adapter that enforces monotonic authority
 attenuation across a LangGraph agent's tool calls and sub-agent delegations.
@@ -60,7 +60,7 @@ the denial goes back to the model as a normal tool result, the agent loop
 keeps running, and the model can pick a different action. That is the right
 default for an agent that should recover.
 
-`on_deny="raise"` raises `delegation_guard.AuthorityDenied`, which propagates
+`on_deny="raise"` raises `attenu_guard.AuthorityDenied`, which propagates
 straight out of `graph.invoke()` and aborts the run. Use that where a denial
 means "stop everything" rather than "try something else".
 
@@ -75,10 +75,10 @@ from typing import Any, Callable, Mapping, MutableMapping, Optional
 
 from langchain_core.messages import ToolMessage
 
-from delegation_guard import (
+from attenu_guard import (
     Authority, AuthorityDenied, AuthorityError, Decision, Guard, Reason,
 )
-from delegation_guard.reasons import Disposition, ReasonCode
+from attenu_guard.reasons import Disposition, ReasonCode
 
 __all__ = [
     "ToolPolicy",
@@ -95,7 +95,7 @@ __all__ = [
 # sub-agent graph invoked inside it — and never leaks back out or sideways.
 # ---------------------------------------------------------------------------
 _ACTIVE_GUARD: contextvars.ContextVar[Optional[Guard]] = contextvars.ContextVar(
-    "delegation_guard_active", default=None
+    "attenu_guard_active", default=None
 )
 
 
@@ -118,7 +118,7 @@ def use_guard(guard: Guard):
 class ToolPolicy:
     """What one tool needs in order to run.
 
-    scope:   the delegation-guard scope, e.g. `"crm.read"`.
+    scope:   the attenu-guard scope, e.g. `"crm.read"`.
     context: optional callable mapping the tool call's `args` dict to the
              context bag ceilings are evaluated against, e.g.
              `lambda args: {"rows": args["rows"]}`. Omit for a scope-only check.
@@ -141,7 +141,7 @@ class ToolPolicy:
 
 
 class GuardedDelegation:
-    """Binds a delegation-guard chain to a LangGraph/LangChain agent tree.
+    """Binds a attenu-guard chain to a LangGraph/LangChain agent tree.
 
     Parameters
     ----------
@@ -298,7 +298,7 @@ class GuardedDelegation:
             # queue is a fold over the ledger, not over this adapter's memory.
             return self._Gate(denial=self._deny(request, guard.record_denial(
                 Reason(ReasonCode.NO_AUTHORITY, requested=name,
-                       message=f"no delegation-guard policy declared for tool {name!r}"),
+                       message=f"no attenu-guard policy declared for tool {name!r}"),
                 tool=name, disposition=Disposition.UNRESOLVED)))
 
         decision = guard.check(
@@ -328,7 +328,7 @@ class GuardedDelegation:
                 str(subagent), requested, task=str(args.get(self.task_arg, "")))
         except AuthorityError as exc:
             # A structural failure (revoked/expired parent, depth/fanout
-            # overflow). delegation-guard already wrote a `spawn_denied`
+            # overflow). attenu-guard already wrote a `spawn_denied`
             # audit entry; surface the same reason to the caller.
             return self._Gate(denial=self._deny(request, Decision.deny(
                 Reason(exc.reason, requested=subagent, message=str(exc)),

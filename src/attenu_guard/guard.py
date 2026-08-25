@@ -178,7 +178,7 @@ class Guard:
         field keeps the v0.1 strings ("spawn"/"spawn_denied"/"kill"). That
         field is a separately-versioned, published wire contract
         (schema/agent-audit.schema.json, schema_version=1) consumed by
-        `dg view`/`dg verify` in cli.py — neither is part of this rewrite's
+        `attenu-guard view`/`attenu-guard verify` in cli.py — neither is part of this rewrite's
         scope, so the log vocabulary they depend on is left untouched.
         """
         try:
@@ -290,7 +290,7 @@ class Guard:
         if not decision:
             # "reason": a single code string — matches the v0.1 shape that
             # schema/agent-audit.schema.json publishes and that cli.py's
-            # `dg view` reads (`e.get("reason")`); kept for that untouched
+            # `attenu-guard view` reads (`e.get("reason")`); kept for that untouched
             # consumer. "reasons": the full v0.2 structured list, for
             # anyone reading the log who wants every violated Reason, not
             # just the first.
@@ -388,7 +388,7 @@ class Guard:
         with no declared policy, unparseable tool arguments). Nothing is
         evaluated: the caller has already decided; this only records it,
         with this Guard's node/chain, in the same tamper-evident log as
-        `check()` denials, so `dg view` and offline verifiers see it.
+        `check()` denials, so `attenu-guard view` and offline verifiers see it.
 
         `reason` is a `Reason` or a `ReasonCode` string (typically
         `ReasonCode.NO_AUTHORITY`); `message` is used only when a code is

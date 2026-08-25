@@ -26,9 +26,9 @@ from llama_index.core.base.llms.types import ToolCallBlock
 from llama_index.core.llms import ChatMessage, MockFunctionCallingLLM
 from llama_index.core.workflow import Context
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
 
-from delegation_guard.adapters.llama_index import GuardedAgentWorkflow, guarded_tool, guards_of
+from attenu_guard.adapters.llama_index import GuardedAgentWorkflow, guarded_tool, guards_of
 
 # --------------------------------------------------------------------------
 # The business tools. Each body appends to EXECUTED as its FIRST statement, so
@@ -75,7 +75,7 @@ def _tools():
 
 
 # --------------------------------------------------------------------------
-# Authorities. delegation-guard does not derive these — the integrator writes
+# Authorities. attenu-guard does not derive these — the integrator writes
 # them; `delegate()` only ever narrows them further.
 # --------------------------------------------------------------------------
 ORCHESTRATOR_AUTHORITY = Authority(
@@ -312,7 +312,7 @@ async def run_greedy_handoff() -> Story:
 # Scenario 3 — a handoff to an agent that has no authority grant at all
 # --------------------------------------------------------------------------
 async def run_ungranted_handoff() -> Story:
-    """LlamaIndex's `can_handoff_to` would allow this route. delegation-guard
+    """LlamaIndex's `can_handoff_to` would allow this route. attenu-guard
     refuses it, because no Authority was ever written for the target — and the
     refusal cancels the routing decision, so control stays with the sender."""
     EXECUTED.clear()
@@ -380,7 +380,7 @@ def _print_calls(results: List[ToolCallResult]) -> None:
 
 async def main() -> None:
     print("=" * 74)
-    print("delegation-guard x LlamaIndex AgentWorkflow — the poisoned summarizer")
+    print("attenu-guard x LlamaIndex AgentWorkflow — the poisoned summarizer")
     print("=" * 74)
 
     story = await run_story()

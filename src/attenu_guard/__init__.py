@@ -1,11 +1,11 @@
-"""delegation-guard — enforced authority attenuation for multi-agent AI systems.
+"""attenu-guard — enforced authority attenuation for multi-agent AI systems.
 
 The open-source answer to OWASP ASI07 (insecure inter-agent communication) and
 ASI08 (cascading failures): a child agent's authority can never exceed its
 parent's, chains have hard ceilings, and any subtree can be revoked in one
 call — enforced in code, offline-verifiable, with a hash-chained audit log.
 
-    from delegation_guard import Authority, Guard, RowLimit, EgressRank
+    from attenu_guard import Authority, Guard, RowLimit, EgressRank
 
     orchestrator = Guard.issue("orchestrator", Authority(
         scopes={"crm.*", "mail.send"},

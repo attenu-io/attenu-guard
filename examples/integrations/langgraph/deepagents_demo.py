@@ -1,4 +1,4 @@
-"""delegation-guard × deepagents — runnable demo (no API key needed).
+"""attenu-guard × deepagents — runnable demo (no API key needed).
 
     python examples/integrations/langgraph/deepagents_demo.py
 
@@ -10,7 +10,7 @@ Out of the box, deepagents restricts a sub-agent only by (a) which tools you
 hand it and (b) its system prompt. Nothing stops the orchestrator from
 spawning any registered sub-agent, and nothing stops a sub-agent from using
 every tool it was given — including the filesystem suite every deep agent
-inherits. delegation-guard adds the missing layer: the sub-agent's authority
+inherits. attenu-guard adds the missing layer: the sub-agent's authority
 is minted as `parent.meet(request)` at spawn time and every one of its tool
 calls is checked against it before the tool body runs.
 
@@ -35,8 +35,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 
-from delegation_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
-from delegation_guard.adapters.langchain import GuardedDelegation, ToolPolicy
+from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit
+from attenu_guard.adapters.langchain import GuardedDelegation, ToolPolicy
 
 BAR = "=" * 72
 EXECUTED: list[tuple] = []
@@ -107,7 +107,7 @@ POLICIES = {
 
 def build(parent_script, sub_script):
     """A real deepagents orchestrator with two registered sub-agents, of
-    which delegation-guard authorizes exactly one."""
+    which attenu-guard authorizes exactly one."""
     root = Guard.issue("orchestrator", ORCHESTRATOR, task="root")
     guarded = GuardedDelegation(
         root,

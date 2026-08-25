@@ -19,9 +19,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from delegation_guard import Authority, Guard, AuthorityError, ReasonCode
-from delegation_guard.ceilings import RowLimit, SpendCap, EgressRank
-from delegation_guard.audit import AuditLog
+from attenu_guard import Authority, Guard, AuthorityError, ReasonCode
+from attenu_guard.ceilings import RowLimit, SpendCap, EgressRank
+from attenu_guard.audit import AuditLog
 
 SCOPES = ["crm.read", "crm.write", "crm.export", "mail.send", "mail.read",
           "files.read", "files.write", "pay.transfer"]

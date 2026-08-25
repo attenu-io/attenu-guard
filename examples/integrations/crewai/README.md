@@ -1,8 +1,8 @@
-# delegation-guard x CrewAI
+# attenu-guard x CrewAI
 
 Enforced authority attenuation across CrewAI agent delegation, via CrewAI's own
 global tool hooks. Tested against **crewai 1.15.16** (Python 3.12; CrewAI needs
->=3.10, delegation-guard supports 3.9+).
+>=3.10, attenu-guard supports 3.9+).
 
 ## What it hooks
 
@@ -16,7 +16,7 @@ dispatcher swallows every other exception fail-open
 (`crewai/hooks/dispatch.py:264`), so a raised `AuthorityDenied` would be
 silently ignored and the tool would run. A paired `after_tool_call` hook
 replaces CrewAI's generic "Tool execution blocked by hook." with the
-delegation-guard reason, so the model learns *why* and can adapt.
+attenu-guard reason, so the model learns *why* and can adapt.
 
 Everything fails closed: unknown agent, unknown tool, unconfigured coworker,
 and any internal bridge error all deny.

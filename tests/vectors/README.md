@@ -19,7 +19,7 @@ This is deterministic: nothing here ever calls a real clock or a random
 number generator (see `wire.py`'s module docstring on determinism), so
 running it twice produces byte-identical files. `generate.py` also
 self-checks every vector it writes against this build's own
-`delegation_guard.wire.load()` before exiting 0, so a vector can never drift
+`attenu_guard.wire.load()` before exiting 0, so a vector can never drift
 from what this reference implementation actually does.
 
 `tests/test_wire.py` regenerates and loads these same files as part of the
@@ -87,7 +87,7 @@ outcome matches `expect`/`expect_reject_reason`.
 
 `signer.secret_hex` is deliberately public — it is printed in this
 directory's own JSON files. HMAC is symmetric (see
-`delegation_guard.wire.HS256TestSigner`'s docstring): anyone who can verify
+`attenu_guard.wire.HS256TestSigner`'s docstring): anyone who can verify
 a token with this secret can also forge one with it. That is fine here and
 does not undermine the vectors' purpose: these vectors exist to pin down the
 wire **format** (exact claim shapes, base64url encoding, the `par_hash`
@@ -96,7 +96,7 @@ of checks and their order), which are signature-algorithm-agnostic — not to
 demonstrate a production trust boundary. `HS256TestSigner` needs no
 third-party install, which keeps these vectors runnable with bare `python3`
 everywhere. The draft's actual production requirement is Ed25519
-(`delegation_guard.wire.Ed25519Signer`, public-key, offline-verifiable
+(`attenu_guard.wire.Ed25519Signer`, public-key, offline-verifiable
 without sharing a secret) — swapping the signer under test does not change
 anything about the claim shapes or the verification algorithm these vectors
 pin down, so a from-scratch implementation targeting production use should

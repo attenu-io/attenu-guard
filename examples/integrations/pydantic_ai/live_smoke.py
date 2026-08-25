@@ -20,7 +20,7 @@ import sys
 
 from pydantic_ai import Agent, RunContext
 
-from delegation_guard import AuditLog, AuthorityDenied, Guard
+from attenu_guard import AuditLog, AuthorityDenied, Guard
 
 from demo import (
     ORCHESTRATOR_AUTHORITY,
@@ -28,7 +28,7 @@ from demo import (
     SUMMARIZER_POLICIES,
     Ops,
 )
-from delegation_guard.adapters.pydantic_ai import DelegationGuard, GuardedDeps
+from attenu_guard.adapters.pydantic_ai import DelegationGuard, GuardedDeps
 
 MODEL = os.environ.get("DG_LIVE_MODEL", "openai:gpt-4o-mini")
 
@@ -78,7 +78,7 @@ async def main() -> int:
         result = await summarizer.run(POISONED_TASK, deps=child)
         print(f"\nmodel output:\n{result.output}\n")
     except AuthorityDenied as e:
-        print(f"\nrun aborted by delegation-guard: {e.decision.explain()}\n")
+        print(f"\nrun aborted by attenu-guard: {e.decision.explain()}\n")
 
     print(f"rows_returned = {ops.rows_returned!r}")
     print(f"exported_to   = {ops.exported_to!r}")

@@ -1,5 +1,5 @@
 """
-Integration test: delegation-guard x Claude Agent SDK (claude-agent-sdk 0.2.139).
+Integration test: attenu-guard x Claude Agent SDK (claude-agent-sdk 0.2.139).
 
 Runs entirely offline. The Claude Agent SDK has no in-process "test model": it
 drives the Claude Code CLI as a subprocess and every model turn goes through
@@ -24,7 +24,7 @@ are the very `@tool`-decorated SDK MCP handlers that `live_smoke.py` registers
 with a real `query()`.
 
 The test drives the SHIPPED example (examples/integrations/claude_sdk/demo.py +
-delegation_guard.adapters.claude_sdk), so a green run also proves the example works.
+attenu_guard.adapters.claude_sdk), so a green run also proves the example works.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ import pytest
 
 pytest.importorskip("claude_agent_sdk")
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     AuthorityError,
@@ -65,7 +65,7 @@ def _load(name: str):
     return mod
 
 
-import delegation_guard.adapters.claude_sdk as dg_cs
+import attenu_guard.adapters.claude_sdk as dg_cs
 demo = _load("demo")
 
 
@@ -336,7 +336,7 @@ def test_hooks_returns_real_hookmatcher_objects():
 
 
 def test_agent_definitions_carry_the_frameworks_own_tool_allowlist():
-    """delegation-guard's grants and the SDK's per-agent `tools` allowlist are
+    """attenu-guard's grants and the SDK's per-agent `tools` allowlist are
     belt-and-braces: the demo derives one from the other so they cannot drift."""
     from claude_agent_sdk import AgentDefinition
 
@@ -415,7 +415,7 @@ def test_sdk_agrees_that_can_use_tool_alone_is_not_a_gate():
 
 
 def test_agent_definition_really_has_a_per_agent_tool_allowlist():
-    """delegation-guard is complementary here, not redundant: the SDK does have
+    """attenu-guard is complementary here, not redundant: the SDK does have
     a code-level per-subagent tool allowlist. It gates tool NAMES; it has no
     notion of quantity ceilings, monotonic child-subset-of-parent, cascade
     revocation, or an audit chain."""

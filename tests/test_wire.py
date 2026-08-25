@@ -1,6 +1,6 @@
 """
 tests/test_wire.py — unit tests for the Delegation Token wire format
-(src/delegation_guard/wire.py), per
+(src/attenu_guard/wire.py), per
 docs/draft-asor-wimse-agent-delegation-chain-00.md.
 
 stdlib-only (unittest), no pytest, runs with bare `python3`:
@@ -21,8 +21,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "tests" / "vectors"))
 
-from delegation_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
-from delegation_guard import wire  # noqa: E402
+from attenu_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
+from attenu_guard import wire  # noqa: E402
 
 import generate as vectors_generate  # tests/vectors/generate.py  # noqa: E402
 
@@ -526,7 +526,7 @@ class TestEd25519Signer(unittest.TestCase):
 
     # ---- Slice 1 / Plan A, Task 8: public-key-only verification + key-file round trip ----
     def test_verifier_checks_an_anchor_with_the_public_key_only(self):
-        from delegation_guard import evidence
+        from attenu_guard import evidence
         pub = self.signer.public_bytes_raw()
         g = Guard.issue("a", Authority({"crm.read"}, [], ttl=None), task="t"); g.check("crm.read", tool="q")
         bundle = evidence.export_bundle(g.audit_log(), self.signer)

@@ -8,7 +8,7 @@ summarising job to a sub-agent, handing it a strictly narrower slice: read the
 CRM, at most 5 000 rows, no egress, for 15 minutes. The sub-agent's model has
 been poisoned and tries to export the CRM to an attacker's bucket.
 
-delegation-guard denies that call before `crm_export`'s body runs — not because
+attenu-guard denies that call before `crm_export`'s body runs — not because
 the prompt said not to, but because the sub-agent was never given the authority.
 
 No API key needed: the "model" is `pydantic_ai.models.function.FunctionModel`
@@ -23,11 +23,11 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
-from delegation_guard import (
+from attenu_guard import (
     AuditLog, Authority, AuthorityDenied, AuthorityError, EgressRank, Guard, RowLimit,
 )
 
-from delegation_guard.adapters.pydantic_ai import UNGUARDED, DelegationGuard, GuardedDeps, ToolPolicy
+from attenu_guard.adapters.pydantic_ai import UNGUARDED, DelegationGuard, GuardedDeps, ToolPolicy
 
 # ==========================================================================
 # 1. The authorities. This is the security decision, written once, in code.
@@ -170,7 +170,7 @@ def _rule(title: str) -> None:
 
 
 async def main() -> None:
-    print("\033[1mdelegation-guard x Pydantic AI — the poisoned summarizer\033[0m")
+    print("\033[1mattenu-guard x Pydantic AI — the poisoned summarizer\033[0m")
     print(f"orchestrator authority : {ORCHESTRATOR_AUTHORITY}")
     print(f"summarizer  authority  : {SUMMARIZER_AUTHORITY}")
 

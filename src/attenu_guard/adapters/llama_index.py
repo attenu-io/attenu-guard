@@ -1,5 +1,5 @@
 """
-dg_llama_index — delegation-guard x LlamaIndex agents (llama-index-core 0.14.x).
+dg_llama_index — attenu-guard x LlamaIndex agents (llama-index-core 0.14.x).
 
 Two hook points, both on LlamaIndex's *public* extension surface:
 
@@ -48,7 +48,7 @@ Usage
 where the agents' tools were built with
 `guarded_tool(crm_query, scope="crm.read", context=lambda kw: {"rows": kw["rows"]})`.
 
-delegation-guard deliberately does not decide *what* authority a task needs —
+attenu-guard deliberately does not decide *what* authority a task needs —
 `grants` is written by the integrator.
 """
 
@@ -69,7 +69,7 @@ from llama_index.core.tools import (
 )
 from llama_index.core.workflow import Context, step
 
-from delegation_guard import (
+from attenu_guard import (
     Authority,
     AuthorityDenied,
     AuthorityError,
@@ -93,7 +93,7 @@ __all__ = [
 GUARDS_KEY = "dg_guard_run"
 
 #: Reason code used when a tool is invoked by an agent that holds no Guard.
-#: Not part of delegation-guard's `ReasonCode` vocabulary — it is an adapter
+#: Not part of attenu-guard's `ReasonCode` vocabulary — it is an adapter
 #: wiring fault, surfaced as a denial so the failure mode is closed, not open.
 NO_GUARD_BOUND = "no_guard_bound"
 
@@ -204,7 +204,7 @@ def guarded_tool(
 
     `context` is either a fixed mapping (``{"egress": "any"}``) or a callable
     taking the tool's kwargs and returning one
-    (``lambda kw: {"rows": kw["rows"]}``). It is what delegation-guard's typed
+    (``lambda kw: {"rows": kw["rows"]}``). It is what attenu-guard's typed
     ceilings are evaluated against.
 
     The returned tool keeps the original name / description / JSON schema, so

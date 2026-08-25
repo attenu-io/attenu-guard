@@ -1,4 +1,4 @@
-"""delegation-guard x smolagents — the poisoned-summarizer story, offline.
+"""attenu-guard x smolagents — the poisoned-summarizer story, offline.
 
     python examples/integrations/smolagents/demo.py
 
@@ -9,7 +9,7 @@ against a real `ToolCallingAgent` loop.
 The story, in four acts:
   ACT 1  BASELINE  — stock smolagents. The manager holds no export tool, but
                      its sub-agent exports the CRM anyway. Nothing stops it.
-  ACT 2  GUARDED   — the same run with delegation-guard wired in. The read is
+  ACT 2  GUARDED   — the same run with attenu-guard wired in. The read is
                      allowed; the export is denied *before the tool body runs*.
   ACT 3  REVOKED   — the orchestrator revokes the summarizer. Every further
                      tool call by that sub-agent is denied.
@@ -32,14 +32,14 @@ from smolagents.models import (
 )
 from smolagents.monitoring import LogLevel, TokenUsage
 
-from delegation_guard import (
+from attenu_guard import (
     AuditLog,
     Authority,
     EgressRank,
     Guard,
     RowLimit,
 )
-from delegation_guard.adapters.smolagents import DelegatedAgent, GuardRef, guard_tools
+from attenu_guard.adapters.smolagents import DelegatedAgent, GuardRef, guard_tools
 
 QUIET = LogLevel.OFF
 
@@ -158,7 +158,7 @@ def act1_baseline() -> None:
 # ACTS 2-4 — the same run, guarded
 # ==========================================================================
 def acts_2_to_4() -> None:
-    rule("ACT 2 — GUARDED: delegation-guard at both hook points")
+    rule("ACT 2 — GUARDED: attenu-guard at both hook points")
     EFFECTS.clear()
 
     root = Guard.issue("orchestrator", ORCHESTRATOR, task="Q3 board report")
@@ -265,4 +265,4 @@ if __name__ == "__main__":
     act1_baseline()
     acts_2_to_4()
     print("\n\033[1mBoth hook points, ~60 lines of adapter, zero changes to smolagents "
-          "or to delegation-guard.\033[0m\n")
+          "or to attenu-guard.\033[0m\n")

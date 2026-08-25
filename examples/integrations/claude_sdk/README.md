@@ -1,6 +1,6 @@
-# delegation-guard x Claude Agent SDK
+# attenu-guard x Claude Agent SDK
 
-Tested against **claude-agent-sdk 0.2.139** (needs Python 3.10+; delegation-guard itself is 3.9+).
+Tested against **claude-agent-sdk 0.2.139** (needs Python 3.10+; attenu-guard itself is 3.9+).
 
 **Hook points.** `PreToolUse` on the `Agent`/`Task` tool authorizes the delegation itself
 (`tool_input.subagent_type`); `SubagentStart` (`agent_id` + `agent_type`) mints the child's
@@ -28,10 +28,10 @@ log verifies and names each denial's reason code. `demo.py` replays the CLI's `P
 contract rather than calling `query()`, because the SDK has no in-process test model (every model
 turn happens inside the Claude Code subprocess). `live_smoke.py` runs the identical wiring against
 the real CLI and deliberately puts `crm_export` in the subagent's `AgentDefinition.tools`
-allowlist so delegation-guard is the only layer blocking it.
+allowlist so attenu-guard is the only layer blocking it.
 
 **vs. the SDK's own restrictions.** `AgentDefinition.tools` is a real, code-enforced per-subagent
-allowlist — an omitted tool "isn't in the subagent's session at all". delegation-guard adds what a
+allowlist — an omitted tool "isn't in the subagent's session at all". attenu-guard adds what a
 name list cannot express: typed quantity ceilings checked against each call's arguments, a provable
 child ⊆ parent relation across the chain, TTLs, mid-run cascade revocation, and a tamper-evident
 audit log. `build_registry()` derives the SDK allowlist from the same `AgentGrant` declarations so

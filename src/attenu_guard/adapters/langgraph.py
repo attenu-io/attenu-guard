@@ -1,7 +1,7 @@
 """
-adapters/langgraph.py — a thin LangGraph integration for delegation-guard.
+adapters/langgraph.py — a thin LangGraph integration for attenu-guard.
 
-LangGraph is not installed in every environment that uses delegation-guard
+LangGraph is not installed in every environment that uses attenu-guard
 (it isn't installed in this repo's own test/dev environment either), so this
 module is built in two layers:
 
@@ -29,7 +29,7 @@ module is built in two layers:
 Typical usage, wiring a per-delegation Guard into a real LangGraph graph:
 
     from langgraph.graph import StateGraph
-    from delegation_guard import Authority, RowLimit
+    from attenu_guard import Authority, RowLimit
     from adapters.langgraph import guard_node, DelegatedToolNode
 
     # Each agent in the graph gets its OWN attenuated Guard, minted at the
@@ -57,7 +57,7 @@ Typical usage, wiring a per-delegation Guard into a real LangGraph graph:
 
 If the delegated Guard denies the call (wrong scope, ceiling exceeded,
 revoked, expired, ...), the wrapper raises `AuthorityDenied` — from
-`delegation_guard`, the SAME exception `Guard.enforce()` raises — *before*
+`attenu_guard`, the SAME exception `Guard.enforce()` raises — *before*
 the wrapped node/tool function ever runs, so a poisoned instruction or a
 runaway plan never reaches the tool call it isn't authorized to make. A
 LangGraph graph can catch `AuthorityDenied` around `graph.invoke(...)`, or
@@ -87,7 +87,7 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
 
     Parameters
     ----------
-    guard : delegation_guard.Guard
+    guard : attenu_guard.Guard
         The (typically already-delegated, already-attenuated) Guard to
         check against. Use the Guard for the SPECIFIC agent/node this
         callable belongs to — not the orchestrator's broader one — so a

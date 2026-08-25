@@ -21,13 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from delegation_guard import (
+from attenu_guard import (
     Authority, Guard, AuthorityError, AuthorityDenied,
     Decision, Reason, ReasonCode, AuditLog,
     Ceiling, RowLimit, SpendCap, CallLimit, EgressRank, Allow, Deny, Prefix,
     register_ceiling,
 )
-from delegation_guard.ceilings import ceiling_from_wire, _UnknownCeiling
+from attenu_guard.ceilings import ceiling_from_wire, _UnknownCeiling
 from dataclasses import dataclass, field
 
 
@@ -681,7 +681,7 @@ class TestAdapterFacingSurface(unittest.TestCase):
         # An adapter refusing something UPSTREAM of policy (unknown principal,
         # undeclared sub-agent, unparseable tool args) must be able to put
         # that refusal on the same tamper-evident trail as policy denials --
-        # otherwise `dg view` never sees it.
+        # otherwise `attenu-guard view` never sees it.
         root, child = self._pair()
         before = len(root.audit_log().entries)
         d = child.record_denial(ReasonCode.NO_AUTHORITY, "sub-agent 'exfiltrator' was never delegated to",
@@ -867,7 +867,7 @@ class TestDescribeAndStructuralReasonCodes(unittest.TestCase):
     adapters can map them without a hand-written lookup table."""
 
     def test_builtin_ceilings_describe_themselves(self):
-        from delegation_guard.ceilings import describe
+        from attenu_guard.ceilings import describe
         self.assertEqual(RowLimit(5000).describe(), "max_rows<=5000")
         self.assertEqual(SpendCap(2.5).describe(), "max_spend<=2.5")
         self.assertEqual(CallLimit(3).describe(), "max_calls<=3")
@@ -950,7 +950,7 @@ class TestScopedCallLimit(unittest.TestCase):
         c = CallLimit(5, applies_to="fs.write")
         w = c.to_wire()
         self.assertEqual(w, {"key": "max_calls[fs.write]", "type": "max_calls", "max": 5, "applies_to": "fs.write"})
-        from delegation_guard.ceilings import ceiling_from_wire
+        from attenu_guard.ceilings import ceiling_from_wire
         back = ceiling_from_wire(w)
         self.assertEqual(back, c)
         self.assertEqual(c.describe(), "max_calls[fs.write]<=5")
@@ -985,7 +985,7 @@ class TestPublicExports(unittest.TestCase):
 
 # ---- Slice 1 / Plan A, Task 1: deny entries say WHY (held != over-reach) -----------------------------------
 def test_deny_entries_carry_a_disposition_and_allow_entries_do_not():
-    from delegation_guard import Authority, Guard, Disposition
+    from attenu_guard import Authority, Guard, Disposition
     g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
     g.check("crm.read", tool="lookup")                                   # allowed
     g.check("payments.transfer", tool="charge_card")                     # not held -> denied, caller said nothing
@@ -1003,7 +1003,7 @@ def test_deny_entries_carry_a_disposition_and_allow_entries_do_not():
 
 
 def test_unknown_disposition_is_rejected_fail_closed():
-    from delegation_guard import Authority, Guard
+    from attenu_guard import Authority, Guard
     g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
     try:
         g.check("x.y", tool="t", disposition="made_up")
@@ -1015,8 +1015,8 @@ def test_unknown_disposition_is_rejected_fail_closed():
 
 
 def test_disposition_survives_strict_export_and_the_bundle_verifies():
-    from delegation_guard import Authority, Guard, Disposition, evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, Disposition, evidence
+    from attenu_guard.wire import HS256TestSigner
     g = Guard.issue("agent", Authority({"crm.read"}, [], ttl=None), task="t")
     g.check("mail.send", tool="send_care", disposition=Disposition.HELD_PENDING_GRANT)
     bundle = evidence.export_bundle(g.audit_log(), HS256TestSigner(secret=b"k", kid="k"), strict=True)   # must not raise EvidenceLeakError
@@ -1026,8 +1026,8 @@ def test_disposition_survives_strict_export_and_the_bundle_verifies():
 
 # ---- Slice 1 / Plan A, Task 2: the Decisions-screen fold ------------------------------------------------------
 def test_denials_fold_groups_deny_events_for_the_decisions_screen():
-    from delegation_guard import Authority, Guard, Disposition, evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, Disposition, evidence
+    from attenu_guard.wire import HS256TestSigner
     root = Guard.issue("planner", Authority({"agent.delegate.booker", "crm.read"}, [], ttl=None), task="plan")
     child = root.delegate("booker", Authority({"crm.read"}, [], ttl=None), task="book")
     child.check("payments.transfer", tool="book_flight", disposition=Disposition.HELD_PENDING_GRANT)
@@ -1047,7 +1047,7 @@ def test_denials_fold_groups_deny_events_for_the_decisions_screen():
 
 
 def test_is_descendant_of_walks_the_chain_and_rejects_foreign_chains():
-    from delegation_guard import Authority, Guard
+    from attenu_guard import Authority, Guard
     root = Guard.issue("a", Authority({"agent.delegate.b", "agent.delegate.c", "x.y"}, [], ttl=None), task="t")
     b = root.delegate("b", Authority({"agent.delegate.c", "x.y"}, [], ttl=None), task="t")
     c = b.delegate("c", Authority({"x.y"}, [], ttl=None), task="t")
@@ -1062,7 +1062,7 @@ if __name__ == "__main__":
 
 # ---- node lifecycle end: Guard.complete() -> "done" audit event (attenu-derive T21: per-node truncation) ----------
 def test_complete_records_a_done_event_once_and_leaves_authority_intact():
-    from delegation_guard import Authority, Guard, AuditLog
+    from attenu_guard import Authority, Guard, AuditLog
     root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t")
     child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
     assert child.check("fs.read").allowed
@@ -1077,7 +1077,7 @@ def test_complete_records_a_done_event_once_and_leaves_authority_intact():
 
 # ---- Strike policy (attenu-derive T26): revoke a node after N same-scope denials (Rafael: 3, configurable, on/off) ------
 def test_strike_policy_revokes_after_n_same_scope_denials():
-    from delegation_guard import Authority, Guard, StrikePolicy, ReasonCode
+    from attenu_guard import Authority, Guard, StrikePolicy, ReasonCode
     root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t",
                        strikes=StrikePolicy(enabled=True, n=3, mode="same_scope"))
     child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
@@ -1093,7 +1093,7 @@ def test_strike_policy_revokes_after_n_same_scope_denials():
 
 
 def test_strike_policy_same_scope_does_not_trip_on_different_scopes():
-    from delegation_guard import Authority, Guard, StrikePolicy
+    from attenu_guard import Authority, Guard, StrikePolicy
     root = Guard.issue("o", Authority({"fs.read"}, [], ttl=None), task="t", strikes=StrikePolicy(n=3, mode="same_scope"))
     child = root.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
     for scope in ("fs.write", "mail.send", "payments.transfer"):     # 3 denials, all DIFFERENT scopes
@@ -1104,7 +1104,7 @@ def test_strike_policy_same_scope_does_not_trip_on_different_scopes():
 
 
 def test_strike_policy_total_mode_and_off():
-    from delegation_guard import Authority, Guard, StrikePolicy
+    from attenu_guard import Authority, Guard, StrikePolicy
     root = Guard.issue("o", Authority({"fs.read"}, [], ttl=None), task="t", strikes=StrikePolicy(n=3, mode="total"))
     child = root.delegate("r", Authority({"fs.read"}, [], ttl=None), task="x")
     for scope in ("fs.write", "mail.send", "payments.transfer"):      # 3 denials across ANY scope -> total mode trips
@@ -1121,9 +1121,9 @@ def test_strike_policy_total_mode_and_off():
 # rewritten-and-re-hashed log is still detectable ------------------------------------------------------------------------
 def test_anchor_detects_a_consistently_rewritten_ledger():
     import copy
-    from delegation_guard import Authority, Guard, AuditLog
-    from delegation_guard.audit import _hash, GENESIS
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, AuditLog
+    from attenu_guard.audit import _hash, GENESIS
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"anchor-key", kid="anchor-1")
     root = Guard.issue("orchestrator", Authority({"crm.*"}, [], ttl=None), task="quarterly review")
     child = root.delegate("summarizer", Authority({"crm.read"}, [], ttl=None), task="summarize")
@@ -1146,8 +1146,8 @@ def test_anchor_detects_a_consistently_rewritten_ledger():
 
 
 def test_anchor_rejects_a_forged_signature():
-    from delegation_guard import Authority, Guard, AuditLog
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, AuditLog
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"real-key", kid="k1"); attacker = HS256TestSigner(secret=b"attacker-key", kid="k1")
     root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
     entries = root.audit_log().entries
@@ -1160,7 +1160,7 @@ def test_anchor_rejects_a_forged_signature():
 # access to the engine, that (1) every action was within the acting node's authority, (2) the chain was monotonic at
 # every hop, (3) the ledger is untampered against its anchor. -----------------------------------------------------------
 def _evidence_chain():
-    from delegation_guard import Authority, Guard, RowLimit, EgressRank
+    from attenu_guard import Authority, Guard, RowLimit, EgressRank
     root = Guard.issue("orchestrator", Authority({"crm.read", "crm.write", "agent.delegate.summarizer"}, [RowLimit(100_000), EgressRank("any")], ttl=None), task="review")
     child = root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(5_000), EgressRank("none")], ttl=None), task="summarize")
     child.check("crm.read", context={"rows": 10}, tool="crm_query")           # allowed
@@ -1170,8 +1170,8 @@ def _evidence_chain():
 
 
 def test_evidence_bundle_verifies_offline():
-    from delegation_guard import evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import evidence
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"anchor", kid="k1")
     root = _evidence_chain()
     bundle = evidence.export_bundle(root.audit_log(), signer)
@@ -1184,9 +1184,9 @@ def test_evidence_bundle_verifies_offline():
 
 def test_altered_bundle_fails_each_check_independently():
     import copy, json
-    from delegation_guard import evidence
-    from delegation_guard.audit import _hash, GENESIS
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import evidence
+    from attenu_guard.audit import _hash, GENESIS
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"anchor", kid="k1")
     root = _evidence_chain()
     good = evidence.export_bundle(root.audit_log(), signer)
@@ -1229,8 +1229,8 @@ def test_altered_bundle_fails_each_check_independently():
 
 
 def test_delegation_graph_view_from_the_bundle():
-    from delegation_guard import evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import evidence
+    from attenu_guard.wire import HS256TestSigner
     root = _evidence_chain()
     g = evidence.delegation_graph(evidence.export_bundle(root.audit_log(), HS256TestSigner(secret=b"k", kid="k")))
     assert g["edges"] == [{"parent": root.node_id, "child": next(n for n in g["nodes"] if g["nodes"][n]["agent"] == "summarizer")}]
@@ -1241,8 +1241,8 @@ def test_delegation_graph_view_from_the_bundle():
 # ---- Bundle redaction guarantee (attenu-derive A2b): the flywheel transports customer data, so "nothing leaks" is a -----
 # TEST, not a habit. Field allow-list + a caller context allow-list + free-text redaction; a raw argument in a bundle fails.
 def test_export_rejects_an_unknown_ledger_field():
-    from delegation_guard import Authority, Guard, evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, evidence
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"k", kid="k")
     root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
     # simulate an adapter smuggling a raw value as a NEW field (exactly where a leak would hide)
@@ -1255,8 +1255,8 @@ def test_export_rejects_an_unknown_ledger_field():
 
 
 def test_raw_argument_in_context_is_caught_by_the_context_allowlist():
-    from delegation_guard import Authority, Guard, evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, evidence
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"k", kid="k")
     root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
     root.check("crm.read", context={"rows": 5}, tool="q")                          # redacted feature: fine
@@ -1274,8 +1274,8 @@ def test_raw_argument_in_context_is_caught_by_the_context_allowlist():
 
 def test_free_text_task_is_redacted_for_transport():
     import json
-    from delegation_guard import Authority, Guard, evidence
-    from delegation_guard.wire import HS256TestSigner
+    from attenu_guard import Authority, Guard, evidence
+    from attenu_guard.wire import HS256TestSigner
     signer = HS256TestSigner(secret=b"k", kid="k")
     root = Guard.issue("orchestrator", Authority({"agent.delegate.s"}, [], ttl=None), task="Wire $10k to account 4821 for customer Alice Smith")
     root.delegate("s", Authority(set(), [], ttl=None), task="pay the invoice for alice@bank.example")

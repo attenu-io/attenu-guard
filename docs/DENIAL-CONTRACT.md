@@ -1,4 +1,4 @@
-# Denial contract (delegation-guard)
+# Denial contract (attenu-guard)
 
 *What an agent, an adapter, and a ledger reader can rely on when a call is denied. Companion to the strike
 policy (`StrikePolicy`).*

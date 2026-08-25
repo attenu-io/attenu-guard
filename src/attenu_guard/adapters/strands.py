@@ -1,7 +1,7 @@
 """
-delegation-guard x AWS Strands Agents — a thin enforcement adapter.
+attenu-guard x AWS Strands Agents — a thin enforcement adapter.
 
-Paste this file into your project. It uses `delegation_guard` unmodified and
+Paste this file into your project. It uses `attenu_guard` unmodified and
 only Strands' *public* hook API — no monkeypatching, no subclassing of Agent,
 Swarm or Graph.
 
@@ -52,7 +52,7 @@ gives the identical guarantee — `Deny` is applied as the same `cancel_tool` �
 but interventions have no multi-agent lifecycle method, so a Swarm/Graph still
 needs the hook registration above.
 
-delegation-guard deliberately does NOT decide what authority a task needs — you
+attenu-guard deliberately does NOT decide what authority a task needs — you
 write `authority_for`. Whatever it returns is only ever an *input* to
 `Authority.meet`, so a child can never come out wider than its parent.
 """
@@ -69,7 +69,7 @@ from strands.hooks import (
 )
 from strands.interventions import Deny, InterventionHandler, Proceed
 
-from delegation_guard import Authority, AuthorityError, Guard
+from attenu_guard import Authority, AuthorityError, Guard
 
 __all__ = [
     "ScopeRequest",
@@ -93,7 +93,7 @@ class ScopeRequest:
     scope: str
     context: Mapping[str, Any] = field(default_factory=dict)
     metered: bool = False
-    disposition: Optional[str] = None     # see delegation_guard.Disposition
+    disposition: Optional[str] = None     # see attenu_guard.Disposition
 
 
 # (tool_use) -> ScopeRequest, or None meaning "this tool needs no authority"
@@ -116,7 +116,7 @@ def scope_map(
 
     `unmapped="deny"` (the default) is what makes this fail CLOSED: a tool
     nobody wrote a rule for resolves to the synthetic scope `tool.<name>`,
-    which no `Authority` grants — so delegation-guard denies it through its
+    which no `Authority` grants — so attenu-guard denies it through its
     normal path and the refusal lands in the audit log with the reason code
     `scope_not_granted`, rather than being special-cased in adapter code.
     `unmapped="allow"` opts a deployment out of that.
@@ -277,7 +277,7 @@ class DelegationGuard(HookProvider):
 
     # -- the same enforcement, as a Strands InterventionHandler -------------
 
-    def as_intervention(self, name: str = "delegation-guard") -> InterventionHandler:
+    def as_intervention(self, name: str = "attenu-guard") -> InterventionHandler:
         """Expose this guard through Strands' own authorization seam, for
         `Agent(interventions=[...])`.
 

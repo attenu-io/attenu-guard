@@ -26,8 +26,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / "src"))
 
-from delegation_guard import Authority, Guard, RowLimit, EgressRank  # noqa: E402
-from delegation_guard import wire  # noqa: E402
+from attenu_guard import Authority, Guard, RowLimit, EgressRank  # noqa: E402
+from attenu_guard import wire  # noqa: E402
 
 VECTORS_DIR = Path(__file__).resolve().parent
 
@@ -39,7 +39,7 @@ VECTORS_DIR = Path(__file__).resolve().parent
 # boundary. They are stdlib-only on purpose, so generation and interop
 # checking never require installing anything (matching this repo's
 # zero-dependency test discipline).
-SECRET = b"delegation-guard-interop-vectors-v1-fixed-secret"
+SECRET = b"attenu-guard-interop-vectors-v1-fixed-secret"
 KID = "interop-v1"
 
 
@@ -353,7 +353,7 @@ def main() -> int:
     print(f"wrote {len(written)} vector file(s) to {VECTORS_DIR}:")
     for filename in sorted(written):
         print(f"  {filename}")
-    print("\nself-checking against this build's delegation_guard.wire ...")
+    print("\nself-checking against this build's attenu_guard.wire ...")
     ok = _self_check(written)
     print("\nALL VECTORS SELF-CONSISTENT" if ok else "\nVECTOR SELF-CHECK FAILED")
     return 0 if ok else 1

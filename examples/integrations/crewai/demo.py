@@ -1,4 +1,4 @@
-"""Runnable end-to-end demo: delegation-guard x CrewAI, fully offline.
+"""Runnable end-to-end demo: attenu-guard x CrewAI, fully offline.
 
     python examples/integrations/crewai/demo.py
 
@@ -41,7 +41,7 @@ from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.llms.base_llm import BaseLLM  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -50,7 +50,7 @@ from delegation_guard import (  # noqa: E402
 )
 
 # `dg_crewai` sits next to this file, so plain import works.
-from delegation_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
+from attenu_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
 
 ORCHESTRATOR = "orchestrator"
 SUMMARIZER = "summarizer"

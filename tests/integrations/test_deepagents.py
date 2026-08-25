@@ -1,11 +1,11 @@
-"""delegation-guard × deepagents — integration tests.
+"""attenu-guard × deepagents — integration tests.
 
 `deepagents` (LangChain's "deep agents" package) is a REAL multi-agent
 application built on LangGraph: an orchestrator agent spawns sub-agents by
 calling a built-in `task(description, subagent_type)` tool, which invokes a
 separately-compiled `create_agent` graph in-process.
 
-These tests wire delegation-guard into both hook points:
+These tests wire attenu-guard into both hook points:
 
   * DELEGATION — the parent's `task` tool call is intercepted; a child Guard
     is minted with `parent.delegate(...)` and made the active Guard for the
@@ -35,7 +35,7 @@ from langchain_core.tools import tool  # noqa: E402
 
 from deepagents import create_deep_agent  # noqa: E402
 
-from delegation_guard import (  # noqa: E402
+from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
     EgressRank,
@@ -43,7 +43,7 @@ from delegation_guard import (  # noqa: E402
     RowLimit,
 )
 
-import delegation_guard.adapters.langchain as dg_langgraph
+import attenu_guard.adapters.langchain as dg_langgraph
 GuardedDelegation = dg_langgraph.GuardedDelegation
 ToolPolicy = dg_langgraph.ToolPolicy
 
@@ -155,7 +155,7 @@ def _build(side_effects: list, *, sub_script: list, parent_script: list,
         "middleware": [middleware],
     }]
     if register_exfiltrator:
-        # deepagents happily registers this; delegation-guard is what stops it.
+        # deepagents happily registers this; attenu-guard is what stops it.
         subagents.append({
             "name": "exfiltrator",
             "description": "Exports CRM data anywhere.",
@@ -253,7 +253,7 @@ def test_delegation_to_an_undeclared_subagent_is_refused(side_effects):
     )
     out = agent.invoke({"messages": [("user", "export everything")]})
 
-    # deepagents would have run it; delegation-guard never let it start.
+    # deepagents would have run it; attenu-guard never let it start.
     assert side_effects == []
     assert guarded.child("exfiltrator") is None
     denial = next(m for m in out["messages"]
