@@ -131,7 +131,7 @@ opening a new BoF (unnecessary with two live homes).
    licensed reference verifier, **published offline-verification test vectors**
    (canonicalized per RFC 8785 JCS), and a **second independent implementation**.
    Tenuo has a Rust impl; the A2A project already runs cross-implementation CI
-   vectors. `delegation-guard` is our reference implementation — this is why it
+   vectors. `attenu-guard` is our reference implementation — this is why it
    exists and why it must be excellent.
 2. **Profile, don't reinvent** (the table above). Every layer cites the standard
    it reuses; we invent only the chain + verification algorithm.
