@@ -32,6 +32,8 @@ jobs:
         run: python tests/red_team.py
       - name: Core unit tests
         run: python tests/test_core_v02.py
+      - name: Version pin (package == pyproject)
+        run: python -c "import re,sys; sys.path.insert(0,'src'); import attenu_guard; from pathlib import Path; v=re.search(r'^version = \"([^\"]+)\"', Path('pyproject.toml').read_text(), re.M).group(1); assert v==attenu_guard.__version__, (v, attenu_guard.__version__); print('version pin OK', v)"
       - name: Adapter contract (disposition on every adapter, anti-drift)
         run: python tests/test_adapters_contract.py
       - name: Identity + spool sinks (no network in append; bounded, fsync'd, resumable)
