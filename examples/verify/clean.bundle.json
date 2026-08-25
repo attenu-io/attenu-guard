@@ -1,0 +1,223 @@
+{
+ "anchor": {
+  "chain_id": "chain",
+  "head": "1fab494c389db0f9ecb475c28b03b6da6f2095a1d85636896e3529c0cbf74bef",
+  "kid": "sample",
+  "seq": 6,
+  "sig": "957bfc0abdf4e88c9e1cbcc5cfc1bf827e5172eb7611b45fc073da3c71a073b7",
+  "ts": 0,
+  "v": 1,
+  "verified": true
+ },
+ "chain_id": "chain",
+ "entries": [
+  {
+   "agent": "orchestrator",
+   "authority": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "any"
+     },
+     {
+      "key": "max_rows",
+      "max": 100000
+     }
+    ],
+    "scopes": [
+     "crm.*",
+     "mail.send"
+    ],
+    "ttl": 3600
+   },
+   "chain_id": "chain",
+   "event": "root",
+   "hash": "92d3c9485b1aa10314ca180a23eb98bc051877e8ad3b1a9c93a0e618c63ceaa2",
+   "node": "chain:n0",
+   "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "seq": 0,
+   "ts": 1,
+   "v": 1
+  },
+  {
+   "agent": "reader",
+   "chain_id": "chain",
+   "event": "spawn",
+   "granted": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "none"
+     },
+     {
+      "key": "max_rows",
+      "max": 5000
+     }
+    ],
+    "scopes": [
+     "crm.read"
+    ],
+    "ttl": 900
+   },
+   "hash": "bb84281b570103ee5fe144266c2639bf805b4a56be9c5354272a311fa769991b",
+   "node": "chain:n1",
+   "parent": "chain:n0",
+   "prev_hash": "92d3c9485b1aa10314ca180a23eb98bc051877e8ad3b1a9c93a0e618c63ceaa2",
+   "requested": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "none"
+     },
+     {
+      "key": "max_rows",
+      "max": 5000
+     }
+    ],
+    "scopes": [
+     "crm.read"
+    ],
+    "ttl": 900
+   },
+   "seq": 1,
+   "task": "summarise pipeline",
+   "ts": 2,
+   "v": 1
+  },
+  {
+   "agent": "analyst",
+   "chain_id": "chain",
+   "event": "spawn",
+   "granted": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "none"
+     },
+     {
+      "key": "max_rows",
+      "max": 500
+     }
+    ],
+    "scopes": [
+     "crm.read"
+    ],
+    "ttl": 600
+   },
+   "hash": "ca41d657a150fd92500e2b9cdc1d6a1bc0af587895e7319e59a8bbb0f5fc4f6b",
+   "node": "chain:n2",
+   "parent": "chain:n1",
+   "prev_hash": "bb84281b570103ee5fe144266c2639bf805b4a56be9c5354272a311fa769991b",
+   "requested": {
+    "constraints": [
+     {
+      "key": "max_rows",
+      "max": 500
+     }
+    ],
+    "scopes": [
+     "crm.read"
+    ],
+    "ttl": 600
+   },
+   "seq": 2,
+   "task": "top accounts",
+   "ts": 3,
+   "v": 1
+  },
+  {
+   "chain_id": "chain",
+   "context": {
+    "rows": 4200
+   },
+   "event": "allow",
+   "hash": "d2604ee10d870cafdc7124788cf1c4d8f8f4d74f63c1f0ec191b84940f857f11",
+   "node": "chain:n1",
+   "prev_hash": "ca41d657a150fd92500e2b9cdc1d6a1bc0af587895e7319e59a8bbb0f5fc4f6b",
+   "scope": "crm.read",
+   "seq": 3,
+   "tool": "crm_query",
+   "ts": 4,
+   "v": 1
+  },
+  {
+   "chain_id": "chain",
+   "context": {
+    "rows": 120
+   },
+   "event": "allow",
+   "hash": "5cea0fde2be58fa9de4754c45df3978937e8c43b7d036ad811f9a768f5057170",
+   "node": "chain:n2",
+   "prev_hash": "d2604ee10d870cafdc7124788cf1c4d8f8f4d74f63c1f0ec191b84940f857f11",
+   "scope": "crm.read",
+   "seq": 4,
+   "tool": "crm_query",
+   "ts": 5,
+   "v": 1
+  },
+  {
+   "chain_id": "chain",
+   "context": {
+    "rows": 9000
+   },
+   "event": "deny",
+   "hash": "7bd04e5f5b9843f49a20944087e4ce198c6c3b4108fc383eda1e2584ad8d5dc3",
+   "node": "chain:n2",
+   "prev_hash": "5cea0fde2be58fa9de4754c45df3978937e8c43b7d036ad811f9a768f5057170",
+   "reason": "ceiling_exceeded",
+   "reasons": [
+    {
+     "code": "ceiling_exceeded",
+     "constraint": "max_rows",
+     "limit": 500,
+     "message": "",
+     "requested": 9000
+    }
+   ],
+   "scope": "crm.read",
+   "seq": 5,
+   "tool": "crm_query",
+   "ts": 6,
+   "v": 1
+  },
+  {
+   "chain_id": "chain",
+   "context": {
+    "egress": "any"
+   },
+   "disposition": "out_of_authority",
+   "event": "deny",
+   "hash": "1fab494c389db0f9ecb475c28b03b6da6f2095a1d85636896e3529c0cbf74bef",
+   "node": "chain:n1",
+   "prev_hash": "7bd04e5f5b9843f49a20944087e4ce198c6c3b4108fc383eda1e2584ad8d5dc3",
+   "reason": "scope_not_granted",
+   "reasons": [
+    {
+     "code": "scope_not_granted",
+     "constraint": null,
+     "limit": null,
+     "message": "scope 'crm.export' not covered by held scopes ['crm.read']",
+     "requested": "crm.export"
+    },
+    {
+     "code": "ceiling_exceeded",
+     "constraint": "egress",
+     "limit": "none",
+     "message": "",
+     "requested": "any"
+    }
+   ],
+   "scope": "crm.export",
+   "seq": 6,
+   "tool": "crm_export",
+   "ts": 7,
+   "v": 1
+  }
+ ],
+ "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)",
+ "redaction": {
+  "ok": true,
+  "violations": []
+ },
+ "v": 1
+}

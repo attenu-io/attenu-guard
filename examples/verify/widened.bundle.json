@@ -1,0 +1,89 @@
+{
+ "anchor": {
+  "chain_id": "chain",
+  "head": "7e7e1b26b0abfb2f858701eecade5801820bbd349f69f68aa9a20043dfcda26b",
+  "kid": "sample",
+  "seq": 2,
+  "sig": "970e2329483c980044473a23db43540c31df2d907bd78d293e14d1b9f041e070",
+  "ts": 0,
+  "v": 1,
+  "verified": true
+ },
+ "chain_id": "chain",
+ "entries": [
+  {
+   "agent": "orchestrator",
+   "authority": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "none"
+     },
+     {
+      "key": "max_rows",
+      "max": 5000
+     }
+    ],
+    "scopes": [
+     "crm.read"
+    ],
+    "ttl": 900
+   },
+   "chain_id": "chain",
+   "event": "root",
+   "hash": "45d8788f2393a7deb704386c84e29cfeb0e683753df4dd7d28304bff74586ef9",
+   "node": "n0",
+   "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+   "seq": 0,
+   "ts": 1,
+   "v": 1
+  },
+  {
+   "agent": "exporter",
+   "chain_id": "chain",
+   "event": "spawn",
+   "granted": {
+    "constraints": [
+     {
+      "key": "egress",
+      "rank": "any"
+     }
+    ],
+    "scopes": [
+     "crm.export",
+     "crm.read"
+    ],
+    "ttl": 900
+   },
+   "hash": "1d2c4ca4b1946ebec2be9650d3245f1de0df568c4c6a0db6da7ecef0dea906aa",
+   "node": "n1",
+   "parent": "n0",
+   "prev_hash": "45d8788f2393a7deb704386c84e29cfeb0e683753df4dd7d28304bff74586ef9",
+   "seq": 1,
+   "ts": 2,
+   "v": 1
+  },
+  {
+   "agent": "exporter",
+   "chain_id": "chain",
+   "context": {
+    "egress": "any"
+   },
+   "event": "allow",
+   "hash": "7e7e1b26b0abfb2f858701eecade5801820bbd349f69f68aa9a20043dfcda26b",
+   "node": "n1",
+   "prev_hash": "1d2c4ca4b1946ebec2be9650d3245f1de0df568c4c6a0db6da7ecef0dea906aa",
+   "scope": "crm.export",
+   "seq": 2,
+   "tool": "crm_export",
+   "ts": 3,
+   "v": 1
+  }
+ ],
+ "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)",
+ "redaction": {
+  "ok": true,
+  "violations": []
+ },
+ "v": 1
+}

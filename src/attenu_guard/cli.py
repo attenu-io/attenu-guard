@@ -3,7 +3,8 @@ attenu-guard — command-line tool.
 
   attenu-guard demo                  run the poisoned-summariser demo
   attenu-guard view <log.jsonl>      render an audit log as a delegation tree + verify it
-  attenu-guard verify <log>          verify a hash-chained audit log, exit non-zero on tamper
+  attenu-guard verify <log|bundle>   verify a hash-chained audit log, or an evidence bundle
+                                     (integrity · child ⊆ parent · containment; --hs256-key/--pubkey checks the anchor)
   attenu-guard scenarios <file>      run a declarative authorization scenario (JSON/YAML),
                            exit non-zero if any assertion fails. --coverage prints
                            which reason codes were exercised.
@@ -61,7 +62,46 @@ def _view(path: str):
     return 0 if ok else 2
 
 
-def _verify(path: str):
+def _verify(args: list):
+    """`attenu-guard verify <audit.jsonl | bundle.json> [--hs256-key HEX | --pubkey HEX] [--kid KID]`
+
+    A `.jsonl` audit log: hash-chain integrity. A bundle (`export_bundle` output): integrity, monotonicity
+    (child ⊆ parent) and containment from the bundle alone; the signed anchor is verified when a key is given
+    and reported as "not checked" otherwise. Exit 0 = ok, 2 = a check failed, 1 = usage."""
+    import json
+    path, key_hex, pub_hex, kid = None, None, None, None
+    it = iter(args)
+    for a in it:
+        if a == "--hs256-key": key_hex = next(it, None)
+        elif a == "--pubkey": pub_hex = next(it, None)
+        elif a == "--kid": kid = next(it, None)
+        elif path is None: path = a
+    if not path:
+        print(__doc__); return 1
+    text = open(path, encoding="utf-8").read()
+    bundle = None
+    try:
+        parsed = json.loads(text)                       # a bundle is ONE JSON object; a ledger is JSON Lines
+        bundle = parsed if isinstance(parsed, dict) and "entries" in parsed else None
+    except json.JSONDecodeError:
+        bundle = None
+    if bundle is not None:
+        from attenu_guard import evidence
+        signer = None
+        if key_hex:
+            from attenu_guard.wire import HS256TestSigner
+            signer = HS256TestSigner(bytes.fromhex(key_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+        elif pub_hex:
+            from attenu_guard.wire import Ed25519Verifier
+            signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+        rep = evidence.verify_bundle(bundle, signer)
+        c = rep["checks"]
+        print(f"integrity={c['integrity']} monotonicity={c['monotonicity']} containment={c['containment']} anchor={c['anchor']} "
+              f"nodes={rep['nodes']} actions_checked={rep['actions_checked']}")
+        for f in rep["failures"]:
+            print(f"  - {f}")
+        print("OK" if rep["ok"] else "FAILED")
+        return 0 if rep["ok"] else 2
     entries = AuditLog.load(path)
     ok, reason = AuditLog.verify(entries)
     print("OK" if ok else f"TAMPERED — {reason}")
@@ -81,7 +121,7 @@ def main(argv=None):
     if cmd == "view" and rest:
         return _view(rest[0])
     if cmd == "verify" and rest:
-        return _verify(rest[0])
+        return _verify(rest)
     if cmd == "scenarios" and rest:
         return _scenarios(rest)
     print(__doc__)

@@ -19,11 +19,12 @@ Thanks for helping make agent delegation safe.
 
 We happily take: new framework adapters, new ceiling types, audit-schema
 consumers/exporters (SIEM connectors especially), performance, docs, and
-hardening. We will politely redirect: anything that *derives* authority
-automatically from a task, divergence/intent scoring, or fleet management — that
-boundary keeps the library thin and is where the commercial product lives. Asking
-"can it decide the policy for me?" is a feature request for the paid plane, not
-this repo — and we'll say so kindly.
+hardening. We will politely redirect one thing: anything that *derives* authority
+automatically from an application's structure or a task belongs in
+[`attenu-derive`](https://github.com/attenu-io/attenu-derive), the open engine, not
+here — the boundary keeps this library thin and dependency-free. Asking "can it
+decide the policy for me?" is a feature request for the engine, and we'll point
+you there kindly.
 
 ## Dev loop
 

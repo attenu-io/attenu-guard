@@ -1,5 +1,5 @@
 """
-Strike policy — revoke a node after repeated denials (attenu-derive T26; Rafael's policy: 3 same-scope, configurable,
+Strike policy — revoke a node after repeated denials (attenu-derive T26; default policy: 3 same-scope denials, configurable,
 on/off). A denied agent that keeps probing the same wall is either broken or hostile; after N strikes the node is
 cascade-revoked and the parent can see why on the ledger. Off by default (opt-in per installation).
 """

@@ -21,6 +21,10 @@ pip install -e .        # gives you the `attenu-guard` command too
 # Once published to PyPI this becomes: pip install attenu-guard
 ```
 
+> **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` — integrity, child ⊆ parent and
+> containment from the file alone, no account, no network; the [auditor's walkthrough](examples/verify/README.md)
+> has three sample bundles (clean, tampered, widened) and takes a minute.
+
 > **Just want to see it run?** From the repo root, no install needed:
 > `python examples/poisoned_summarizer.py` — the examples bootstrap the
 > `src/` path themselves. `python tests/run_properties.py` proves the

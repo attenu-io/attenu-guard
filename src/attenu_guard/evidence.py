@@ -176,19 +176,29 @@ def denials(bundle: dict) -> list[dict]:
     return sorted(rows.values(), key=lambda r: r["first_seq"])
 
 
-def verify_bundle(bundle: dict, signer) -> dict:
-    """Verify integrity, monotonicity and containment from the bundle alone. Returns {ok, checks, failures, ...}."""
+def verify_bundle(bundle: dict, signer=None) -> dict:
+    """Verify integrity, monotonicity and containment from the bundle alone. Returns {ok, checks, failures, ...}.
+
+    `signer` is the verifier for the bundle's signed anchor (a public key, or the test signer). With `signer=None`
+    the hash chain, monotonicity and containment are still checked, but the anchor signature is NOT — the report
+    says so (`checks["anchor"] == "not checked"`), and `ok` then means "consistent, unverified by key": a consistent
+    full rewrite by someone holding the key cannot be excluded without the key.
+    """
     entries = bundle.get("entries") or []
     anchor = bundle.get("anchor") or {}
-    checks = {"integrity": False, "monotonicity": False, "containment": False}
+    checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked"}
     failures: list[str] = []
 
-    # (1) integrity: hash chain + signed anchor
+    # (1) integrity: hash chain (+ the signed anchor, when a verifier key is given)
     ok_chain, err = AuditLog.verify(entries)
-    ok_anchor, aerr = AuditLog.verify_anchor(entries, anchor, signer)
-    checks["integrity"] = bool(ok_chain and ok_anchor)
     if not ok_chain: failures.append(f"integrity: {err}")
-    if not ok_anchor: failures.append(f"integrity(anchor): {aerr}")
+    if signer is not None:
+        ok_anchor, aerr = AuditLog.verify_anchor(entries, anchor, signer)
+        checks["anchor"] = "verified" if ok_anchor else "FAILED"
+        if not ok_anchor: failures.append(f"integrity(anchor): {aerr}")
+        checks["integrity"] = bool(ok_chain and ok_anchor)
+    else:
+        checks["integrity"] = bool(ok_chain)
 
     auth, parent, afail = _node_authorities(entries)
     failures += afail
@@ -216,5 +226,5 @@ def verify_bundle(bundle: dict, signer) -> dict:
             contained = False; failures.append(f"containment: allow of {scope!r} on {node} outside its authority {sorted(a.scopes)}")
     checks["containment"] = contained
 
-    return {"ok": all(checks.values()) and not failures, "checks": checks, "failures": failures,
+    return {"ok": all(v for k, v in checks.items() if k != "anchor") and not failures, "checks": checks, "failures": failures,
             "nodes": len(auth), "actions_checked": actions, "chain_id": bundle.get("chain_id")}

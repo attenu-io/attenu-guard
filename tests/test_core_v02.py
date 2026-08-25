@@ -1075,7 +1075,7 @@ def test_complete_records_a_done_event_once_and_leaves_authority_intact():
     assert not root.is_complete
 
 
-# ---- Strike policy (attenu-derive T26): revoke a node after N same-scope denials (Rafael: 3, configurable, on/off) ------
+# ---- Strike policy (attenu-derive T26): revoke a node after N same-scope denials (default 3, configurable, on/off) ------
 def test_strike_policy_revokes_after_n_same_scope_denials():
     from attenu_guard import Authority, Guard, StrikePolicy, ReasonCode
     root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t",

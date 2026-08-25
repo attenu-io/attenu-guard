@@ -40,6 +40,8 @@ jobs:
         run: python tests/test_sinks_identity.py
       - name: Wire format + offline verification
         run: python tests/test_wire.py
+      - name: verify CLI + sample bundles (ledger, bundle, with/without key)
+        run: python tests/test_cli_verify.py
       - name: Interop test vectors self-check
         run: python tests/vectors/generate.py
       - name: Scenario harness
