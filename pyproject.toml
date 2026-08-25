@@ -33,6 +33,8 @@ strands = ["strands-agents>=1.52"]
 llama-index = ["llama-index-core>=0.14"]
 semantic-kernel = ["semantic-kernel>=1.36"]
 agno = ["agno>=2.9"]
+omnigent = ["omnigent>=0.10"]         # examples/integrations/omnigent (policy handler); no adapter module
+mcp = ["mcp>=1.28"]                   # examples/integrations/mcp (server-side chain verifier)
 test = ["pytest>=7", "hypothesis>=6"]
 all = ["cryptography>=41", "pyyaml>=6"]
 

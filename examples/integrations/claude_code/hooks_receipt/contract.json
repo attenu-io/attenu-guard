@@ -1,0 +1,128 @@
+{
+  "_comment": [
+    "The Claude Code hook contract this recipe is written against, transcribed from the docs.",
+    "It is the compatibility tier of the gate: the test next to this file asserts that every",
+    "field hook.py reads and every field it returns appears here, and that the payload shapes",
+    "below are the ones the demo feeds the hook. Re-fetch the three sources on the week of",
+    "publication; a change here is what tells us the recipe needs updating."
+  ],
+  "verified_on": "2026-08-25",
+  "sources": {
+    "hooks": "https://code.claude.com/docs/en/hooks",
+    "sub_agents": "https://code.claude.com/docs/en/sub-agents",
+    "settings": "https://code.claude.com/docs/en/settings"
+  },
+  "events_used": ["PreToolUse", "SubagentStart", "SubagentStop", "SessionEnd"],
+  "common_input_fields": [
+    "session_id",
+    "prompt_id",
+    "transcript_path",
+    "cwd",
+    "permission_mode",
+    "hook_event_name"
+  ],
+  "optional_input_fields": {
+    "agent_id": "Unique identifier when the hook fires inside a subagent",
+    "agent_type": "Agent name (the frontmatter `name`) when using --agent or inside a subagent"
+  },
+  "pre_tool_use": {
+    "input_fields": ["tool_name", "tool_input", "tool_use_id"],
+    "example_input": {
+      "session_id": "abc123",
+      "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
+      "transcript_path": "<transcript>.jsonl",
+      "cwd": "<project>",
+      "permission_mode": "default",
+      "hook_event_name": "PreToolUse",
+      "tool_name": "Bash",
+      "tool_input": {"command": "npm test", "description": "Run test suite"},
+      "tool_use_id": "toolu_01ABC123..."
+    },
+    "example_output": {
+      "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": "Destructive command blocked by hook"
+      }
+    },
+    "permission_decision_values": ["allow", "deny", "ask"],
+    "output_fields": [
+      "hookSpecificOutput",
+      "hookEventName",
+      "permissionDecision",
+      "permissionDecisionReason",
+      "systemMessage"
+    ]
+  },
+  "subagent_start": {
+    "input_fields": ["agent_type", "agent_id"],
+    "example_input": {"agent_type": "Explore", "agent_id": "subagent-unique-id"},
+    "output_note": "JSON output is ignored for this event; exit 2 shows stderr to the user only and the subagent still spawns."
+  },
+  "subagent_stop": {
+    "input_fields": ["agent_type", "agent_id", "last_assistant_message"],
+    "example_input": {
+      "agent_type": "Explore",
+      "agent_id": "subagent-unique-id",
+      "last_assistant_message": "Agent response text here"
+    },
+    "output_note": "Non-blocking event."
+  },
+  "exit_codes": {
+    "0": "Success. Stdout is read for JSON control fields.",
+    "2": "Blocking error on events that support blocking. On PreToolUse: blocks the tool call. Stderr becomes the blocking reason.",
+    "other": "Non-blocking error; the action proceeds."
+  },
+  "exit_zero_without_json": "Normal permission flow applies (not an approval).",
+  "settings_shape": {
+    "hooks": {
+      "PreToolUse": [
+        {
+          "matcher": "Bash",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-rm.sh",
+              "args": []
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "matcher_note": "A handler with no `matcher` runs for every tool call — which is what a fail-closed recorder needs.",
+  "subagent_frontmatter_fields": [
+    "name",
+    "description",
+    "tools",
+    "disallowedTools",
+    "model",
+    "permissionMode",
+    "maxTurns",
+    "skills",
+    "mcpServers",
+    "hooks",
+    "memory",
+    "background",
+    "effort",
+    "isolation",
+    "color",
+    "initialPrompt"
+  ],
+  "tool_resolution": {
+    "tools_omitted": "Subagent inherits every tool available to subagents.",
+    "tools_only": "Subagent gets exactly those tools.",
+    "disallowed_only": "Subagent gets the default pool minus those tools.",
+    "both": "disallowedTools is applied first, then tools is resolved against the remainder; a tool in both is removed.",
+    "mcp_patterns": ["mcp__<server>", "mcp__<server>__*", "mcp__* (disallowedTools only)"],
+    "agent_syntax": "Agent(worker, researcher) in `tools` allowlists which subagents may be spawned."
+  },
+  "permissions_rule_examples": ["Bash(npm run lint)", "Bash(npm run test *)", "Read(./.env)", "Read(./.env.*)"],
+  "transcripts": {
+    "path_shape": "<claude config dir>/projects/{project}/{sessionId}/subagents/agent-{agentId}.jsonl",
+    "format": "JSONL, one JSON object per line",
+    "retention": "Deleted after cleanupPeriodDays (default 30)",
+    "integrity_fields": [],
+    "note": "Transcripts record what happened. The docs describe no hash chain, signature or anchor over them, so they are not something a third party can check for completeness or alteration on its own. That is the gap this recipe fills; it is not a criticism of what transcripts are for."
+  }
+}

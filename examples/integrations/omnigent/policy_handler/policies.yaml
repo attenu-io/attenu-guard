@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Registering the attenu-guard delegation handler with Omnigent 0.10.0.
+#
+# Two placements, same grammar. Verified against omnigent 0.10.0 on 2026-08-25 by
+# parsing this file with omnigent.spec.parser.parse_default_policies (see
+# tests/integrations/test_omnigent_policy_handler.py::test_compat_policies_yaml_parses).
+#
+#   (a) SERVER CONFIG — the `policies:` mapping below, passed to `omnigent server --config`.
+#       Every session on the server gets it.
+#   (b) AGENT SPEC — the same block under the agent's own gate section, keyed
+#       `<gate>.policies` (see examples/polly/config.yaml upstream, which registers
+#       `spawn_bounds` this way). One instance per agent, each with its own `agent:`.
+#
+# Use the `function: {path, arguments}` shape. `handler:` is accepted as an alias for a
+# bare dotted path, but a sibling `factory_params:` is not read on this parser path — the
+# factory would be called with no arguments. omnigent/spec/parser.py:3308, :3528.
+#
+# `path:` is a dotted import path, so put this recipe's handler.py on PYTHONPATH as
+# `attenu_omnigent.py` (or list its package under `policy_modules:`).
+
+policies:
+  # The orchestrator's instance. Its `agent:` names the roster entry whose session this
+  # policy runs in; every instance shares one chain through `chain_id`.
+  attenu_delegation_guard:
+    type: function
+    function:
+      path: attenu_omnigent.attenu_delegation_guard
+      arguments:
+        agent: orchestrator
+        root: orchestrator
+        chain_id: build-and-ship
+
+        # Deepest delegation level, counted on the chain rather than per turn: the
+        # orchestrator is depth 0, its sub-agents depth 1, theirs depth 2.
+        max_depth: 2
+        # Most sub-agents one node may dispatch, for the life of the chain.
+        max_fanout: 4
+
+        # The ledger. Every ALLOW and DENY lands here, hash-chained.
+        audit_path: .omnigent/attenu-ledger.jsonl
+
+        # What each agent declares. `tools` and `subagents` are the two lists an
+        # Omnigent agent spec already carries; the authority is derived from them.
+        roster:
+          orchestrator:
+            tools: []
+            subagents: [researcher, coder]
+          researcher:
+            tools: [repo_read, web_fetch]
+            subagents: []
+          coder:
+            tools: [repo_read, repo_write]
+            subagents: [deployer]
+          deployer:
+            tools: [deploy_release]
+            subagents: [smoke_tester]
+            # How much, not just how many: at most one release on this authority,
+            # counted per node for the life of the chain.
+            ceilings:
+              - max_calls: 1
+                applies_to: deploy.release
+          smoke_tester:
+            tools: [repo_read]
+            subagents: []
+
+        # Tool name to scope. A tool absent from this map is held by no agent, so it is
+        # denied by default rather than allowed by omission.
+        scopes:
+          repo_read: repo.read
+          repo_write: repo.write
+          web_fetch: web.fetch
+          deploy_release: deploy.release
+
+# ---------------------------------------------------------------------------------------
+# Per-agent placement (b): paste the same block into each sub-agent's spec under its gate
+# section, changing only `agent:`. `roster`, `scopes`, `chain_id`, `max_depth` and
+# `max_fanout` stay identical across every instance — they describe one chain.
+#
+#   <gate>:
+#     policies:
+#       attenu_delegation_guard:
+#         type: function
+#         function:
+#           path: attenu_omnigent.attenu_delegation_guard
+#           arguments:
+#             agent: coder          # <- the only line that differs
+#             root: orchestrator
+#             chain_id: build-and-ship
+#             ...                   # the rest, verbatim
+#
+# Composition is Omnigent's: policies are evaluated in declaration order and the first
+# DENY short-circuits the rest, so this handler sits happily beside `spawn_bounds`
+# (per-turn width) and `headless_subagent_purpose_guard` (declared purpose).
+# ---------------------------------------------------------------------------------------
