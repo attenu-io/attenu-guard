@@ -115,10 +115,10 @@ jobs:
           python -m pip install -q --upgrade pip
           pip install -q -e . pytest ${{ matrix.pkgs }}
       - name: Run the ${{ matrix.fw }} integration test
-        run: python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}.py', matrix.fw) }}
+        run: python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}*.py', matrix.fw) }}
       - name: Run the ${{ matrix.fw }} demo (must exit 0 offline)
         run: |
-          for d in examples/integrations/${{ matrix.fw }}/demo.py examples/integrations/${{ matrix.fw }}/deepagents_demo.py; do
+          for d in examples/integrations/${{ matrix.fw }}/demo.py examples/integrations/${{ matrix.fw }}/deepagents_demo.py examples/integrations/${{ matrix.fw }}/*/demo.py; do
             [ -f "$d" ] && python "$d" || true
           done
   integrations-latest:
@@ -151,4 +151,4 @@ jobs:
       - run: |
           python -m pip install -q --upgrade pip
           pip install -q -e . pytest ${{ matrix.pkgs }}
-          python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}.py', matrix.fw) }}
+          python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}*.py', matrix.fw) }}
