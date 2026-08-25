@@ -61,9 +61,11 @@ Python-embeddable), and every non-Python stack (see "Other languages").
 
 Nothing above has been reported upstream yet (this repository is private). Each finding is
 pinned as an executable **baseline test** in `tests/integrations/` (e.g.
-`test_autogen_itself_does_not_attenuate`, deepagents' `permissions`-replace test, ADK's
-`disallow_transfer_to_peers` test), so the weekly unpinned `integrations-latest` job will
-flag the day a framework changes the behaviour. When the project goes public the intent is to
+`test_autogen_itself_does_not_attenuate`, deepagents' `permissions`-replace test), so the weekly
+unpinned `integrations-latest` job will flag the day a framework changes the behaviour — e.g. Google ADK's
+`disallow_transfer_to_peers`: upstream fixed #3850 on the legacy `llm_flows` path (`fa18d26a`, in 2.7.1), but the 2.x
+default workflow path (`workflow/utils/_transfer_utils.py`) still has no check — the pinned test asserts the transfer
+goes through on 2.7.1 and carries the message that will fire the day it stops. When the project goes public the intent is to
 file each as a constructive upstream issue with the repro and a suggested fix (child ⊆ parent
 "meet" semantics; fail-closed hook dispatch), and to keep this document as the citation.
 

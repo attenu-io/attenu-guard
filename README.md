@@ -67,7 +67,7 @@ moment authority is handed down.
 |---|---|
 | OpenAI Agents SDK 0.21 | passes the **entire** conversation to the sub-agent (`Handoff.input_filter=None` by default: *"the new agent sees the entire conversation history"*); no parent/child relation exists, so nothing checks child ⊆ parent |
 | LangChain `deepagents` 0.7 | a sub-agent's `permissions` **replace** the parent's rules entirely (`graph.py`) — a child can be granted what its parent is denied |
-| Google ADK 2.7 | `disallow_transfer_to_peers` only shapes the prompt/tool schema; the 2.x transfer path (`workflow/utils/_transfer_utils.py`) never checks it (cf. [#3850](https://github.com/google/adk-python/issues/3850)) |
+| Google ADK 2.7.1 | `disallow_transfer_to_peers` is enforced on the legacy `llm_flows` path since 2.7.1 ([#3850](https://github.com/google/adk-python/issues/3850), fix `fa18d26a`) — but the 2.x default workflow path (`workflow/utils/_transfer_utils.py`, sibling case) still carries no check: on 2.7.1 the peer transfer goes through (pinned by `tests/integrations/test_google_adk.py`, which fails the day it stops). Either way ADK checks *who may transfer*; it does not check *what authority passes*, and no record exists to verify afterwards |
 | CrewAI 1.15 | a delegated coworker runs with its **own full tool list**; the tool-hook dispatcher swallows exceptions and runs the tool (**fail-open**) unless you raise its one blessed exception |
 | AutoGen 0.7 | `Handoff` carries target/description/message only; the receiver offers the model its own full tool list |
 | Microsoft Entra | child agent **inherits** the parent's scopes |
