@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [{ name = "Attenu" }]
-keywords = ["ai", "agents", "security", "authorization", "mcp", "a2a", "owasp", "delegation", "attenuation"]
+keywords = ["ai", "agents", "security", "authorization", "least-privilege", "delegation", "sub-agents", "audit-log", "mcp", "a2a", "owasp", "langgraph", "langchain", "crewai", "openai-agents", "google-adk", "autogen", "claude-agent-sdk", "pydantic-ai", "smolagents", "strands", "llama-index", "semantic-kernel", "agno"]
 dependencies = []
 
 [project.optional-dependencies]

@@ -2,6 +2,8 @@
 
 [attenu.io](https://attenu.io) · [Docs](docs/) · [The engine that computes the permission set](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
 
+**Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
+
 **Enforced authority attenuation for multi-agent AI systems.** When one AI agent
 hands work to another, the child inherits *only* what its task needs — never the
 parent's full authority. Chains have hard ceilings. Any subtree can be revoked in
