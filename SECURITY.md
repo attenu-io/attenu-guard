@@ -5,7 +5,7 @@ ask of the ecosystem.
 
 ## Reporting a vulnerability
 
-Email **security@attenu.io** (PGP key at https://attenu.io/.well-known/security.txt).
+Report through GitHub's private advisory form for this repository (Security → Report a vulnerability). Do not open a public issue for a vulnerability. `https://attenu.io/.well-known/security.txt` points to the same form.
 Please do not open public issues for vulnerabilities.
 
 We commit to: acknowledge within 2 business days; a triage assessment within 5;
