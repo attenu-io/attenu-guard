@@ -1,10 +1,18 @@
 # Changelog
 
-All notable changes to delegation-guard are documented here. The format follows
+All notable changes to attenu-guard are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.4.1] — 2026-08-26
+
+### Fixed
+- README: the install block still said "pre-publish… once published to PyPI"; the package has been on PyPI since 0.4.0. It now reads `pip install attenu-guard`.
+
+### Changed
+- Packaging: PyPI classifiers, `Documentation` / `Issues` / `Changelog` project URLs, and a summary aligned with the project description. No code changes.
 
 ## [0.4.0] — 2026-08-24
 

@@ -1,6 +1,6 @@
 # attenu-guard
 
-[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
+[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Draft specification](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
 
 **Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
 
@@ -18,9 +18,8 @@ delegated authority stays inside the parent's limits, and every decision remains
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
 ```bash
-# From a clone (pre-publish): install in editable mode, zero runtime deps.
-pip install -e .        # gives you the `attenu-guard` command too
-# Once published to PyPI this becomes: pip install attenu-guard
+pip install attenu-guard                 # zero runtime deps; gives you the `attenu-guard` command too
+pip install 'attenu-guard[langgraph]'    # or crewai, google-adk, openai-agents, … — one extra per framework
 ```
 
 > **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` — integrity, child ⊆ parent and
