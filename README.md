@@ -116,7 +116,7 @@ The protocol is designed to be IETF-acceptable: it reuses the OAuth/JOSE stack
 (JWT, RFC 9396 authorization_details, DPoP, Token Status List) and invents only
 the one missing piece — cryptographically-linked, subsumption-enforced, offline
 multi-hop attenuation. See [`docs/STANDARDS-ALIGNMENT.md`](docs/STANDARDS-ALIGNMENT.md)
-and the [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md).
+and the [draft specification](docs/draft-asor-wimse-agent-delegation-chain-00.md) (Internet-Draft format; not yet submitted to the IETF).
 
 ## What this is *not*
 

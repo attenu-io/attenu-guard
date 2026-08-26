@@ -13,8 +13,8 @@ author:
   -
     ins: R. Asor
     name: Rafael Asor
-    organization: (Attenu, working name)
-    email: rafael.asor@example.com
+    organization: Attenu
+    uri: https://attenu.io/contact/
 normative:
   RFC2119:
   RFC7515:  # JWS
