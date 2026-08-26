@@ -1,13 +1,15 @@
 # attenu-guard
 
-[attenu.io](https://attenu.io) · [Docs](docs/) · [The engine that computes the permission set](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
+[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
 
 **Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
 
-**Enforced authority attenuation for multi-agent AI systems.** When one AI agent
-hands work to another, the child inherits *only* what its task needs — never the
-parent's full authority. Chains have hard ceilings. Any subtree can be revoked in
-one call. Every decision lands on a tamper-evident log you can verify offline.
+**Attenu Guard checks what an AI agent may do — and keeps it narrowing at every
+handoff.** When one agent hands work to another, the child gets only the
+permissions its task needs, never the parent's full set. Chains have hard
+ceilings. Any subtree can be revoked in one call. Every decision lands on a
+tamper-evident log you can verify offline. The alternative most teams live with
+is handing an agent a person's credentials and reading the logs afterwards.
 
 An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
@@ -54,18 +56,17 @@ summarizer.enforce("crm.export", context={"egress": "any"})        # raises Auth
 
 `check()` returns a rich **`Decision`** (with machine-readable reason codes for
 your audit trail); `enforce()` is the hard-stop gate that raises; `would_allow()`
-is a dry-run that writes nothing. The `crm.export` call is refused no matter what
-the agent was tricked into trying — because the sub-agent never held that
-authority in the first place — an injected instruction has nothing to escalate.
-This is default behaviour once authority is attenuated at the handoff.
+is a dry-run that writes nothing. The `crm.export` call is refused whatever the agent was talked into trying —
+the sub-agent never held that permission, so an injected instruction has
+nothing to widen. That is the default once permissions narrow at the handoff.
 
-## Why this doesn't exist anywhere else
+## What happens at a handoff today
 
-Every framework and platform we audited stops one step short — because in each
-of them **the delegation act is invisible**. Identity tokens top out at two
-parties (user, agent), so "child ⊆ parent" can't even be *written down*; every
-policy check fires at invocation time inside one vendor's perimeter, never at the
-moment authority is handed down.
+In the frameworks we audited, the handoff itself is not something the system can
+see: identity tokens describe two parties — user and agent — so "child ⊆ parent"
+cannot be written down, and policy checks fire when a tool is invoked rather than
+at the moment permissions are passed down. Verified against released code, and
+pinned by tests that fail the day the behaviour changes:
 
 | System | What it does at a handoff (verified against the released code — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)) |
 |---|---|
