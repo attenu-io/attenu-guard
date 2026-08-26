@@ -1,0 +1,11 @@
+name: Feature or adapter request
+description: A framework, ceiling type, exporter, or behaviour you need.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes: { label: What you are trying to do, description: The task, the framework, and where the current library stops short. }
+    validations: { required: true }
+  - type: textarea
+    id: shape
+    attributes: { label: What it could look like, description: Optional. An API sketch, a link to the framework's hook, a similar adapter. }

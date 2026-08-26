@@ -1,0 +1,23 @@
+name: Bug report
+description: Something behaves differently from what the docs say.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes: { label: Version, description: "pip show attenu-guard", placeholder: "attenu-guard 0.x.y · Python 3.x · framework + version" }
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes: { label: Minimal reproduction, description: The smallest script or command that shows it. Redact anything private., render: python }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: Expected vs actual }
+    validations: { required: true }
+  - type: checkboxes
+    id: sec
+    attributes:
+      label: Not a vulnerability
+      options:
+        - label: This is not a way to widen a child's authority, bypass a ceiling, or tamper with a ledger undetected (those go to the private advisory form).
+          required: true

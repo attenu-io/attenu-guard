@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/attenu-io/attenu-guard/security/advisories/new
+    about: Never in a public issue. GitHub's private advisory form reaches the maintainers only.
+  - name: Ask a question / show what you built
+    url: https://github.com/attenu-io/attenu-guard/discussions
+    about: Questions, ideas, and integration reports go to Discussions.
+  - name: Talk to us
+    url: https://attenu.io/contact/
+    about: Pilots, embedding the engine, anything that is not an issue.
