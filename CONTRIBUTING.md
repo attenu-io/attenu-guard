@@ -2,6 +2,12 @@
 
 Thanks for helping make agent delegation safe.
 
+## Where to ask
+
+Questions, ideas and "here is what I built" go to [Discussions](https://github.com/attenu-io/attenu-guard/discussions).
+Bugs and requests are [issues](https://github.com/attenu-io/attenu-guard/issues/new/choose). Vulnerabilities go to the
+private advisory form only (see `SECURITY.md`). Anything else: https://attenu.io/contact/.
+
 ## Ground rules
 
 - **DCO required.** Sign off every commit (`git commit -s`). By doing so you
