@@ -7,6 +7,7 @@ All notable changes to attenu-guard are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Haystack adapter** (`attenu_guard.adapters.haystack`, extra `haystack`, tested against `haystack-ai` 3.1.0): guards deepset Haystack `Agent`s and pipelines through `Tool.invoke`/`invoke_async` (a subclass of each tool's own class, so `ComponentTool`/`AgentTool` identity and the `inputs_from_state`/`outputs_to_string` machinery are untouched), mints the child `Guard` at the `AgentTool` call, and offers Haystack's own `before_tool` `ConfirmationHook` as an alternative denial path. Denials raise a `ToolInvocationError` subclass, so the Agent's existing `raise_on_tool_invocation_failure` decides between "tell the model" and "stop the run". Parent tracking is a `ContextVar`, so parallel delegations in one model turn are siblings, not a chain. Example + 26 offline tests; 13th framework in `docs/INTEGRATIONS.md`.
 - Supply chain: every release now carries SLSA build provenance (sigstore attestation via `actions/attest-build-provenance`); OpenSSF Scorecard runs weekly and on push; a `.pre-commit-hooks.yaml` exposes `attenu-guard verify` as a pre-commit hook for committed evidence bundles.
 
 ### Fixed

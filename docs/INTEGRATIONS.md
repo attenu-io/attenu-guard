@@ -37,10 +37,11 @@ Versions and file:line references are as of **August 2026**; they will drift.
 | **LlamaIndex** 0.14 | `AgentWorkflow(agents=[FunctionAgent(can_handoff_to=[…])])` with the injected `handoff` tool | wrap the `handoff` tool in `GuardedAgentWorkflow.get_tools()`; a refused delegation clears `next_agent` | `guarded_tool(fn, scope=…)` — a `FunctionTool` wrapper receiving the live `Context`; raises before the body; `_call_tool` turns it into `ToolOutput(is_error=True)` | `MockFunctionCallingLLM` with scripted `ToolCallBlock`s | `can_handoff_to` restricts *routing*, not authority; the target runs with its own tool list | 4 |
 | **Semantic Kernel** 1.36 | `HandoffOrchestration` (`Handoff-transfer_to_<Target>` functions per edge), agent-as-plugin | `AUTO_FUNCTION_INVOCATION` filter on the transfer function (SK's own handoff idiom) | `FUNCTION_INVOCATION` filter — not awaiting `next(context)` provably stops the body; covers auto tool-calling **and** direct `kernel.invoke` | scripted `ChatCompletionClientBase` with `FunctionCallContent`s | nothing parent-relative; note `Kernel.clone()` deep-copies plugins *and* filters (filters must be closures; state must not live in plugins) | 4 |
 | **Agno** 2.9 | `Team(members=[…])` — leader delegates via a generated `delegate_task_to_member` tool (hands over a task string) | `Team(tool_hooks=[…])` on the delegate function | `Agent(tool_hooks=[…])` — a hook that never calls `function_call(**args)` prevents the body (Agno sanitizes injected args *before* hooks "so a hook used as an authorization gate" is sound); `pre_hooks` are input guardrails, not tool gates | scripted `Model` returning tool calls | nothing: members keep their own tools, may hold **more** than the leader; leader `tool_hooks` don't propagate to members | 5 |
+| **Haystack** (deepset `haystack-ai`) 3.1 | `AgentTool` — a `ComponentTool` wrapping a whole `Agent` (`haystack/tools/agent_tool.py`) | the `AgentTool` call itself: Haystack has no separate delegation callback, so the delegation moment *is* a tool invocation; the child `Guard` rides a `ContextVar` for the sub-run (a turn's parallel calls each get their own `copy_context()`, so a fan-out is siblings, not a chain) | `Tool.invoke` / `Tool.invoke_async` via a subclass of the tool's **own** class (`tools/tool.py`; the only paths out of the run loop — `components/agents/tool_calling.py`), keeping `isinstance(tool, ComponentTool)` and the `inputs_from_state`/`outputs_to_string` machinery intact; alternatively a `ConfirmationStrategy` under `ConfirmationHook` at the `before_tool` hook point (`hooks/human_in_the_loop/hooks.py`, run before `_run_tool` in `agent.py`) | a scripted `ChatGenerator` component replaying `ToolCall`s | nothing: a sub-agent behind an `AgentTool` keeps its **own** tool list and may hold tools its caller lacks (pinned as `test_haystack_itself_does_not_attenuate_a_sub_agent`); the shipped `ConfirmationHook` is a per-tool human veto, not parent-relative | 5 |
 
-*Fit = how well the framework's official hooks carry an authorization decision (1–5). Twelve frameworks, twelve offline test suites, 213 tests; the Claude Agent SDK integration was additionally verified live.*
+*Fit = how well the framework's official hooks carry an authorization decision (1–5). Thirteen frameworks, thirteen offline test suites; the Claude Agent SDK integration was additionally verified live.*
 
-## Why these twelve
+## Why these thirteen
 
 Selection criteria (August 2026): (1) a Python framework with an **explicit delegation /
 handoff / sub-agent primitive** — the moment attenu-guard exists to guard; (2) coverage of
@@ -50,12 +51,13 @@ LangChain) plus the leading independents (CrewAI, Pydantic AI, LlamaIndex, Agno)
 API key; (4) at least one real multi-agent *application*, not just a framework (deepagents).
 GitHub stars at selection: CrewAI 57k · AutoGen 60k (in maintenance since 2026-04, superseded by
 Microsoft Agent Framework) · LlamaIndex 52k · Agno 42k · LangGraph 40k · smolagents 29k ·
-OpenAI Agents SDK 29k · Semantic Kernel 28k · deepagents 28k · ADK 21k · Pydantic AI 19k ·
-Claude Agent SDK 8k · Strands 7k. Deliberately not (yet): MCP and A2A (protocols, not
+OpenAI Agents SDK 29k · Semantic Kernel 28k · deepagents 28k · Haystack 26k · ADK 21k ·
+Pydantic AI 19k · Claude Agent SDK 8k · Strands 7k. Deliberately not (yet): MCP and A2A (protocols, not
 frameworks — an MCP server-side middleware is the natural next adapter), Microsoft Agent
 Framework (AutoGen+SK successor), CAMEL/MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak
-offline story), Letta/Haystack (no delegation primitive), Dify/Flowise/n8n (not
-Python-embeddable), and every non-Python stack (see "Other languages").
+offline story), Letta (no delegation primitive), Dify/Flowise/n8n (not
+Python-embeddable), and every non-Python stack (see "Other languages"). Haystack was in that
+list until 3.x shipped `AgentTool`, which is a delegation primitive; it was added in August 2026.
 
 ## Status of the framework findings
 

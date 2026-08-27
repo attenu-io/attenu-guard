@@ -107,6 +107,7 @@ jobs:
           - { fw: llama_index,     pkgs: "llama-index-core==0.14.23" }
           - { fw: semantic_kernel, pkgs: "semantic-kernel==1.36.0" }
           - { fw: agno,            pkgs: "agno==2.9.0" }
+          - { fw: haystack,        pkgs: "haystack-ai==3.1.0" }
           - { fw: mcp,             pkgs: "mcp==1.28.1" }
           - { fw: omnigent,        pkgs: "omnigent==0.10.0" }
           - { fw: claude_code,     pkgs: "" }
@@ -148,6 +149,7 @@ jobs:
           - { fw: llama_index,     pkgs: "llama-index-core" }
           - { fw: semantic_kernel, pkgs: "semantic-kernel" }
           - { fw: agno,            pkgs: "agno" }
+          - { fw: haystack,        pkgs: "haystack-ai" }
           - { fw: mcp,             pkgs: "mcp" }
           - { fw: omnigent,        pkgs: "omnigent" }
     name: integration-latest (${{ matrix.fw }})
