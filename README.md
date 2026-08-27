@@ -1,6 +1,6 @@
 # attenu-guard
 
-[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Draft specification](docs/draft-asor-wimse-agent-delegation-chain-00.md) · [Changelog](CHANGELOG.md)
+[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) · [Changelog](CHANGELOG.md)
 
 **Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
 
@@ -115,7 +115,7 @@ The protocol is designed to be IETF-acceptable: it reuses the OAuth/JOSE stack
 (JWT, RFC 9396 authorization_details, DPoP, Token Status List) and invents only
 the one missing piece — cryptographically-linked, subsumption-enforced, offline
 multi-hop attenuation. See [`docs/STANDARDS-ALIGNMENT.md`](docs/STANDARDS-ALIGNMENT.md)
-and the [draft specification](docs/draft-asor-wimse-agent-delegation-chain-00.md) (Internet-Draft format; not yet submitted to the IETF).
+and the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (individual submission, WIMSE; source in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-00.md)).
 
 ## What this is *not*
 

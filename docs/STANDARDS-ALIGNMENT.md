@@ -2,7 +2,7 @@
 
 *Verified against primary IETF sources, August 17, 2026. This document decides
 what we reuse, what we invent, where we take it, and how we get it adopted.
-Companion to the draft specification (`draft-asor-wimse-agent-delegation-chain-00.md`, written in Internet-Draft format; not yet submitted to the IETF)
+Companion to the Internet-Draft [draft-asor-wimse-agent-delegation-chain-00](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (individual submission, posted 2026-08-27; source `draft-asor-wimse-agent-delegation-chain-00.md`)
 and the DevX review (`DEVX-REVIEW.md`).*
 
 ## The one thing to internalize
