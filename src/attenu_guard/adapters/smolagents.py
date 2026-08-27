@@ -1,4 +1,4 @@
-"""dg_smolagents — a thin attenu-guard integration for smolagents.
+"""attenu_guard.adapters.smolagents — a thin attenu-guard integration for smolagents.
 
 Tested against smolagents 1.26.0 (Hugging Face, Apache-2.0), Python 3.12.
 

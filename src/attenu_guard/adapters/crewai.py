@@ -1,4 +1,4 @@
-"""dg_crewai — enforce attenu-guard authority attenuation inside CrewAI.
+"""attenu_guard.adapters.crewai — enforce attenu-guard authority attenuation inside CrewAI.
 
 Hook points used (CrewAI 1.15.16, paths relative to site-packages/)
 ------------------------------------------------------------------

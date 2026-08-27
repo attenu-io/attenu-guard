@@ -1,5 +1,5 @@
 """
-dg_llama_index — attenu-guard x LlamaIndex agents (llama-index-core 0.14.x).
+attenu_guard.adapters.llama_index — attenu-guard x LlamaIndex agents (llama-index-core 0.14.x).
 
 Two hook points, both on LlamaIndex's *public* extension surface:
 

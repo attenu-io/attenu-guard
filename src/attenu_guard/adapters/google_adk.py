@@ -1,7 +1,7 @@
 """
 attenu_guard.adapters.google_adk — a thin attenu-guard integration for Google ADK.
 
-Copy this file into your project. It is one `BasePlugin` subclass; you register
+Ships as `attenu_guard.adapters.google_adk` (`pip install 'attenu-guard[google-adk]'`). It is one `BasePlugin` subclass; you register
 it once on your `App` and every agent in the tree is covered.
 
 HOOK POINTS USED (verified against google-adk 2.7.1 in site-packages)
@@ -53,7 +53,7 @@ USAGE
     from google.adk.apps.app import App
     from google.adk.runners import Runner
     from attenu_guard import Authority, Guard, RowLimit, EgressRank
-    from dg_google_adk import DelegationGuardPlugin, ToolAuthority
+    from attenu_guard.adapters.google_adk import DelegationGuardPlugin, ToolAuthority
 
     root = Guard.issue("orchestrator", Authority(
         scopes={"crm.*", "mail.send"},

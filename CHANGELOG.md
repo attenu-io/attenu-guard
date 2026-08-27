@@ -6,6 +6,9 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Adapter docstrings still referred to the pre-rename paste-in module names (`dg_google_adk`, `dg_crewai`, `dg_smolagents`, `dg_llama_index`) and said "paste/copy this file"; they now name the packaged modules (`attenu_guard.adapters.<name>`) and the matching extras.
+
 ## [0.4.1] — 2026-08-26
 
 ### Fixed

@@ -1,7 +1,7 @@
 """
 attenu-guard x AWS Strands Agents — a thin enforcement adapter.
 
-Paste this file into your project. It uses `attenu_guard` unmodified and
+Ships as `attenu_guard.adapters.strands` (`pip install 'attenu-guard[strands]'`). It uses `attenu_guard` unmodified and
 only Strands' *public* hook API — no monkeypatching, no subclassing of Agent,
 Swarm or Graph.
 

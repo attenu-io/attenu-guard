@@ -49,7 +49,7 @@ from attenu_guard import (  # noqa: E402
     RowLimit,
 )
 
-# `dg_crewai` sits next to this file, so plain import works.
+# The adapter ships in the package as `attenu_guard.adapters.crewai`.
 from attenu_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
 
 ORCHESTRATOR = "orchestrator"
