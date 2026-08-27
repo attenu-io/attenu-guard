@@ -1,6 +1,6 @@
 # attenu-guard
 
-[attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) · [Changelog](CHANGELOG.md)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/attenu-io/attenu-guard/badge)](https://scorecard.dev/viewer/?uri=github.com/attenu-io/attenu-guard) [attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) · [Changelog](CHANGELOG.md)
 
 **Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
 

@@ -1,0 +1,13 @@
+# pre-commit hook: verify every committed attenu-guard evidence bundle offline.
+#   repos:
+#     - repo: https://github.com/attenu-io/attenu-guard
+#       rev: v0.4.1
+#       hooks:
+#         - id: attenu-guard-verify
+- id: attenu-guard-verify
+  name: attenu-guard verify (evidence bundles)
+  description: Verifies committed evidence bundles offline — integrity, child ⊆ parent, containment — with no key and no network.
+  entry: attenu-guard verify
+  language: python
+  files: '(^|/)[^/]*bundle[^/]*\.json$'
+  pass_filenames: true
