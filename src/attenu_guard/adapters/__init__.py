@@ -21,6 +21,10 @@ Available (see docs/INTEGRATIONS.md for hooks, versions and evidence):
     pydantic_ai      DelegationGuard (capability) / GuardedToolset — agent delegation
     crewai           CrewAIGuardBridge — allow_delegation / hierarchical crews
     autogen          GuardedWorkbench / GuardedHandoff — Swarm handoffs, AgentTool
+    agent_framework  DelegationGuard (function middleware) — Microsoft Agent Framework:
+                     Agent.as_tool, handoff orchestration
+    ag2              DelegationGuard / guarded_tools — AG2 1.0: Agent.as_tool,
+                     TaskConfig subtasks
     claude_sdk       DelegationGuardRegistry — subagents via PreToolUse/SubagentStart hooks
     smolagents       GuardedTool / DelegatedAgent — managed_agents
     strands          hooks + InterventionHandler — agents-as-tools, Swarm, Graph

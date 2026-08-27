@@ -18,7 +18,7 @@ import attenu_guard.adapters as adapters_pkg  # noqa: E402
 ADAPTERS_DIR = Path(adapters_pkg.__path__[0])
 ADAPTER_MODULES = sorted(m.name for m in pkgutil.iter_modules([str(ADAPTERS_DIR)]) if not m.name.startswith("_"))
 # adapters that hold a tool -> policy MAP and therefore have an "undeclared tool" refusal path
-POLICY_MAP_ADAPTERS = {"agno", "autogen", "claude_sdk", "crewai", "google_adk", "langchain", "pydantic_ai", "semantic_kernel"}
+POLICY_MAP_ADAPTERS = {"ag2", "agent_framework", "agno", "autogen", "claude_sdk", "crewai", "google_adk", "langchain", "pydantic_ai", "semantic_kernel"}
 
 
 class AdapterDispositionContract(unittest.TestCase):
@@ -41,7 +41,7 @@ class AdapterDispositionContract(unittest.TestCase):
             #     None means exempt BY DESIGN) have no such path and are exempt from (3).
             if name in POLICY_MAP_ADAPTERS and "Disposition.UNRESOLVED" not in src:
                 missing.append(f"{name}: undeclared tools are not recorded as unresolved")
-        self.assertGreaterEqual(seen, 12, f"expected 12 authorizing adapters, saw {seen}")
+        self.assertGreaterEqual(seen, 14, f"expected 14 authorizing adapters, saw {seen}")
         self.assertEqual(missing, [], "\n" + "\n".join(missing))
 
 

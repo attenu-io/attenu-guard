@@ -101,6 +101,8 @@ jobs:
           - { fw: pydantic_ai,     pkgs: "pydantic-ai-slim==2.31.1" }
           - { fw: crewai,          pkgs: "crewai==1.15.16" }
           - { fw: autogen,         pkgs: "autogen-agentchat==0.7.5 autogen-ext==0.7.5" }
+          - { fw: agent_framework, pkgs: "agent-framework==1.15.0" }
+          - { fw: ag2,             pkgs: "ag2==1.0.2" }
           - { fw: claude_sdk,      pkgs: "claude-agent-sdk==0.2.139" }
           - { fw: smolagents,      pkgs: "smolagents==1.26.0" }
           - { fw: strands,         pkgs: "strands-agents==1.52.0" }
@@ -145,6 +147,8 @@ jobs:
           - { fw: pydantic_ai,     pkgs: "pydantic-ai-slim" }
           - { fw: crewai,          pkgs: "crewai" }
           - { fw: autogen,         pkgs: "autogen-agentchat autogen-ext" }
+          - { fw: agent_framework, pkgs: "agent-framework" }
+          - { fw: ag2,             pkgs: "ag2" }
           - { fw: claude_sdk,      pkgs: "claude-agent-sdk" }
           - { fw: smolagents,      pkgs: "smolagents" }
           - { fw: strands,         pkgs: "strands-agents" }
