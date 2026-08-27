@@ -14,7 +14,8 @@ author:
     ins: R. Asor
     name: Rafael Asor
     organization: Attenu
-    uri: https://attenu.io/contact/
+    email: rafael.asor@gmail.com
+    uri: https://attenu.io/
 normative:
   RFC2119:
   RFC7515:  # JWS
