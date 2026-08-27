@@ -34,9 +34,6 @@ informative:
   RFC2693:  # SDSI/SPKI
   RFC8693:  # Token Exchange
   RFC8705:  # mTLS-bound tokens
-  RFC8747:  # CWT PoP
-  RFC8392:  # CWT
-  RFC9052:  # COSE
   RFC9964:  # ML-DSA for JOSE/COSE
   I-D.ietf-oauth-identity-chaining:
   I-D.reece-wimse-cross-org-delegation:
@@ -55,18 +52,17 @@ informative:
 AI agents increasingly delegate tasks to other agents. Each delegation should
 convey only a subset of the delegating party's authority, that subset should be
 bounded in scope, magnitude, and time, and any enforcement point should be able
-to verify — offline, with no call to an authorization server — that a token
+to verify -- offline, with no call to an authorization server -- that a token
 presented at hop N carries authority no greater than the token at hop N-1, back
-to a trusted root. OAuth 2.0 Token Exchange {{RFC8693}} models two-party
+to a trusted root. OAuth 2.0 Token Exchange (RFC 8693) models two-party
 delegation and records prior actors in a nested "act" claim, but that claim is
 informational only and cannot enforce attenuation across a chain of depth two or
 more. This document defines the Agent Delegation Chain: a profile of OAuth 2.0
-JWT access tokens {{RFC9068}} that carries authority as Rich Authorization
-Requests {{RFC9396}}, links each delegation to its parent by a cryptographic
+JWT access tokens (RFC 9068) that carries authority as Rich Authorization
+Requests (RFC 9396), links each delegation to its parent by a cryptographic
 byte-commitment, and specifies a deterministic offline verification algorithm
 that enforces monotonic attenuation, bounded depth, and monotonic expiry. It
-reuses existing JOSE, proof-of-possession {{RFC9449}}, and status-list
-{{I-D.ietf-oauth-status-list}} machinery and introduces no new cryptography.
+reuses existing JOSE, proof-of-possession (RFC 9449), and status-list machinery (the OAuth Status List draft) and introduces no new cryptography.
 
 --- middle
 
@@ -94,8 +90,8 @@ transaction tokens address related but distinct problems (crossing trust domains
 and propagating immutable context within one domain, respectively) and
 explicitly do not provide chained cryptographic attenuation.
 
-Capability systems that do provide offline attenuation — macaroons
-{{Macaroons}}, Biscuit {{Biscuit}} — either verify with a shared secret
+Capability systems that do provide offline attenuation -- macaroons
+{{Macaroons}}, Biscuit {{Biscuit}} -- either verify with a shared secret
 (macaroons: symmetric HMAC, so every verifier holds the minting key) or use a
 non-IETF wire format (Biscuit: protocol buffers with an embedded Datalog engine).
 The historical standards-track ancestor is SDSI/SPKI {{RFC2693}}.
