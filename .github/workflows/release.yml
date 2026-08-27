@@ -1,6 +1,7 @@
 name: release
 # Publishes to PyPI via trusted publishing when a version tag is pushed. Inert until the PyPI project
 # "attenu-guard" exists with this repository configured as its trusted publisher (environment: pypi).
+permissions: read-all
 on:
   push:
     tags: ["v*"]
@@ -12,8 +13,8 @@ jobs:
       id-token: write        # sigstore signing for the build attestation
       attestations: write    # SLSA provenance for every wheel/sdist
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.12" }
       - name: Version tag must match the package version
         run: |
@@ -25,10 +26,10 @@ jobs:
       - name: Check the distribution
         run: pip install -q twine && twine check dist/*
       - name: Attest build provenance (SLSA, sigstore)
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: dist, path: dist/ }
   publish:
     needs: build
@@ -38,7 +39,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: dist, path: dist/ }
       - name: Publish to PyPI (trusted publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
