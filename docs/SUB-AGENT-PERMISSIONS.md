@@ -50,7 +50,7 @@ summarizer.enforce("crm.export", context={"egress": "any"})        # raises Auth
 - **`check()` / `enforce()`** run before the tool body on every call, in your process; unknown ceiling types fail closed.
 - **Chain invariants** — depth, fan-out and aggregate budget ceilings — hold across every hop, and **`revoke()`** on any node denies every descendant immediately.
 - **The audit log** is hash-chained and Ed25519-signed; `attenu-guard verify bundle.json` checks integrity, *child ⊆ parent* and containment from the file alone — no account, no network, no vendor present. The [auditor's walkthrough](../examples/verify/README.md) has three sample bundles (clean, tampered, widened).
-- **Adapters** for LangGraph / deepagents, CrewAI, Google ADK, OpenAI Agents SDK, Claude Agent SDK, Pydantic AI, AutoGen, smolagents, AWS Strands, LlamaIndex, Semantic Kernel and Agno hook each framework's public API — no monkeypatching — and treat the framework's own delegation call as the moment the child is minted. See [`INTEGRATIONS.md`](INTEGRATIONS.md).
+- **Adapters** for LangGraph / deepagents, CrewAI, Google ADK, OpenAI Agents SDK, Claude Agent SDK, Pydantic AI, AutoGen, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno, Haystack, CAMEL-AI, Microsoft Agent Framework and AG2 hook each framework's public API — no monkeypatching — and treat the framework's own delegation call as the moment the child is minted. See [`INTEGRATIONS.md`](INTEGRATIONS.md).
 
 ## What has been measured
 
