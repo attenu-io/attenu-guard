@@ -1,0 +1,30 @@
+[project]
+name = "attenu-guard-recipe"
+version = "0.1.0"
+description = "A customer-service coordinator whose billing sub-agent holds a strict subset of the coordinator's permissions, enforced before each tool body runs."
+license = {text = "Apache License 2.0"}
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "google-adk>=2.7",
+    "google-genai>=1.9.0",
+    "attenu-guard[google-adk,crypto]>=0.4,<0.5",
+    "python-dotenv>=1.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple/"
+default = true
