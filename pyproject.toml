@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [{ name = "Attenu" }]
-keywords = ["ai", "agents", "security", "authorization", "least-privilege", "delegation", "sub-agents", "audit-log", "mcp", "a2a", "owasp", "langgraph", "langchain", "crewai", "openai-agents", "google-adk", "autogen", "claude-agent-sdk", "pydantic-ai", "smolagents", "strands", "llama-index", "semantic-kernel", "agno"]
+keywords = ["ai", "agents", "security", "authorization", "least-privilege", "delegation", "sub-agents", "audit-log", "mcp", "a2a", "owasp", "langgraph", "langchain", "crewai", "openai-agents", "google-adk", "autogen", "claude-agent-sdk", "pydantic-ai", "smolagents", "strands", "llama-index", "semantic-kernel", "agno", "agent-framework", "ag2"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -41,6 +41,8 @@ google-adk = ["google-adk>=2.7"]
 pydantic-ai = ["pydantic-ai-slim>=2.31"]
 crewai = ["crewai>=1.15"]
 autogen = ["autogen-agentchat>=0.7", "autogen-ext>=0.7"]
+agent-framework = ["agent-framework>=1.15"]   # adapters.agent_framework: Microsoft Agent Framework (the AutoGen + SK successor)
+ag2 = ["ag2>=1.0"]                            # adapters.ag2: AG2 1.0, the AutoGen fork (package `ag2`)
 claude-agent-sdk = ["claude-agent-sdk>=0.2"]
 smolagents = ["smolagents>=1.26"]
 strands = ["strands-agents>=1.52"]

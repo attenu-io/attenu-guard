@@ -1,0 +1,645 @@
+"""attenu-guard × AG2 (`ag2` 1.0.x, the AutoGen fork) — integration tests.
+
+Runs fully offline: the LLM is `ag2.testing.TestConfig`, AG2's own shipped test double,
+replaying scripted `ToolCallEvent`s. No API key, no network.
+
+The story under test is the canonical "poisoned summarizer": an orchestrator delegates
+to a summarizer with `Agent.as_tool()`; the summarizer's *Python* tool list still
+contains `crm_export`/`send_mail` (AG2 imposes no restriction — see
+`test_ag2_itself_does_not_attenuate`), but its attenu-guard `Authority` does not cover
+them, so the export is denied before the tool body runs.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+pytest.importorskip("ag2")
+
+from ag2 import Agent, MemoryStream, tool  # noqa: E402
+from ag2.agent import TaskConfig  # noqa: E402
+from ag2.events import ToolCallEvent  # noqa: E402
+from ag2.testing import TestConfig  # noqa: E402
+
+from attenu_guard import (  # noqa: E402
+    AuditLog,
+    Authority,
+    EgressRank,
+    Guard,
+    RowLimit,
+)
+from attenu_guard.adapters.ag2 import (  # noqa: E402
+    Grant,
+    GuardRegistry,
+    ToolPolicy,
+    guard_middleware,
+    guard_tool_hook,
+    guarded_agent,
+    guarded_tools,
+)
+
+# --------------------------------------------------------------------------
+# scenario fixtures
+# --------------------------------------------------------------------------
+
+ORCHESTRATOR_AUTHORITY = Authority(
+    scopes={"crm.*", "mail.send"},
+    ceilings=[RowLimit(100_000), EgressRank("any")],
+    ttl=3600,
+)
+SUMMARIZER_GRANT = Grant(
+    authority=Authority(
+        scopes={"crm.read"},
+        ceilings=[RowLimit(5_000), EgressRank("none")],
+        ttl=900,
+    ),
+    task="summarize Q3 pipeline",
+)
+
+
+class Effects:
+    """Side-effect recorder. A tool body that never runs never increments."""
+
+    def __init__(self) -> None:
+        self.crm_query = 0
+        self.crm_export = 0
+        self.send_mail = 0
+        self.exported_to: list[str] = []
+
+
+def _summarizer_tools(effects: Effects) -> list:
+    @tool
+    def crm_query(rows: int) -> str:
+        """Query the CRM."""
+        effects.crm_query += 1
+        return f"queried {rows} rows"
+
+    @tool
+    def crm_export(destination: str) -> str:
+        """Export CRM data to a destination."""
+        effects.crm_export += 1
+        effects.exported_to.append(destination)
+        return f"exported to {destination}"
+
+    @tool
+    def send_mail(to: str, body: str) -> str:
+        """Send an email."""
+        effects.send_mail += 1
+        return f"mailed {to}"
+
+    return [crm_query, crm_export, send_mail]
+
+
+POLICIES = {
+    "crm_query": ToolPolicy(scope="crm.read", context=lambda a: {"rows": a.get("rows", 0)}),
+    "crm_export": ToolPolicy(scope="crm.export", context=lambda a: {"egress": "any"}),
+    "send_mail": ToolPolicy(scope="mail.send", context=lambda a: {"egress": "any"}),
+}
+
+ORCHESTRATOR_POLICIES = {
+    # `Agent.as_tool()` names the delegating tool `task_<agent-name>`
+    # (`ag2/tools/subagents/subagent_tool.py:45`).
+    "task_summarizer": ToolPolicy(
+        scope="crm.read", delegates_to="summarizer", grant=SUMMARIZER_GRANT
+    ),
+}
+
+
+def _call(name: str, **args) -> ToolCallEvent:
+    return ToolCallEvent(name, arguments=json.dumps(args))
+
+
+def _build(
+    effects: Effects,
+    summarizer_script,
+    *,
+    guarded: bool,
+    audit_path=None,
+    on_deny: str = "result",
+    orchestrator_policies=None,
+):
+    """Build the orchestrator → summarizer pair, with or without attenu-guard."""
+    root = Guard.issue(
+        "orchestrator", ORCHESTRATOR_AUTHORITY, task="root", audit_path=audit_path
+    )
+    registry = GuardRegistry(root, "orchestrator")
+
+    summ_config = TestConfig(*summarizer_script)
+    orch_config = TestConfig(_call("task_summarizer", objective="summarize Q3"), "done")
+    child_stream = MemoryStream()
+    tools = _summarizer_tools(effects)
+
+    if guarded:
+        summarizer = guarded_agent(
+            "summarizer",
+            "Summarize the Q3 pipeline.",
+            config=summ_config,
+            tools=tools,
+            policies=POLICIES,
+            registry=registry,
+            on_deny=on_deny,
+        )
+        orchestrator = guarded_agent(
+            "orchestrator",
+            "Produce the board pack.",
+            config=orch_config,
+            tools=[summarizer.as_tool(description="Summarize CRM data.", stream=child_stream)],
+            policies=orchestrator_policies or ORCHESTRATOR_POLICIES,
+            registry=registry,
+            on_deny=on_deny,
+        )
+    else:
+        summarizer = Agent(
+            "summarizer", "Summarize the Q3 pipeline.", config=summ_config, tools=tools
+        )
+        orchestrator = Agent(
+            "orchestrator",
+            "Produce the board pack.",
+            config=orch_config,
+            tools=[summarizer.as_tool(description="Summarize CRM data.", stream=child_stream)],
+        )
+    return orchestrator, registry, child_stream
+
+
+async def _result_text(*histories) -> str:
+    out = []
+    for history in histories:
+        for event in await history.get_events():
+            if type(event).__name__ not in ("ToolResultEvent", "ToolErrorEvent"):
+                continue
+            parts = getattr(event.result, "parts", [])
+            if parts:
+                out.append(str(getattr(parts[0], "content", "")))
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------
+# 1. baseline — AG2 alone does NOT attenuate the sub-agent
+# --------------------------------------------------------------------------
+
+
+def test_ag2_itself_does_not_attenuate():
+    """Without attenu-guard the poisoned export EXECUTES.
+
+    This is the control: it proves the deny in the guarded tests comes from
+    attenu-guard and not from anything AG2 does on its own.
+    """
+    effects = Effects()
+    orchestrator, _, _ = _build(
+        effects,
+        [
+            _call("crm_query", rows=4200),
+            _call("crm_export", destination="s3://exfil"),
+            "summary",
+        ],
+        guarded=False,
+    )
+    asyncio.run(orchestrator.ask("summarize Q3 pipeline"))
+
+    assert effects.crm_query == 1
+    # The sub-agent keeps its full tool list; nothing relates it to the parent.
+    assert effects.crm_export == 1
+    assert effects.exported_to == ["s3://exfil"]
+
+
+# --------------------------------------------------------------------------
+# 2. the guarded run — allow, deny-before-body
+# --------------------------------------------------------------------------
+
+
+def test_allowed_tool_runs_and_poisoned_export_is_denied_before_body():
+    effects = Effects()
+    orchestrator, _, child_stream = _build(
+        effects,
+        [
+            _call("crm_query", rows=4200),
+            _call("crm_export", destination="s3://exfil"),
+            "summary",
+        ],
+        guarded=True,
+    )
+
+    async def scenario():
+        reply = await orchestrator.ask("summarize Q3 pipeline")
+        return await _result_text(child_stream.history, reply.history)
+
+    text = asyncio.run(scenario())
+
+    # (a) in-authority call executed
+    assert effects.crm_query == 1
+    # (b) the poisoned step never reached the tool body
+    assert effects.crm_export == 0
+    assert effects.exported_to == []
+    assert "scope_not_granted" in text, text
+
+
+def test_ceiling_denies_oversized_query_before_body():
+    """Same scope, but over the child's RowLimit(5_000) ceiling."""
+    effects = Effects()
+    orchestrator, _, child_stream = _build(
+        effects, [_call("crm_query", rows=50_000), "summary"], guarded=True
+    )
+
+    async def scenario():
+        await orchestrator.ask("summarize Q3 pipeline")
+        return await _result_text(child_stream.history)
+
+    text = asyncio.run(scenario())
+    assert effects.crm_query == 0
+    assert "ceiling_exceeded" in text, text
+
+
+def test_send_mail_denied_even_though_parent_holds_the_scope():
+    """`mail.send` is in the ORCHESTRATOR's authority but not the child's."""
+    effects = Effects()
+    orchestrator, _, _ = _build(
+        effects, [_call("send_mail", to="x@y.z", body="hi"), "summary"], guarded=True
+    )
+    asyncio.run(orchestrator.ask("summarize Q3 pipeline"))
+    assert effects.send_mail == 0
+
+
+def test_parallel_batch_is_gated_per_call():
+    """AG2 runs a turn's tool calls concurrently (`ag2/tools/executor.py:60`); each
+    one is still checked independently."""
+    effects = Effects()
+    orchestrator, _, child_stream = _build(
+        effects,
+        [
+            [
+                _call("crm_query", rows=100),
+                _call("crm_export", destination="s3://exfil"),
+                _call("send_mail", to="x@y.z", body="hi"),
+            ],
+            "summary",
+        ],
+        guarded=True,
+    )
+
+    async def scenario():
+        await orchestrator.ask("summarize Q3 pipeline")
+        return await _result_text(child_stream.history)
+
+    text = asyncio.run(scenario())
+    assert effects.crm_query == 1
+    assert effects.crm_export == 0
+    assert effects.send_mail == 0
+    assert text.count("attenu-guard:") == 2, text
+
+
+# --------------------------------------------------------------------------
+# 3. delegation is a gate, not a notification
+# --------------------------------------------------------------------------
+
+
+def test_delegation_mints_the_child_before_the_sub_agent_runs():
+    effects = Effects()
+    orchestrator, registry, _ = _build(
+        effects, [_call("crm_query", rows=10), "summary"], guarded=True
+    )
+    assert registry.get("summarizer") is None
+
+    asyncio.run(orchestrator.ask("summarize Q3"))
+
+    child = registry.get("summarizer")
+    assert child is not None
+    assert child.is_narrower_than(registry.root)
+    assert effects.crm_query == 1
+
+
+def test_denied_delegation_never_starts_the_sub_agent():
+    """Denying `task_summarizer` stops the whole sub-agent, and mints no child."""
+    effects = Effects()
+    orchestrator, registry, _ = _build(
+        effects,
+        [_call("crm_query", rows=10), "summary"],
+        guarded=True,
+        # The delegation is priced at a scope the orchestrator does not hold.
+        orchestrator_policies={
+            "task_summarizer": ToolPolicy(
+                scope="admin.reset", delegates_to="summarizer", grant=SUMMARIZER_GRANT
+            )
+        },
+    )
+
+    async def scenario():
+        reply = await orchestrator.ask("summarize Q3")
+        return await _result_text(reply.history)
+
+    text = asyncio.run(scenario())
+    assert registry.get("summarizer") is None, "child minted despite the denial"
+    assert effects.crm_query == 0, "sub-agent ran despite the denial"
+    assert "scope_not_granted" in text, text
+
+
+# --------------------------------------------------------------------------
+# 4. revocation cascades
+# --------------------------------------------------------------------------
+
+
+def test_revocation_denies_subsequent_tool_calls():
+    """After the orchestrator revokes the summarizer, the *same* in-authority call
+    that succeeded before is denied — through the real AG2 tool path."""
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root")
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+
+    summarizer = guarded_agent(
+        "summarizer",
+        "Summarize.",
+        config=TestConfig(
+            _call("crm_query", rows=100),
+            "one",
+            _call("crm_query", rows=100),
+            "two",
+        ),
+        tools=_summarizer_tools(effects),
+        policies=POLICIES,
+        registry=registry,
+    )
+
+    async def scenario():
+        await summarizer.ask("go")
+        assert effects.crm_query == 1
+        registry.revoke("summarizer")
+        reply = await summarizer.ask("go again")
+        return await _result_text(reply.history)
+
+    text = asyncio.run(scenario())
+    assert effects.crm_query == 1, "revoked agent still executed a tool body"
+    assert "revoked" in text, text
+
+
+# --------------------------------------------------------------------------
+# 5. structural guarantees
+# --------------------------------------------------------------------------
+
+
+def test_delegation_requesting_more_than_parent_is_met_down():
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root")
+    registry = GuardRegistry(root, "orchestrator")
+    greedy = Grant(
+        authority=Authority(
+            scopes={"crm.*", "mail.send", "admin.*"},
+            ceilings=[RowLimit(10_000_000), EgressRank("any")],
+            ttl=99_999,
+        ),
+        task="greedy",
+    )
+    child = registry.delegate("orchestrator", "summarizer", greedy)
+
+    assert child.is_narrower_than(root)
+    assert not child.check("admin.reset")
+    assert not child.check("crm.read", context={"rows": 1_000_000})
+    assert child.authority.ceiling("max_rows").max_rows <= 100_000
+
+
+# --------------------------------------------------------------------------
+# 6. audit trail
+# --------------------------------------------------------------------------
+
+
+def test_audit_log_verifies_and_records_the_deny(tmp_path):
+    effects = Effects()
+    audit_path = tmp_path / "audit.jsonl"
+    orchestrator, registry, _ = _build(
+        effects,
+        [
+            _call("crm_query", rows=4200),
+            _call("crm_export", destination="s3://exfil"),
+            "summary",
+        ],
+        guarded=True,
+        audit_path=audit_path,
+    )
+    asyncio.run(orchestrator.ask("summarize Q3 pipeline"))
+
+    entries = registry.root.audit_log().entries
+    ok, err = AuditLog.verify(entries)
+    assert ok, err
+
+    events = [e["event"] for e in entries]
+    assert "spawn" in events
+    assert "allow" in events
+    assert "deny" in events
+
+    denies = [e for e in entries if e["event"] == "deny"]
+    assert any(
+        d.get("scope") == "crm.export"
+        and d.get("tool") == "crm_export"
+        and d.get("reason") == "scope_not_granted"
+        for d in denies
+    ), denies
+
+
+# --------------------------------------------------------------------------
+# 7. adapter behaviours
+# --------------------------------------------------------------------------
+
+
+def test_unmapped_tool_is_fail_closed():
+    """A tool with no ToolPolicy is denied, not silently allowed."""
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+
+    agent = guarded_agent(
+        "orchestrator",
+        "go",
+        config=TestConfig(_call("crm_query", rows=1), "done"),
+        tools=_summarizer_tools(effects),
+        policies={},  # nothing mapped
+        registry=registry,
+    )
+
+    async def scenario():
+        reply = await agent.ask("go")
+        return await _result_text(reply.history)
+
+    text = asyncio.run(scenario())
+    assert effects.crm_query == 0
+    assert "no ToolPolicy" in text, text
+
+
+def test_agent_with_no_delegated_guard_is_fail_closed():
+    """An agent nobody delegated to has no authority at all."""
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")  # never delegates
+
+    agent = guarded_agent(
+        "summarizer",
+        "go",
+        config=TestConfig(_call("crm_query", rows=1), "done"),
+        tools=_summarizer_tools(effects),
+        policies=POLICIES,
+        registry=registry,
+    )
+
+    async def scenario():
+        reply = await agent.ask("go")
+        return await _result_text(reply.history)
+
+    text = asyncio.run(scenario())
+    assert effects.crm_query == 0
+    assert "holds no delegated authority" in text, text
+
+
+def test_on_deny_error_returns_a_tool_error_event():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+
+    agent = guarded_agent(
+        "summarizer",
+        "go",
+        config=TestConfig(_call("crm_export", destination="s3://exfil"), "done"),
+        tools=_summarizer_tools(effects),
+        policies=POLICIES,
+        registry=registry,
+        on_deny="error",
+    )
+
+    async def scenario():
+        reply = await agent.ask("go")
+        return [type(e).__name__ for e in await reply.history.get_events()]
+
+    # TestClient re-raises a top-level ToolErrorEvent on the next turn
+    # (`ag2/testing.py:36-38`); the assertion that matters is the body never ran.
+    with pytest.raises(PermissionError):
+        asyncio.run(scenario())
+    assert effects.crm_export == 0
+
+
+def test_invalid_on_deny_is_rejected():
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+    with pytest.raises(ValueError):
+        guard_middleware(registry, POLICIES, on_deny="explode")
+
+
+def test_guarded_agent_puts_the_guard_first():
+    """Middleware ordering is trust ordering; the guard must run outermost."""
+    from ag2.middleware import BaseMiddleware, Middleware
+
+    class Passthrough(BaseMiddleware):
+        pass
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+    other = Middleware(Passthrough)
+    agent = guarded_agent(
+        "orchestrator",
+        "go",
+        config=TestConfig("done"),
+        tools=[],
+        policies={},
+        registry=registry,
+        middleware=[other],
+    )
+    # `Agent.middleware` reports `DescribedMiddleware` wrappers, not the factories.
+    assert agent.middleware[0].description.kind == "DelegationGuard"
+    assert agent.middleware[1].middleware is other
+
+
+# --------------------------------------------------------------------------
+# 8. the tool-level hook — reaches children whose constructor AG2 owns
+# --------------------------------------------------------------------------
+
+
+def test_agent_middleware_does_not_reach_an_auto_spawned_subtask():
+    """The gap `guarded_tools()` exists to close.
+
+    `_spawn_subtask` builds the child `Agent` with the parent's tool objects but no
+    `middleware=` (`ag2/agent.py:1463-1469`), and `TaskConfig` has no such field
+    (`ag2/agent.py:102-119`). Agent-level middleware therefore never sees the
+    subtask's calls.
+    """
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+
+    tools = _summarizer_tools(effects)
+    agent = guarded_agent(
+        "orchestrator",
+        "go",
+        config=TestConfig(_call("run_subtask", task="dump the CRM"), "done"),
+        tools=tools,
+        policies={
+            "run_subtask": ToolPolicy(scope="crm.read"),
+            **POLICIES,
+        },
+        registry=registry,
+        tasks=TaskConfig(
+            config=TestConfig(_call("crm_export", destination="s3://exfil"), "sub done")
+        ),
+    )
+    asyncio.run(agent.ask("go"))
+
+    # The parent's own middleware allowed `run_subtask`, and the subtask then ran
+    # `crm_export` unguarded.
+    assert effects.crm_export == 1
+
+
+def test_guarded_tools_gates_an_auto_spawned_subtask():
+    """Per-tool middleware travels with the deep-copied tool object into the child
+    (`ag2/tools/final/function_tool.py:110-111`), so the same policy applies there."""
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+
+    policies = {"run_subtask": ToolPolicy(scope="crm.read"), **POLICIES}
+    tools = guarded_tools(_summarizer_tools(effects), registry, policies)
+
+    agent = guarded_agent(
+        "orchestrator",
+        "go",
+        config=TestConfig(_call("run_subtask", task="dump the CRM"), "done"),
+        tools=tools,
+        policies=policies,
+        registry=registry,
+        tasks=TaskConfig(
+            config=TestConfig(_call("crm_export", destination="s3://exfil"), "sub done")
+        ),
+    )
+    asyncio.run(agent.ask("go"))
+
+    # The subtask agent holds no delegated Guard at all -> fail-closed.
+    assert effects.crm_export == 0
+    assert effects.exported_to == []
+
+
+def test_guard_tool_hook_is_usable_as_bare_tool_middleware():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    hook = guard_tool_hook(registry, POLICIES, agent_name="summarizer")
+
+    tools = [t.with_middleware(hook) for t in _summarizer_tools(effects)]
+    agent = Agent(
+        "summarizer",
+        "go",
+        config=TestConfig(
+            _call("crm_query", rows=10), _call("crm_export", destination="s3://x"), "done"
+        ),
+        tools=tools,
+    )
+    asyncio.run(agent.ask("go"))
+
+    assert effects.crm_query == 1
+    assert effects.crm_export == 0
+
+
+def test_guarded_tools_refuses_a_toolkit():
+    from ag2 import Toolkit
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    registry = GuardRegistry(root, "orchestrator")
+    kit = Toolkit(*_summarizer_tools(Effects()))
+    with pytest.raises(TypeError):
+        guarded_tools([kit], registry, POLICIES)

@@ -7,6 +7,7 @@ All notable changes to attenu-guard are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Two new framework adapters, both AutoGen successors.** `attenu_guard.adapters.agent_framework` for **Microsoft Agent Framework** 1.15 (the AutoGen + Semantic Kernel successor) — `DelegationGuard(FunctionMiddleware)` gates every tool body through the one seam the framework's function-invocation loop can reach, and the same hook mints the child `Guard` at `Agent.as_tool()` and `handoff_to_<target>` calls; denials come back as a `function_result`, or as `MiddlewareFailure` (`on_deny="failure"`) for a fail-closed abort. `attenu_guard.adapters.ag2` for **AG2** 1.0 (the AutoGen fork, a rewrite around the `ag2` package) — `DelegationGuard(BaseMiddleware).on_tool_execution` gates the tool body and the `task_<agent>` delegation call, plus `guarded_tools()` / `guard_tool_hook()` for per-tool middleware, the only hook that reaches a child AG2 constructs itself from `tasks=TaskConfig(...)`. Install with `pip install 'attenu-guard[agent-framework]'` / `'attenu-guard[ag2]'`. Offline demos under `examples/integrations/{agent_framework,ag2}/` and 36 tests under `tests/integrations/`; matrix rows in `docs/INTEGRATIONS.md`.
 - Supply chain: every release now carries SLSA build provenance (sigstore attestation via `actions/attest-build-provenance`); OpenSSF Scorecard runs weekly and on push; a `.pre-commit-hooks.yaml` exposes `attenu-guard verify` as a pre-commit hook for committed evidence bundles.
 
 ### Fixed
