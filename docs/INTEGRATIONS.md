@@ -46,7 +46,7 @@ Beyond the matrix: a **Langflow** custom component (`examples/integrations/langf
 tests) — Langflow is a visual builder, so the unit there is a component in the editor rather
 than an adapter module. See the section below.
 
-## Why these thirteen
+## Why these fourteen
 
 Selection criteria (August 2026): (1) a Python framework with an **explicit delegation /
 handoff / sub-agent primitive** — the moment attenu-guard exists to guard; (2) coverage of
