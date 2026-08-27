@@ -38,8 +38,13 @@ Versions and file:line references are as of **August 2026**; they will drift.
 | **Semantic Kernel** 1.36 | `HandoffOrchestration` (`Handoff-transfer_to_<Target>` functions per edge), agent-as-plugin | `AUTO_FUNCTION_INVOCATION` filter on the transfer function (SK's own handoff idiom) | `FUNCTION_INVOCATION` filter — not awaiting `next(context)` provably stops the body; covers auto tool-calling **and** direct `kernel.invoke` | scripted `ChatCompletionClientBase` with `FunctionCallContent`s | nothing parent-relative; note `Kernel.clone()` deep-copies plugins *and* filters (filters must be closures; state must not live in plugins) | 4 |
 | **Agno** 2.9 | `Team(members=[…])` — leader delegates via a generated `delegate_task_to_member` tool (hands over a task string) | `Team(tool_hooks=[…])` on the delegate function | `Agent(tool_hooks=[…])` — a hook that never calls `function_call(**args)` prevents the body (Agno sanitizes injected args *before* hooks "so a hook used as an authorization gate" is sound); `pre_hooks` are input guardrails, not tool gates | scripted `Model` returning tool calls | nothing: members keep their own tools, may hold **more** than the leader; leader `tool_hooks` don't propagate to members | 5 |
 | **Haystack** (deepset `haystack-ai`) 3.1 | `AgentTool` — a `ComponentTool` wrapping a whole `Agent` (`haystack/tools/agent_tool.py`) | the `AgentTool` call itself: Haystack has no separate delegation callback, so the delegation moment *is* a tool invocation; the child `Guard` rides a `ContextVar` for the sub-run (a turn's parallel calls each get their own `copy_context()`, so a fan-out is siblings, not a chain) | `Tool.invoke` / `Tool.invoke_async` via a subclass of the tool's **own** class (`tools/tool.py`; the only paths out of the run loop — `components/agents/tool_calling.py`), keeping `isinstance(tool, ComponentTool)` and the `inputs_from_state`/`outputs_to_string` machinery intact; alternatively a `ConfirmationStrategy` under `ConfirmationHook` at the `before_tool` hook point (`hooks/human_in_the_loop/hooks.py`, run before `_run_tool` in `agent.py`) | a scripted `ChatGenerator` component replaying `ToolCall`s | nothing: a sub-agent behind an `AgentTool` keeps its **own** tool list and may hold tools its caller lacks (pinned as `test_haystack_itself_does_not_attenuate_a_sub_agent`); the shipped `ConfirmationHook` is a per-tool human veto, not parent-relative | 5 |
+| **CAMEL-AI** 0.2.90 | `AgentToolkit.agent_run_subagent` (`toolkits/agent_toolkit.py:286`) — a persistent sub-agent per session; `Workforce` posts tasks to workers over a channel (`societies/workforce/workforce.py:4071`) | the delegation call itself, via a `GuardedAgentToolkit` subclass — no framework hook fires at handoff | `FunctionTool` subclass overriding **both** `__call__` (`toolkits/function_tool.py:613`) and `async_call` (`:700`), the two ends of every path: `ChatAgent._execute_tool` `tool(**args)` (`chat_agent.py:4048`), `_aexecute_tool`'s `tool.func.async_call` → `tool.async_call` ladder (`:4093-4099`), and the streaming twins (`:5031`, `:5165-5172`) | scripted `BaseModelBackend` returning `ChatCompletion`s with tool calls | nothing: `_create_subagent` (`agent_toolkit.py:161`) builds the child from `ChatAgent._clone_tools()` (`chat_agent.py:6183`) — a copy of the parent's **whole** toolset, `agent_run_subagent` included, so the child can delegate onward with everything too; a Workforce worker's tools are fixed at construction, not per assignment | 4 |
 
-*Fit = how well the framework's official hooks carry an authorization decision (1–5). Thirteen frameworks, thirteen offline test suites; the Claude Agent SDK integration was additionally verified live.*
+*Fit = how well the framework's official hooks carry an authorization decision (1–5). Fourteen frameworks, fourteen offline test suites; the Claude Agent SDK integration was additionally verified live.*
+
+Beyond the matrix: a **Langflow** custom component (`examples/integrations/langflow/`, 25 offline
+tests) — Langflow is a visual builder, so the unit there is a component in the editor rather
+than an adapter module. See the section below.
 
 ## Why these thirteen
 
@@ -54,10 +59,14 @@ Microsoft Agent Framework) · LlamaIndex 52k · Agno 42k · LangGraph 40k · smo
 OpenAI Agents SDK 29k · Semantic Kernel 28k · deepagents 28k · Haystack 26k · ADK 21k ·
 Pydantic AI 19k · Claude Agent SDK 8k · Strands 7k. Deliberately not (yet): MCP and A2A (protocols, not
 frameworks — an MCP server-side middleware is the natural next adapter), Microsoft Agent
-Framework (AutoGen+SK successor), CAMEL/MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak
+Framework (AutoGen+SK successor), MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak
 offline story), Letta (no delegation primitive), Dify/Flowise/n8n (not
-Python-embeddable), and every non-Python stack (see "Other languages"). Haystack was in that
-list until 3.x shipped `AgentTool`, which is a delegation primitive; it was added in August 2026.
+Python-embeddable), and every non-Python stack (see "Other languages"). Haystack and CAMEL were in that
+list until Haystack 3.x shipped `AgentTool` and CAMEL's `AgentToolkit`/`Workforce` proved hookable; both were added in August 2026.
+
+**Added since (August 2026):** CAMEL-AI (row above — a persistent sub-agent primitive and a
+clean offline model path), and a Langflow custom component (below — Langflow is a visual
+builder, so the unit is a component in the editor rather than an adapter module).
 
 ## Status of the framework findings
 
@@ -70,6 +79,26 @@ default workflow path (`workflow/utils/_transfer_utils.py`) still has no check �
 goes through on 2.7.1 and carries the message that will fire the day it stops. When the project goes public the intent is to
 file each as a constructive upstream issue with the repro and a suggested fix (child ⊆ parent
 "meet" semantics; fail-closed hook dispatch), and to keep this document as the citation.
+
+## Langflow — the visual builder
+
+Langflow composes flows in a browser rather than in Python, so the unit of integration is a
+**custom component** you drop into the editor, not an adapter module:
+[`examples/integrations/langflow/attenu_guard_component.py`](../examples/integrations/langflow/).
+
+Langflow tools are LangChain `BaseTool`s, so hook (2) is the same funnel as the LangChain
+adapter's: `BaseTool.invoke` -> `run` -> `_run`, wrapped with a
+`langchain_core.tools.StructuredTool` that authorizes and only then calls
+`inner.invoke(...)`, mirroring `name` / `description` / `args_schema`. Hook (1) is an **edge in
+the flow**: the component exposes its `Guard` as an output and accepts one on a `Parent
+Authority` input, and connecting them mints the downstream agent's authority with
+`parent.delegate(...)`. Two chained components is a delegation whose child can only be
+narrower, drawn rather than coded.
+
+The component also emits an `Evidence` output — the delegation graph, the audit log, and the
+result of re-verifying it — so a flow's authorization history is inspectable from inside the
+editor. Tested against lfx 1.11.5 / langchain-core 1.5; the parsing and wrapping half of the
+test suite runs with Langflow absent.
 
 ## Other languages
 

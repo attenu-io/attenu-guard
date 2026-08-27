@@ -108,6 +108,8 @@ jobs:
           - { fw: semantic_kernel, pkgs: "semantic-kernel==1.36.0" }
           - { fw: agno,            pkgs: "agno==2.9.0" }
           - { fw: haystack,        pkgs: "haystack-ai==3.1.0" }
+          - { fw: camel,           pkgs: "camel-ai==0.2.90 'mcp<2'" }   # camel-ai 0.2.90 imports mcp.server.FastMCP, gone in mcp 2.x
+          - { fw: langflow,        pkgs: "lfx==1.11.5" }                 # Langflow's component base; the full langflow package is not needed to import the component
           - { fw: mcp,             pkgs: "mcp==1.28.1" }
           - { fw: omnigent,        pkgs: "omnigent==0.10.0" }
           - { fw: claude_code,     pkgs: "" }
@@ -150,6 +152,8 @@ jobs:
           - { fw: semantic_kernel, pkgs: "semantic-kernel" }
           - { fw: agno,            pkgs: "agno" }
           - { fw: haystack,        pkgs: "haystack-ai" }
+          - { fw: camel,           pkgs: "camel-ai" }
+          - { fw: langflow,        pkgs: "lfx" }
           - { fw: mcp,             pkgs: "mcp" }
           - { fw: omnigent,        pkgs: "omnigent" }
     name: integration-latest (${{ matrix.fw }})

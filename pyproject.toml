@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 authors = [{ name = "Attenu" }]
-keywords = ["ai", "agents", "security", "authorization", "least-privilege", "delegation", "sub-agents", "audit-log", "mcp", "a2a", "owasp", "langgraph", "langchain", "crewai", "openai-agents", "google-adk", "autogen", "claude-agent-sdk", "pydantic-ai", "smolagents", "strands", "llama-index", "semantic-kernel", "agno"]
+keywords = ["ai", "agents", "security", "authorization", "least-privilege", "delegation", "sub-agents", "audit-log", "mcp", "a2a", "owasp", "langgraph", "langchain", "crewai", "openai-agents", "google-adk", "autogen", "claude-agent-sdk", "pydantic-ai", "smolagents", "camel-ai", "langflow", "strands", "llama-index", "semantic-kernel", "agno"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -48,8 +48,10 @@ llama-index = ["llama-index-core>=0.14"]
 semantic-kernel = ["semantic-kernel>=1.36"]
 agno = ["agno>=2.9"]
 haystack = ["haystack-ai>=3.1"]
+camel = ["camel-ai>=0.2.90", "mcp<2"]      # adapters.camel; camel-ai 0.2.90 imports mcp.server.FastMCP, absent in mcp 2.x
 omnigent = ["omnigent>=0.10"]         # examples/integrations/omnigent (policy handler); no adapter module
 mcp = ["mcp>=1.28"]                   # examples/integrations/mcp (server-side chain verifier)
+langflow = ["lfx>=1.11", "langchain-core>=1.5"]  # examples/integrations/langflow (custom component); no adapter module
 test = ["pytest>=7", "hypothesis>=6"]
 all = ["cryptography>=41", "pyyaml>=6"]
 
