@@ -18,7 +18,7 @@ attenu-guard verify attenu-omnigent-bundle.json --hs256-key 64656d6f2d6b6579   #
 What you will see: the same ten-step dispatch script run twice — once with no policy attached (all ten tool bodies
 execute, including a depth-3 spawn, a second release and an undeclared `shell`), once through Omnigent's own
 `FunctionPolicy` with this handler registered (four DENYs before the bodies run) — then the run's signed bundle
-verified from the file alone. Measured at 2 min 10 s on a laptop, most of it `pip`.
+verified from the file alone. Measured at 20 s from a fresh clone on a laptop with a warm `pip` cache; allow a minute or two cold.
 
 ## What Omnigent does
 
