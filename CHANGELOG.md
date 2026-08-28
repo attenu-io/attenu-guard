@@ -6,6 +6,25 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A2A adapter** (`attenu_guard.adapters.a2a`, extra `a2a`, tested against `a2a-sdk` 1.1.2): carries the attenuated
+  delegation chain across an Agent2Agent hop, so a remote agent in another process runs with permissions bounded by the
+  calling agent's. Two halves on public seams — client side, a `DelegationInterceptor` (`ClientCallInterceptor.before`)
+  mints the child with `parent.delegate(...)` and puts the signed Delegation Chain (`attenu_guard.wire`) on the outgoing
+  message as an A2A **extension** (`Message.extensions` + `Message.metadata[<uri>]`, spec §4.6.2, with the
+  `A2A-Extensions` header §4.6.1); server side, `GuardedAgentExecutor` wraps the deployment's `AgentExecutor.execute`,
+  verifies the chain offline (`wire.load`: signatures, parent-hash linkage, depth, child ⊆ parent at every hop, expiry)
+  and mints the served `Guard` from the verified leaf, narrowed again by what the remote task needs. A missing, forged,
+  spliced, widened or expired chain — or any exception raised while deciding — refuses the request before the remote
+  agent's own logic starts, returning the denial contract in the extension's metadata slot. `guarded_tool(fn, scope=…)`
+  checks before each tool body; `require_guard()` refuses a tool reached outside the executor. `verify_hop(tokens,
+  signer, client_bundle=…, server_bundle=…)` checks the caller's ledger, the remote ledger and the tokens that bind them
+  from those inputs alone, and reports an unsupplied bundle as "not checked" rather than as passing. This answers A2A
+  §7.6.4, which states that the protocol defines no scope, validity or revocation semantics for an in-task authorization
+  decision. Cross-process revocation propagation remains open: an expired chain is refused and `revocation_check=` is the
+  seam for a status list, both documented as limits. Example (offline demo plus a `live_smoke.py` verified over a real
+  Starlette/uvicorn HTTP hop) and 35 offline tests; seventeenth entry in `docs/INTEGRATIONS.md`.
+
 ## [0.5.0] — 2026-08-27
 
 ### Added
