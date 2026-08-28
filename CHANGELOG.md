@@ -6,6 +6,8 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-28
+
 ### Added
 - **The interop test vectors ship inside the package** as `attenu_guard.vectors`
   (`VECTOR_NAMES`, `load_vector`, `load_vectors`, `read_vector_bytes`, read through
