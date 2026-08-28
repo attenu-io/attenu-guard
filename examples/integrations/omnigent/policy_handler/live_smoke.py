@@ -49,7 +49,7 @@ def main() -> int:
     if os.environ.get("RUN_LIVE") != "1":
         return _skip("set RUN_LIVE=1")
     if shutil.which("omnigent") is None:
-        return _skip("the `omnigent` CLI is not on PATH (pip install omnigent==0.10.0)")
+        return _skip("the `omnigent` CLI is not on PATH (pip install 'attenu-guard[omnigent]')")
     agent = os.environ.get("OMNIGENT_AGENT")
     if not agent:
         return _skip("set OMNIGENT_AGENT to an agent spec that registers this handler (see policies.yaml)")

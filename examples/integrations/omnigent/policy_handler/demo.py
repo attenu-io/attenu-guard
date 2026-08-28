@@ -5,7 +5,7 @@ What this shows, with a scripted dispatch sequence and no API key:
 
   [1] The premise, checked in Omnigent's own code: ``spawn_bounds`` takes
       ``max_dispatches_per_turn`` and no depth argument, and no orchestration policy
-      factory in 0.10.0 takes one either (issue #5169). The check is a signature read,
+      factory in the installed release takes one either (issue #5169). The check is a signature read,
       so it fails the day that changes.
   [2] The same scripted run with no policy attached: every tool body executes — the
       third-level dispatch, the second release, the undeclared shell.
@@ -15,7 +15,9 @@ What this shows, with a scripted dispatch sequence and no API key:
       the exhausted ceiling, the undeclared tool and the depth-3 dispatch are all DENIED
       before their bodies run, and the sink proves it.
   [4] The ledger verifies offline, and a signed evidence bundle verifies integrity,
-      child-subset-of-parent and containment from the bundle alone.
+      child-subset-of-parent and containment from the bundle alone. The bundle is
+      written to ``attenu-omnigent-bundle.json`` (or ``$ATTENU_BUNDLE_OUT``) so the
+      last step can be repeated with ``attenu-guard verify`` — Omnigent absent.
 
 Exit codes: 0 = every expectation held · 1 = an expectation failed ·
 3 = Omnigent now bounds delegation depth itself (the premise of step 1 changed; steps
@@ -27,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+import os
 import inspect
 import sys
 import tempfile
@@ -337,7 +341,9 @@ def main() -> int:
     """
     from omnigent.policies.builtins.orchestration import spawn_bounds
 
-    print("[1] premise — Omnigent 0.10.0's own orchestration policies")
+    from importlib.metadata import version as _pkg_version
+
+    print(f"[1] premise — Omnigent {_pkg_version('omnigent')}'s own orchestration policies")
     params = list(inspect.signature(spawn_bounds).parameters)
     print(f"    spawn_bounds{tuple(params)} — a per-turn count, reset by the runner's reset_turn hook")
     depth_params = depth_bounding_params()
@@ -388,6 +394,10 @@ def main() -> int:
         print(f"    signed bundle verifies offline: integrity={checks['integrity']} "
               f"monotonicity={checks['monotonicity']} containment={checks['containment']} ok={report['ok']}")
         ok = ok and chain_ok and report["ok"]
+        out = Path(os.environ.get("ATTENU_BUNDLE_OUT", "attenu-omnigent-bundle.json"))
+        out.write_text(json.dumps(bundle, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"    bundle written: {out} — re-check it with Omnigent absent:")
+        print(f"    attenu-guard verify {out} --hs256-key {b'demo-key'.hex()}")
 
     print("RESULT:", "OK" if ok else "FAIL")
     return EXIT_OK if ok else EXIT_FAIL

@@ -2,7 +2,23 @@
 
 *An [Omnigent](https://github.com/omnigent-ai/omnigent) recipe: one policy handler, registered the way every
 Omnigent policy is registered, that gives each sub-agent an authority instead of a counter. Runs offline with a
-scripted dispatch sequence — no API key, no harness. Verified against **omnigent 0.10.0** on 2026-08-25.*
+scripted dispatch sequence — no API key, no harness. Verified against **omnigent 0.11.0** on 2026-08-28 (and 0.10.0 on 2026-08-25).*
+
+## Three-minute repro
+
+No API key, no harness, no account. From a clean shell:
+
+```bash
+git clone --depth 1 https://github.com/attenu-io/attenu-guard && cd attenu-guard
+python3 -m venv .venv && . .venv/bin/activate && pip install -q 'attenu-guard[omnigent]'
+python examples/integrations/omnigent/policy_handler/demo.py
+attenu-guard verify attenu-omnigent-bundle.json --hs256-key 64656d6f2d6b6579   # step 4 again, Omnigent absent
+```
+
+What you will see: the same ten-step dispatch script run twice — once with no policy attached (all ten tool bodies
+execute, including a depth-3 spawn, a second release and an undeclared `shell`), once through Omnigent's own
+`FunctionPolicy` with this handler registered (four DENYs before the bodies run) — then the run's signed bundle
+verified from the file alone. Measured at 2 min 10 s on a laptop, most of it `pip`.
 
 ## What Omnigent does
 
@@ -82,7 +98,7 @@ called with no arguments — pinned by `test_compat_policies_yaml_parses_with_om
 ## Running it
 
 ```bash
-pip install 'attenu-guard' omnigent==0.10.0
+pip install 'attenu-guard[omnigent]'      # omnigent 0.11.0 at the time of writing
 python examples/integrations/omnigent/policy_handler/demo.py
 # RUN_LIVE=1 OMNIGENT_AGENT=path/to/agent.yaml python examples/integrations/omnigent/policy_handler/live_smoke.py
 ```
@@ -90,7 +106,7 @@ python examples/integrations/omnigent/policy_handler/demo.py
 Expected:
 
 ```
-[1] premise — Omnigent 0.10.0's own orchestration policies
+[1] premise — Omnigent 0.11.0's own orchestration policies
     spawn_bounds('max_dispatches_per_turn', 'dispatch_tools') — a per-turn count, reset by the runner's reset_turn hook
     no orchestration policy factory takes a depth or nesting argument (issue #5169)
 [2] the same script, no policy attached
@@ -112,6 +128,8 @@ Expected:
 [4] evidence
     hash chain verifies: True (11 events)
     signed bundle verifies offline: integrity=True monotonicity=True containment=True ok=True
+    bundle written: attenu-omnigent-bundle.json — re-check it with Omnigent absent:
+    attenu-guard verify attenu-omnigent-bundle.json --hs256-key 64656d6f2d6b6579
 RESULT: OK
 ```
 
@@ -145,7 +163,7 @@ tamper-evident, not tamper-proof — whoever holds the signing key is stated in
 
 | Claim | Pinned to | Test |
 |---|---|---|
-| `spawn_bounds` is a per-turn width bound with no depth argument | `omnigent==0.10.0`, `omnigent/policies/builtins/orchestration.py` | `test_semantic_spawn_bounds_is_a_per_turn_width_bound` |
+| `spawn_bounds` is a per-turn width bound with no depth argument | `omnigent==0.11.0` (and 0.10.0), `omnigent/policies/builtins/orchestration.py` | `test_semantic_spawn_bounds_is_a_per_turn_width_bound` |
 | No orchestration policy factory bounds delegation depth (#5169) | same module, every public factory's signature | `test_semantic_no_orchestration_policy_bounds_delegation_depth` |
 | A decision is an action plus a reason, not a verifiable record | `omnigent/policies/types.py` `PolicyResult` fields | `test_semantic_policy_result_carries_no_verifiable_record` |
 | Named dispatch carries the sub-agent in `agent` (#2390's interception point) | `omnigent/tools/builtins/spawn.py` `_build_sys_session_send_schema` | `test_semantic_dispatch_payload_names_the_subagent` |
