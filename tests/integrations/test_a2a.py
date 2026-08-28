@@ -178,6 +178,41 @@ def test_the_denial_is_reported_back_to_the_caller_machine_readably():
     assert body["extension"] == dg_a2a.EXTENSION_URI
 
 
+def test_the_request_level_metadata_map_is_accepted_as_a_fallback():
+    """The Message extension point is where the spec puts extension data, but a deployment that
+    puts the chain on the request-level metadata map is served too — the documented fallback."""
+    from a2a.helpers.proto_helpers import new_text_message
+    from a2a.types.a2a_pb2 import Role, SendMessageRequest
+
+    demo.reset_world()
+    source = demo.Hop()
+    asyncio.run(source.send())
+    tokens = source.tokens
+
+    demo.reset_world()
+    hop = demo.Hop(interceptors=[])
+    request = SendMessageRequest(message=new_text_message("summarise", role=Role.ROLE_USER))
+    request.metadata[dg_a2a.EXTENSION_URI] = {"v": 1, "chain": list(tokens)}
+    reply = asyncio.run(hop._send(request))
+
+    assert demo.denial_of(reply) is None, "the request-level map should have been read"
+    assert demo.WORLD["bodies_run"] == [("crm_query", 1_800)]
+
+
+def test_a_metadata_map_with_no_chain_reads_as_absent_not_as_a_crash():
+    assert dg_a2a.read_delegation({}) == []
+    assert dg_a2a.read_delegation({dg_a2a.EXTENSION_URI: {"v": 1}}) == []
+    assert dg_a2a.read_delegation({dg_a2a.EXTENSION_URI: {"chain": [1, 2]}}) == []
+    assert dg_a2a.read_delegation({dg_a2a.EXTENSION_URI: "not-an-object"}) == []
+
+
+def test_attach_delegation_refuses_a_target_it_cannot_write_to():
+    hop = demo.Hop()
+    child = hop.orchestrator.delegate("summariser", demo.SUMMARISER_REQUEST, task="t")
+    with pytest.raises(TypeError):
+        dg_a2a.attach_delegation("not a request", child, _signer())
+
+
 # ==========================================================================
 # Getting the chain wrong: every route is a refusal at the boundary
 # ==========================================================================

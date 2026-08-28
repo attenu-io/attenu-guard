@@ -23,7 +23,7 @@ All notable changes to attenu-guard are documented here. The format follows
   §7.6.4, which states that the protocol defines no scope, validity or revocation semantics for an in-task authorization
   decision. Cross-process revocation propagation remains open: an expired chain is refused and `revocation_check=` is the
   seam for a status list, both documented as limits. Example (offline demo plus a `live_smoke.py` verified over a real
-  Starlette/uvicorn HTTP hop) and 32 offline tests; seventeenth entry in `docs/INTEGRATIONS.md`.
+  Starlette/uvicorn HTTP hop) and 35 offline tests; seventeenth entry in `docs/INTEGRATIONS.md`.
 
 ## [0.5.0] — 2026-08-27
 
