@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "attenu-guard"
 version = "0.5.0"
-description = "Attenu Guard: enforces per-agent permissions on every tool call and sub-agent handoff — a sub-agent never holds more than its parent — and writes a hash-chained audit log you verify offline. 16 agent frameworks, unmodified."
+description = "Attenu Guard: enforces per-agent permissions on every tool call and sub-agent handoff — a sub-agent never holds more than its parent — and writes a hash-chained audit log you verify offline. 17 agent frameworks and protocols, unmodified."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
@@ -53,6 +53,7 @@ haystack = ["haystack-ai>=3.1"]
 camel = ["camel-ai>=0.2.90", "mcp<3"]      # adapters.camel; camel-ai 0.2.90 imports mcp.server.FastMCP, absent in mcp 2.x
 omnigent = ["omnigent>=0.10"]         # examples/integrations/omnigent (policy handler); no adapter module
 mcp = ["mcp>=1.28"]                   # examples/integrations/mcp (server-side chain verifier)
+a2a = ["a2a-sdk>=1.1"]                # adapters.a2a: Agent2Agent protocol (client interceptor + guarded AgentExecutor)
 langflow = ["lfx>=1.11", "langchain-core>=1.5"]  # examples/integrations/langflow (custom component); no adapter module
 test = ["pytest>=7", "hypothesis>=6"]
 all = ["cryptography>=41", "pyyaml>=6"]

@@ -114,6 +114,7 @@ jobs:
           - { fw: camel,           pkgs: "camel-ai==0.2.90 'mcp<2'" }   # camel-ai 0.2.90 imports mcp.server.FastMCP, gone in mcp 2.x
           - { fw: langflow,        pkgs: "lfx==1.11.5" }                 # Langflow's component base; the full langflow package is not needed to import the component
           - { fw: mcp,             pkgs: "mcp==1.28.1" }
+          - { fw: a2a,             pkgs: "a2a-sdk==1.1.2" }
           - { fw: omnigent,        pkgs: "omnigent==0.11.0" }
           - { fw: claude_code,     pkgs: "" }
     name: integration (${{ matrix.fw }})
@@ -160,6 +161,7 @@ jobs:
           - { fw: camel,           pkgs: "camel-ai" }
           - { fw: langflow,        pkgs: "lfx" }
           - { fw: mcp,             pkgs: "mcp" }
+          - { fw: a2a,             pkgs: "a2a-sdk" }
           - { fw: omnigent,        pkgs: "omnigent" }
     name: integration-latest (${{ matrix.fw }})
     steps:

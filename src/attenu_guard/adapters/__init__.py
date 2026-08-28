@@ -31,6 +31,10 @@ Available (see docs/INTEGRATIONS.md for hooks, versions and evidence):
     llama_index      GuardedAgentWorkflow / guarded_tool — AgentWorkflow handoffs
     semantic_kernel  attach_guard — HandoffOrchestration via kernel filters
     agno             tool_hooks — Team member delegation
+    haystack         Tool.invoke / ConfirmationHook — deepset Haystack AgentTool
+    camel            GuardedAgentToolkit / FunctionTool — CAMEL-AI sub-agents, Workforce
+    a2a              DelegationInterceptor + GuardedAgentExecutor — the Agent2Agent
+                     protocol: the chain travels between processes as an A2A extension
 
 Each has a runnable offline demo under examples/integrations/<name>/ and a test
 under tests/integrations/ that runs with the framework's own mock model.
