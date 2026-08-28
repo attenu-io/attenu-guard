@@ -15,9 +15,20 @@ byte is deterministic — same output on every run, on every machine):
 
     python3 tests/vectors/generate.py
 
+This module is the SINGLE writer for both copies of the vectors. Each file is
+serialised once and those exact bytes are written to two places: this directory,
+which the README, the Internet-Draft and several docs cite by path, and
+src/attenu_guard/vectors/, which ships inside the installed package so that an
+independent implementation can score itself with nothing but
+`pip install attenu-guard` — no clone, no repository layout to know about.
+Neither copy is derived from the other, so neither can lag behind it;
+tests/test_wire.py asserts they are byte-identical on every run.
+
 See README.md in this directory for the file format and how to use these
 vectors from another implementation.
 """
+from __future__ import annotations   # `Path | None` in a signature, on Python 3.9
+
 import hashlib
 import json
 import sys
@@ -30,6 +41,9 @@ from attenu_guard import Authority, Guard, RowLimit, EgressRank  # noqa: E402
 from attenu_guard import wire  # noqa: E402
 
 VECTORS_DIR = Path(__file__).resolve().parent
+# The shipped copy: package data, so `pip install attenu-guard` carries the
+# vectors. See attenu_guard.vectors for the accessor an installed consumer uses.
+PACKAGE_VECTORS_DIR = _ROOT / "src" / "attenu_guard" / "vectors"
 
 # A published, fixed, well-known secret — deliberately NOT a secret in any
 # real sense (it's printed in this source file and in every emitted vector).
@@ -315,15 +329,25 @@ GENERATORS = {
 }
 
 
-def generate_all(out_dir: Path = VECTORS_DIR) -> dict:
-    """Write every vector file to `out_dir`; return {filename: data} so
-    callers (e.g. tests/test_wire.py) can self-check without re-reading from
-    disk. Deterministic: calling this twice writes byte-identical files."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+def generate_all(out_dir: Path = VECTORS_DIR,
+                 package_dir: Path | None = PACKAGE_VECTORS_DIR) -> dict:
+    """Write every vector file to `out_dir` AND, unless `package_dir` is None, to
+    the packaged copy; return {filename: data} so callers (e.g.
+    tests/test_wire.py) can self-check without re-reading from disk.
+
+    Each vector's JSON is serialised ONCE and the same string is written to both
+    destinations, so the two are byte-identical by construction rather than by a
+    copy step that could be skipped. Deterministic: calling this twice writes
+    byte-identical files."""
+    destinations = [out_dir] + ([package_dir] if package_dir is not None else [])
+    for d in destinations:
+        d.mkdir(parents=True, exist_ok=True)
     written = {}
     for filename, gen in GENERATORS.items():
         data = gen()
-        (out_dir / filename).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+        text = json.dumps(data, indent=2, sort_keys=True) + "\n"
+        for d in destinations:
+            (d / filename).write_text(text)
         written[filename] = data
     return written
 
@@ -350,7 +374,8 @@ def _self_check(written: dict) -> bool:
 
 def main() -> int:
     written = generate_all()
-    print(f"wrote {len(written)} vector file(s) to {VECTORS_DIR}:")
+    print(f"wrote {len(written)} vector file(s) to {VECTORS_DIR.relative_to(_ROOT)}/ "
+          f"and {PACKAGE_VECTORS_DIR.relative_to(_ROOT)}/:")
     for filename in sorted(written):
         print(f"  {filename}")
     print("\nself-checking against this build's attenu_guard.wire ...")

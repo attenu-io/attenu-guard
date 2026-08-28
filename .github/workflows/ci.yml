@@ -45,6 +45,16 @@ jobs:
         run: python tests/test_cli_verify.py
       - name: Interop test vectors self-check
         run: python tests/vectors/generate.py
+      - name: The committed vectors match what the generator produces, in both copies
+        # generate.py writes tests/vectors/ and the packaged src/attenu_guard/vectors/
+        # from one serialisation. If either committed copy was edited by hand, or the
+        # two have drifted, the regeneration above rewrites them and this fails.
+        run: |
+          set -eu
+          git diff --exit-code -- tests/vectors src/attenu_guard/vectors || {
+            echo "::error::the committed interop vectors drifted — regenerate and review"
+            exit 1
+          }
       - name: Scenario harness
         run: python tests/test_scenarios.py
       - name: LangGraph adapter logic
@@ -83,6 +93,26 @@ jobs:
           assert s.check("crm.read", context={"rows":4200})
           assert not s.check("crm.export", context={"egress":"any"})
           print("quickstart OK")
+          PY
+      - name: The interop vectors ship inside the installed package
+        # The claim made publicly: an independent implementation in any language
+        # can run these from `pip install attenu-guard`, with no clone. This step
+        # is what keeps that true — a vector that fails to make it into the
+        # distribution fails here.
+        run: |
+          cd "$RUNNER_TEMP"   # import the INSTALLED package, never the checkout
+          python - <<'PY'
+          from attenu_guard import vectors, wire
+          for name, data in vectors.load_vectors().items():
+              signer = wire.HS256TestSigner(bytes.fromhex(data["signer"]["secret_hex"]),
+                                            kid=data["signer"]["kid"])
+              try:
+                  wire.load(data["tokens"], signer, now=data["now"]); outcome = "accept"
+              except wire.WireError as e:
+                  outcome = e.reason
+              assert outcome == (data.get("expect") or data["expect_reject_reason"]), name
+          assert len(vectors.VECTOR_NAMES) == 7
+          print("packaged interop vectors OK")
           PY
   integrations:
     # Real-framework integration PoCs (tests/integrations/): each job installs

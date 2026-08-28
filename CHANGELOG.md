@@ -7,6 +7,15 @@ All notable changes to attenu-guard are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **The interop test vectors ship inside the package** as `attenu_guard.vectors`
+  (`VECTOR_NAMES`, `load_vector`, `load_vectors`, `read_vector_bytes`, read through
+  `importlib.resources`). The Internet-Draft promises a chain that MUST verify and six that
+  MUST each be rejected for a named reason, so that an implementation written in ANY language
+  from the draft alone can score its own offline verifier; shipping them means doing that needs
+  `pip install attenu-guard` and no clone. `tests/vectors/generate.py` is the single writer for
+  both copies — it serialises each vector once and writes those bytes to `tests/vectors/` and
+  `src/attenu_guard/vectors/` — and `tests/test_wire.py` asserts the two are byte-identical, so
+  they cannot diverge. A CI step verifies they survive an install, not just a checkout.
 - **A2A adapter** (`attenu_guard.adapters.a2a`, extra `a2a`, tested against `a2a-sdk` 1.1.2): carries the attenuated
   delegation chain across an Agent2Agent hop, so a remote agent in another process runs with permissions bounded by the
   calling agent's. Two halves on public seams — client side, a `DelegationInterceptor` (`ClientCallInterceptor.before`)

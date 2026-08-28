@@ -9,11 +9,34 @@ a specific, declared reason. They exist so an **independent implementation**
 offline verifier against a fixed, known-good/known-bad set of tokens without
 needing this repository's Python or any of its code.
 
+## Getting them without cloning this repository
+
+They ship inside the installed package, so scoring your own verifier needs
+nothing but `pip install attenu-guard`:
+
+```python
+from attenu_guard import vectors
+
+for name, data in vectors.load_vectors().items():
+    outcome = my_verifier(data["tokens"], data["signer"], data["now"])
+    assert outcome == (data.get("expect") or data["expect_reject_reason"])
+```
+
+`vectors.VECTOR_NAMES` lists the seven; `vectors.read_vector_bytes(name)` gives
+you the raw JSON if you would rather parse it yourself. The copies here and the
+packaged ones are byte-identical — `generate.py` writes both from one
+serialisation, and `tests/test_wire.py` fails if they ever differ.
+
+## Regenerating
+
 Regenerate with (stdlib-only, no network, no installs):
 
 ```
 python3 tests/vectors/generate.py
 ```
+
+That writes this directory AND `src/attenu_guard/vectors/`. Never hand-edit
+either copy.
 
 This is deterministic: nothing here ever calls a real clock or a random
 number generator (see `wire.py`'s module docstring on determinism), so

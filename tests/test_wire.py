@@ -23,10 +23,26 @@ sys.path.insert(0, str(_ROOT / "tests" / "vectors"))
 
 from attenu_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
 from attenu_guard import wire  # noqa: E402
+from attenu_guard import vectors  # noqa: E402  (the shipped copy of tests/vectors/)
 
 import generate as vectors_generate  # tests/vectors/generate.py  # noqa: E402
 
 SECRET = b"test-wire-fixed-secret-do-not-use-in-production"
+
+# The vectors AS COMMITTED, snapshotted at import — before any test regenerates
+# them. Comparing the two copies after a regeneration would only ever compare
+# what the generator just wrote; this catches a copy edited by hand, which is the
+# way the two directories would actually drift.
+_REPO_VECTORS_DIR = _ROOT / "tests" / "vectors"
+_PACKAGE_VECTORS_DIR = _ROOT / "src" / "attenu_guard" / "vectors"
+
+
+def _committed(directory):
+    return {p.name: p.read_bytes() for p in sorted(directory.glob("*.json"))}
+
+
+COMMITTED_REPO_VECTORS = _committed(_REPO_VECTORS_DIR)
+COMMITTED_PACKAGE_VECTORS = _committed(_PACKAGE_VECTORS_DIR)
 
 
 def _signer(kid="test"):
@@ -644,6 +660,69 @@ class TestInteropVectors(unittest.TestCase):
         # regenerating must reproduce identical JSON, token-for-token.
         again = vectors_generate.generate_all(self.vectors_dir)
         self.assertEqual(self.written, again)
+
+
+# =========================================================================
+# The SHIPPED copy of the vectors (src/attenu_guard/vectors/) — package data,
+# so `pip install attenu-guard` carries them and an independent implementation
+# in any language can score itself without cloning this repository.
+# =========================================================================
+class TestPackagedVectors(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # generate.py is the single writer for BOTH copies; run it here too so
+        # this class does not depend on another class having run first.
+        cls.written = vectors_generate.generate_all()
+        cls.repo_dir = _REPO_VECTORS_DIR
+        cls.package_dir = _PACKAGE_VECTORS_DIR
+
+    def test_the_two_committed_copies_are_byte_identical(self):
+        # The guard against drift: one artifact, serialised once, written to two
+        # places. Asserted on what was COMMITTED (snapshotted at import), so a
+        # copy edited by hand fails here rather than being quietly regenerated.
+        self.assertEqual(sorted(COMMITTED_PACKAGE_VECTORS), sorted(vectors.VECTOR_NAMES))
+        self.assertEqual(sorted(COMMITTED_REPO_VECTORS), sorted(vectors.VECTOR_NAMES))
+        for filename in vectors.VECTOR_NAMES:
+            with self.subTest(vector=filename):
+                self.assertEqual(COMMITTED_PACKAGE_VECTORS[filename],
+                                 COMMITTED_REPO_VECTORS[filename])
+
+    def test_the_generator_writes_both_copies_identically(self):
+        # ...and the complement: that the writer itself cannot start emitting
+        # different bytes to the two destinations.
+        self.assertEqual(sorted(self.written), sorted(vectors.VECTOR_NAMES))
+        for filename in sorted(self.written):
+            with self.subTest(vector=filename):
+                self.assertEqual((self.package_dir / filename).read_bytes(),
+                                 (self.repo_dir / filename).read_bytes())
+
+    def test_importlib_resources_reads_every_declared_vector(self):
+        # The path an INSTALLED consumer takes — not a filesystem path into a
+        # checkout. A file missing from a wheel fails here, not silently.
+        for filename in vectors.VECTOR_NAMES:
+            with self.subTest(vector=filename):
+                self.assertEqual(vectors.read_vector_bytes(filename),
+                                 (self.repo_dir / filename).read_bytes())
+        self.assertEqual(sorted(vectors.load_vectors()), sorted(vectors.VECTOR_NAMES))
+        self.assertEqual(vectors.load_vector("valid_chain.json")["expect"], "accept")
+
+    def test_an_unknown_vector_name_is_refused(self):
+        with self.assertRaises(KeyError):
+            vectors.read_vector_bytes("../wire.py")
+
+    def test_every_packaged_vector_scores_as_it_declares(self):
+        # Read ONLY through the package accessor, then verify: this is exactly
+        # what a third-party implementer does, minus their own verifier.
+        for filename, data in vectors.load_vectors().items():
+            with self.subTest(vector=filename):
+                signer = wire.HS256TestSigner(bytes.fromhex(data["signer"]["secret_hex"]),
+                                              kid=data["signer"]["kid"])
+                try:
+                    wire.load(data["tokens"], signer, now=data["now"])
+                    outcome = "accept"
+                except wire.WireError as e:
+                    outcome = e.reason
+                self.assertEqual(outcome, data.get("expect") or data["expect_reject_reason"])
 
 
 if __name__ == "__main__":
