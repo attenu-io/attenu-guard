@@ -13,7 +13,7 @@ is handing an agent a person's credentials and reading the logs afterwards.
 
 An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
-delegated authority stays inside the parent's limits, and every decision remains verifiable offline.
+delegated authority stays inside the parent's limits, and every decision the guard makes remains verifiable offline.
 
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
