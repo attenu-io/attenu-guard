@@ -485,15 +485,15 @@ def gen_reject_duplicate_member() -> dict:
     )
 
 
-def gen_reject_unmarked_canonicalization() -> dict:
+def gen_valid_jcs_unmarked_header() -> dict:
     header, payload, signer = _raw_valid_root()
     header_obj = json.loads(header)
     header_obj.pop("c14n")
     header = wire._canonical_json(header_obj)
     return _vector(
-        "Unmarked pre-JCS token: rejected because JCS is the only supported canonicalization.",
+        "Informational marker case: an unmarked token verifies when its header and payload bytes are JCS.",
         [_sign_raw(header, payload, signer)],
-        expect_reject_reason=wire.WireReasonCode.CANONICALIZATION_REQUIRED,
+        expect="accept",
     )
 
 
@@ -514,7 +514,7 @@ GENERATORS = {
     "valid_jcs_big_integer.json": gen_valid_jcs_big_integer,
     "reject_non_finite.json": gen_reject_non_finite,
     "reject_duplicate_member.json": gen_reject_duplicate_member,
-    "reject_unmarked_canonicalization.json": gen_reject_unmarked_canonicalization,
+    "valid_jcs_unmarked_header.json": gen_valid_jcs_unmarked_header,
 }
 
 
@@ -531,6 +531,9 @@ def generate_all(out_dir: Path = VECTORS_DIR,
     destinations = [out_dir] + ([package_dir] if package_dir is not None else [])
     for d in destinations:
         d.mkdir(parents=True, exist_ok=True)
+        for stale in d.glob("*.json"):
+            if stale.name not in GENERATORS:
+                stale.unlink()
     written = {}
     for filename, gen in GENERATORS.items():
         data = gen()

@@ -135,7 +135,8 @@ fully-specified algorithm {{RFC9864}}. Implementations MUST support Ed25519
 {{RFC8032}} {{RFC8037}} and MAY support ES256 and, for post-quantum readiness,
 ML-DSA {{RFC9964}}. The token uses the "application/at+jwt" header type of
 {{RFC9068}} and includes its required claims (iss, exp, aud, sub, iat, jti).
-The protected header MUST contain "c14n": "JCS". The protected header and
+The protected header SHOULD contain "c14n": "JCS" as an informational label.
+Verifiers MUST NOT rely on this field. The protected header and
 payload JSON MUST be serialized with JCS {{RFC8785}} before base64url encoding.
 Verifiers MUST reject non-canonical encodings, duplicate object member names,
 non-finite numbers, and lone UTF-16 surrogates.

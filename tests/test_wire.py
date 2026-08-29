@@ -190,16 +190,34 @@ class TestJCSWireContract(unittest.TestCase):
             wire.load([token], signer)
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.DUPLICATE_MEMBER)
 
-    def test_load_rejects_unmarked_and_noncanonical_tokens(self):
+    def test_load_accepts_unmarked_jcs_token(self):
         signer = _signer()
-        unmarked = _sign_raw(
-            b'{"alg":"HS256","kid":"test","typ":"at+jwt"}',
-            b'{}',
-            signer,
-        )
+        root = Guard.issue("root", Authority({"crm.read"}, [], ttl=60), max_depth=1)
+        token = wire.serialize(root, signer)
+        header_b64, payload_b64, _signature = token.split(".")
+        header = json.loads(wire.b64url_decode(header_b64))
+        header.pop("c14n")
+        unmarked = _sign_raw(canonical.dumps(header), wire.b64url_decode(payload_b64), signer)
+
+        verified = wire.load([unmarked], signer)
+        self.assertEqual(verified.depth, 0)
+
+    def test_load_rejects_unmarked_noncanonical_number_as_noncanonical(self):
+        signer = _signer()
+        root = Guard.issue("root", Authority({"crm.read"}, [SpendCap(100.0)], ttl=60), max_depth=1)
+        token = wire.serialize(root, signer)
+        header_b64, payload_b64, _signature = token.split(".")
+        header = json.loads(wire.b64url_decode(header_b64))
+        header.pop("c14n")
+        payload = wire.b64url_decode(payload_b64).replace(b'"max":100', b'"max":100.0', 1)
+        legacy_spelling = _sign_raw(canonical.dumps(header), payload, signer)
+
         with self.assertRaises(wire.WireError) as ctx:
-            wire.load([unmarked], signer)
-        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.CANONICALIZATION_REQUIRED)
+            wire.load([legacy_spelling], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NON_CANONICAL)
+
+    def test_load_rejects_marked_noncanonical_token(self):
+        signer = _signer()
 
         noncanonical = _sign_raw(
             b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
@@ -721,8 +739,8 @@ class TestInteropVectors(unittest.TestCase):
             "reject_wildcard_boundary.json",
             "valid_jcs_integral_float.json", "valid_jcs_exponent_form.json",
             "valid_jcs_non_ascii.json", "valid_jcs_utf16_key_order.json",
-            "valid_jcs_big_integer.json", "reject_non_finite.json",
-            "reject_duplicate_member.json", "reject_unmarked_canonicalization.json",
+            "valid_jcs_big_integer.json", "valid_jcs_unmarked_header.json",
+            "reject_non_finite.json", "reject_duplicate_member.json",
         }
         self.assertEqual(set(self.written), expected)
         for filename in expected:
@@ -772,11 +790,18 @@ class TestInteropVectors(unittest.TestCase):
                 self.assertEqual(payload_bytes, canonical.dumps(json.loads(payload_bytes)))
                 self.assertIn(fragment, payload_bytes)
 
+        unmarked = self.written["valid_jcs_unmarked_header.json"]["tokens"][0]
+        header_b64, payload_b64, _signature = unmarked.split(".")
+        header_bytes = wire.b64url_decode(header_b64)
+        payload_bytes = wire.b64url_decode(payload_b64)
+        self.assertNotIn("c14n", json.loads(header_bytes))
+        self.assertEqual(header_bytes, canonical.dumps(json.loads(header_bytes)))
+        self.assertEqual(payload_bytes, canonical.dumps(json.loads(payload_bytes)))
+
     def test_parse_rejection_vectors_declare_distinct_reasons(self):
         expected = {
             "reject_non_finite.json": wire.WireReasonCode.NON_FINITE,
             "reject_duplicate_member.json": wire.WireReasonCode.DUPLICATE_MEMBER,
-            "reject_unmarked_canonicalization.json": wire.WireReasonCode.CANONICALIZATION_REQUIRED,
         }
         for filename, reason in expected.items():
             with self.subTest(vector=filename):

@@ -97,9 +97,10 @@ invariant — in your framework, in your process — no proxy, and no network ca
 Version 0.7 uses [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) for every
 signed or hash-linked artifact: Delegation Token protected headers and payloads,
 parent commitments, integrity seals, audit entries, anchors, and evidence bundles.
-Tokens and metadata-bearing artifacts declare `"c14n":"JCS"`. Verifiers reject
-unmarked or non-canonical input, duplicate object member names, non-finite numbers,
-and lone UTF-16 surrogates.
+Tokens and metadata-bearing artifacts emit `"c14n":"JCS"` as an informational
+label. Verifiers enforce JCS from canonical bytes and hashes, not from that label;
+non-canonical input, duplicate object member names, non-finite numbers, and lone
+UTF-16 surrogates are rejected.
 
 This is a deliberate wire-format break from versions through 0.6.1. Version 0.7 has
 no legacy or dual-format reader. Producers and verifiers in different languages must

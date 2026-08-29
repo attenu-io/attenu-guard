@@ -6,6 +6,11 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-08-29
+
+### Changed
+- `c14n` is informational; producers still emit it, while verifiers enforce RFC 8785 JCS from canonical bytes and hashes regardless of the label.
+
 ## [0.7.0] — 2026-08-29
 
 ### Changed — BREAKING
@@ -275,6 +280,7 @@ landed as the reference implementation of the Internet-Draft.
 - Initial release: `Authority` / `Guard` core, `meet` attenuation, chain depth /
   fanout / budget ceilings, cascade revocation, and a hash-chained audit log.
 
+[0.7.1]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.7.1
 [0.7.0]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.7.0
 [0.6.1]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.6.1
 [0.2.0]: https://github.com/attenu-io/delegation-guard/releases/tag/v0.2.0

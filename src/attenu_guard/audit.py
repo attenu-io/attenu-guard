@@ -131,12 +131,12 @@ class AuditLog:
     @staticmethod
     def verify_anchor(entries: list[dict], anchor: dict, signer) -> tuple[bool, str | None]:
         """The chain reproduces AND its head matches a SIGNED anchor. Catches a consistent full rewrite."""
-        if anchor.get("c14n") != "JCS":
-            return False, "anchor canonicalization is not JCS"
         try:
-            body = {k: anchor[k] for k in ("v", "c14n", "chain_id", "seq", "head", "ts")}
+            for key in ("v", "chain_id", "seq", "head", "ts"):
+                anchor[key]
         except KeyError as exc:
             return False, f"anchor missing field {exc.args[0]}"
+        body = {k: v for k, v in anchor.items() if k not in ("kid", "sig", "verified")}
         signing_input = canonical.dumps(body)
         try:
             sig = bytes.fromhex(anchor.get("sig", ""))
@@ -159,8 +159,6 @@ class AuditLog:
         prev = GENESIS
         expected_seq = 0
         for e in entries:
-            if e.get("c14n") != "JCS":
-                return False, f"canonicalization is not JCS at seq {expected_seq}"
             if e.get("seq") != expected_seq:
                 return False, f"seq gap at {expected_seq} (got {e.get('seq')})"
             stored = e.get("hash")

@@ -312,7 +312,6 @@ class WireReasonCode:
     MALFORMED = "malformed"
     NON_FINITE = "non_finite"
     DUPLICATE_MEMBER = "duplicate_member"
-    CANONICALIZATION_REQUIRED = "canonicalization_required"
     NON_CANONICAL = "non_canonical"
     EXPIRED = ReasonCode.EXPIRED  # "expired" — reuse, don't reinvent
 
@@ -604,9 +603,6 @@ def _parse_token(token: str):
         raise WireError(WireReasonCode.MALFORMED, f"could not parse token JSON: {e}") from e
     if not isinstance(header, dict) or not isinstance(payload, dict):
         raise WireError(WireReasonCode.MALFORMED, "header/payload must be JSON objects")
-    if header.get("c14n") != "JCS":
-        raise WireError(WireReasonCode.CANONICALIZATION_REQUIRED,
-                        "token header must declare c14n='JCS'")
     try:
         canonical_header = canonical.dumps(header)
         canonical_payload = canonical.dumps(payload)
@@ -639,8 +635,8 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
     deployment would generalize `signer` into a `kid`-keyed resolver, which
     is a straightforward extension left out of this reference implementation.
 
-    Before the numbered checks, both JSON parts must declare and already be
-    encoded as RFC 8785 JCS; duplicate members and non-finite values fail
+    Before the numbered checks, both JSON parts must already be encoded as
+    RFC 8785 JCS; duplicate members and non-finite values fail
     closed during parsing. Steps then performed in the draft's own order:
       1. JWS signature of every DT_i (+ alg-confusion guard: the header's
          declared `alg` must equal `signer.alg` — never trust the header's

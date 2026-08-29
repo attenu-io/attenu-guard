@@ -1,6 +1,6 @@
 {
-  "description": "Unmarked pre-JCS token: rejected because JCS is the only supported canonicalization.",
-  "expect_reject_reason": "canonicalization_required",
+  "description": "Informational marker case: an unmarked token verifies when its header and payload bytes are JCS.",
+  "expect": "accept",
   "now": 0,
   "signer": {
     "alg": "HS256",

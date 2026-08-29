@@ -4,10 +4,10 @@
   "title": "Agent Delegation Audit Event",
   "description": "One decision in an agent delegation chain. Hash-chained, tamper-evident, offline-verifiable. Published as an open standard so SIEMs and observability tools can ingest agent-authority decisions in a common format.",
   "type": "object",
-  "required": ["v", "c14n", "seq", "ts", "event", "prev_hash", "hash"],
+  "required": ["v", "seq", "ts", "event", "prev_hash", "hash"],
   "properties": {
     "v": { "const": 1, "description": "Schema version." },
-    "c14n": { "const": "JCS", "description": "RFC 8785 canonicalization used by the event hash." },
+    "c14n": { "type": "string", "description": "Informational canonicalization label; verifiers enforce RFC 8785 by recomputing the event hash over JCS bytes." },
     "seq": { "type": "integer", "minimum": 0, "description": "Monotonic sequence number; gaps are provable evidence of deletion." },
     "ts": { "description": "Trusted timestamp (RFC 3339 string) or monotonic integer in tests." },
     "event": {

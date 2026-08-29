@@ -17,10 +17,10 @@ from attenu_guard.wire import HS256TestSigner  # noqa: E402
 
 
 class TestJCSSurfaces(unittest.TestCase):
-    def test_published_audit_schema_requires_the_jcs_marker(self):
+    def test_published_audit_schema_treats_the_jcs_marker_as_informational(self):
         schema = json.loads((_ROOT / "schema" / "agent-audit.schema.json").read_text())
-        self.assertIn("c14n", schema["required"])
-        self.assertEqual(schema["properties"]["c14n"]["const"], "JCS")
+        self.assertNotIn("c14n", schema["required"])
+        self.assertEqual(schema["properties"]["c14n"]["type"], "string")
 
     def test_audit_hash_covers_jcs_and_declares_the_format(self):
         log = AuditLog()
@@ -75,23 +75,47 @@ class TestJCSSurfaces(unittest.TestCase):
         self.assertEqual(bundle["anchor"]["c14n"], "JCS")
         self.assertTrue(evidence.verify_bundle(bundle, signer)["ok"])
 
-    def test_unmarked_audit_and_anchor_artifacts_are_not_accepted(self):
+    def test_c14n_is_informational_on_audit_anchor_and_bundle_verification(self):
         signer = HS256TestSigner(b"jcs-anchor", kid="jcs-1")
         guard = Guard.issue("root", Authority({"crm.read"}, [], ttl=60))
-        entries = guard.audit_log().entries
-        entry = dict(entries[0])
-        entry.pop("c14n")
-        self.assertFalse(AuditLog.verify([entry])[0])
+        original = guard.audit_log().entries[0]
 
-        anchor = guard.audit_log().anchor(signer)
-        anchor.pop("c14n")
-        self.assertFalse(AuditLog.verify_anchor(entries, anchor, signer)[0])
+        for marker in (None, "private-label-v2"):
+            with self.subTest(marker=marker):
+                entry = {key: value for key, value in original.items() if key not in ("c14n", "hash")}
+                if marker is not None:
+                    entry["c14n"] = marker
+                entry["hash"] = hashlib.sha256(
+                    GENESIS.encode() + canonical.dumps(entry)
+                ).hexdigest()
+                self.assertEqual(AuditLog.verify([entry]), (True, None))
 
-        bundle = evidence.export_bundle(guard.audit_log(), signer)
-        bundle.pop("c14n")
-        report = evidence.verify_bundle(bundle, signer)
-        self.assertFalse(report["ok"])
-        self.assertTrue(any("canonicalization" in failure for failure in report["failures"]))
+                body = {
+                    "v": 1,
+                    "chain_id": "chain",
+                    "seq": 0,
+                    "head": entry["hash"],
+                    "ts": 0,
+                }
+                if marker is not None:
+                    body["c14n"] = marker
+                anchor = {
+                    **body,
+                    "kid": signer.kid,
+                    "sig": signer.sign(canonical.dumps(body)).hex(),
+                }
+                self.assertEqual(AuditLog.verify_anchor([entry], anchor, signer), (True, None))
+
+                bundle = {
+                    "v": 1,
+                    "chain_id": "chain",
+                    "entries": [entry],
+                    "anchor": anchor,
+                }
+                if marker is not None:
+                    bundle["c14n"] = marker
+                report = evidence.verify_bundle(bundle, signer)
+                self.assertTrue(report["ok"], report["failures"])
 
 
 if __name__ == "__main__":

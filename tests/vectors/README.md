@@ -96,8 +96,8 @@ every CI run, not just a static fixture that can go stale.
   `"expect_reject_reason": "non_finite"`.
 - `reject_duplicate_member.json` — carries a duplicate object member name.
   `"expect_reject_reason": "duplicate_member"`.
-- `reject_unmarked_canonicalization.json` — omits the required JCS marker.
-  `"expect_reject_reason": "canonicalization_required"`.
+- `valid_jcs_unmarked_header.json` — omits the informational `c14n` marker while
+  retaining canonical JCS header and payload bytes. `"expect": "accept"`.
 
 ## File format
 
@@ -123,9 +123,9 @@ base64url(signature)`, base64url with no `=` padding (RFC 7515 §2). Decode
 any part with standard base64url decoding (re-pad to a multiple of 4 bytes
 first if your library requires it).
 
-Every accepted token carries `"c14n":"JCS"` in its protected header. The
-decoded protected header and payload bytes MUST already be RFC 8785 JCS; a
-verifier rejects non-canonical bytes rather than parsing and reserializing them.
+Producers SHOULD emit `"c14n":"JCS"` in the protected header as an informational
+label. The decoded protected header and payload bytes MUST already be RFC 8785
+JCS; a verifier enforces those bytes regardless of whether the label is present.
 
 To check a vector against your own implementation: verify each token's JWS
 signature with HMAC-SHA256 over the ASCII bytes of

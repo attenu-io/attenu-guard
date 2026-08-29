@@ -195,10 +195,6 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
     anchor = bundle.get("anchor") or {}
     checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked"}
     failures: list[str] = []
-    canonical_bundle = bundle.get("c14n") == "JCS"
-    if not canonical_bundle:
-        failures.append("integrity: bundle canonicalization is not JCS")
-
     # (1) integrity: hash chain (+ the signed anchor, when a verifier key is given)
     ok_chain, err = AuditLog.verify(entries)
     if not ok_chain: failures.append(f"integrity: {err}")
@@ -206,9 +202,9 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
         ok_anchor, aerr = AuditLog.verify_anchor(entries, anchor, signer)
         checks["anchor"] = "verified" if ok_anchor else "FAILED"
         if not ok_anchor: failures.append(f"integrity(anchor): {aerr}")
-        checks["integrity"] = bool(canonical_bundle and ok_chain and ok_anchor)
+        checks["integrity"] = bool(ok_chain and ok_anchor)
     else:
-        checks["integrity"] = bool(canonical_bundle and ok_chain)
+        checks["integrity"] = bool(ok_chain)
 
     auth, parent, afail = _node_authorities(entries)
     failures += afail
