@@ -94,7 +94,7 @@ invariant — in your framework, in your process — no proxy, and no network ca
 
 ## Canonicalization and compatibility
 
-Version 0.7 uses [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) for every
+Versions 0.7 and later use [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) for every
 signed or hash-linked artifact: Delegation Token protected headers and payloads,
 parent commitments, integrity seals, audit entries, anchors, and evidence bundles.
 Tokens and metadata-bearing artifacts emit `"c14n":"JCS"` as an informational
@@ -102,9 +102,9 @@ label. Verifiers enforce JCS from canonical bytes and hashes, not from that labe
 non-canonical input, duplicate object member names, non-finite numbers, and lone
 UTF-16 surrogates are rejected.
 
-This is a deliberate wire-format break from versions through 0.6.1. Version 0.7 has
+This is a deliberate wire-format break from versions through 0.6.1. Current versions have
 no legacy or dual-format reader. Producers and verifiers in different languages must
-move together; the 17 packaged [interop vectors](tests/vectors/README.md) pin the
+move together; the 19 packaged [interop vectors](tests/vectors/README.md) pin the
 required bytes and rejection reasons.
 
 ## Prove the safety claims yourself
