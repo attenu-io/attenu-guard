@@ -6,6 +6,19 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A ninth interop test vector, `reject_wildcard_boundary.json`** (`"expect_reject_reason":
+  "not_narrower"`), shipped in both copies and in the installed package. The leaf claims
+  `crmx.read` under a root holding the wildcard `crm.*` — a scope that shares the wildcard's
+  letters but not its segment boundary. `crm.*` covers `crm.` followed by anything, so
+  `crmx.read` is a different namespace and no ancestor grants it. It closes the half the eighth
+  left open: `reject_wildcard_widening.json` pins the DIRECTION of the wildcard rule, and this
+  pins its REACH. An independent verifier that implements the wildcard by stripping the `.*` and
+  testing `startswith("crm")` accepts the neighbouring namespace — the sloppy-prefix bug an
+  attacker uses to step sideways into the namespace next door — and so scored 8/8 while being
+  exploitable; it now fails a vector instead of shipping. The reference implementation already
+  rejected it (it strips only the `*` and keeps the dot); this is coverage, not a fix.
+
 ## [0.6.1] — 2026-08-29
 
 ### Added

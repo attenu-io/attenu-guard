@@ -630,6 +630,7 @@ class TestInteropVectors(unittest.TestCase):
             "reject_exceeded_ceiling.json", "reject_spliced_parent.json",
             "reject_depth_exceeded.json", "reject_nonmonotonic_exp.json",
             "reject_bad_signature.json", "reject_wildcard_widening.json",
+            "reject_wildcard_boundary.json",
         }
         self.assertEqual(set(self.written), expected)
         for filename in expected:

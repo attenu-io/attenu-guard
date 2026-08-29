@@ -357,6 +357,49 @@ def gen_reject_wildcard_widening() -> dict:
     )
 
 
+def gen_reject_wildcard_boundary() -> dict:
+    """(h) wildcard prefix boundary — a child claiming a NEIGHBOURING namespace
+    that merely shares the parent wildcard's letters.
+
+    reject_wildcard_widening.json covers a child claiming a wildcard its parent
+    never held; this covers the other half of the same rule, where the wildcard
+    is the PARENT's and the question is how far it reaches. 'crm.*' covers
+    'crm.' + anything, so the boundary is the separator, not the letters: a
+    verifier that implements the wildcard by stripping '.*' and asking
+    scope.startswith('crm') accepts 'crmx.read', because that string does start
+    with 'crm' — and an attacker who wants a namespace next door to the one it
+    was granted writes exactly that. The reference implementation strips only
+    the '*' and keeps the dot (Authority._scope_covers), so the neighbouring
+    namespace does not match.
+    """
+    signer = _signer()
+    _root, child, _leaf = _base_chain()
+    # Presented as the 2-hop prefix of the canonical chain, so the token under
+    # test is the LEAF and _tamper_leaf is safe: the parent whose wildcard is at
+    # issue is the root, and no par_hash downstream commits to what we change.
+    tokens = wire.serialize_chain(child, signer)
+
+    def hop_the_boundary(payload):
+        # The root holds {'crm.*', 'mail.send'}; 'crmx.read' shares the wildcard's
+        # letters but not its segment boundary, so no ancestor grants it.
+        payload["authorization_details"][0]["scopes"] = ["crmx.read"]
+
+    tokens[-1] = _tamper_leaf(tokens[-1], signer, hop_the_boundary)
+    return _vector(
+        "Adversarial: the leaf (summarizer) token's scopes are replaced with "
+        "'crmx.read', then re-signed, under a root that holds the wildcard "
+        "'crm.*'. MUST be rejected: 'crm.*' covers 'crm.' followed by anything, "
+        "so it reaches crm.read and crm.export but stops at the segment "
+        "boundary — 'crmx.read' is a different namespace, granted by no "
+        "ancestor. This vector exists because the boundary is exactly what a "
+        "prefix match loses: a verifier that strips the '.*' and tests "
+        "scope.startswith('crm') accepts 'crmx.read', since that string does "
+        "start with 'crm'. Stripping only the '*' — keeping the dot, and "
+        "testing startswith('crm.') — is the correct rule (subsumption rule 1).",
+        tokens, expect_reject_reason=wire.WireReasonCode.NOT_NARROWER,
+    )
+
+
 GENERATORS = {
     "valid_chain.json": gen_valid_chain,
     "reject_widened_scope.json": gen_reject_widened_scope,
@@ -366,6 +409,7 @@ GENERATORS = {
     "reject_nonmonotonic_exp.json": gen_reject_nonmonotonic_exp,
     "reject_bad_signature.json": gen_reject_bad_signature,
     "reject_wildcard_widening.json": gen_reject_wildcard_widening,
+    "reject_wildcard_boundary.json": gen_reject_wildcard_boundary,
 }
 
 

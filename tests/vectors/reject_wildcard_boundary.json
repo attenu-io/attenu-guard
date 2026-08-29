@@ -1,0 +1,14 @@
+{
+  "description": "Adversarial: the leaf (summarizer) token's scopes are replaced with 'crmx.read', then re-signed, under a root that holds the wildcard 'crm.*'. MUST be rejected: 'crm.*' covers 'crm.' followed by anything, so it reaches crm.read and crm.export but stops at the segment boundary \u2014 'crmx.read' is a different namespace, granted by no ancestor. This vector exists because the boundary is exactly what a prefix match loses: a verifier that strips the '.*' and tests scope.startswith('crm') accepts 'crmx.read', since that string does start with 'crm'. Stripping only the '*' \u2014 keeping the dot, and testing startswith('crm.') \u2014 is the correct rule (subsumption rule 1).",
+  "expect_reject_reason": "not_narrower",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJhbnkifSx7ImtleSI6Im1heF9yb3dzIiwibWF4IjoxMDAwMDB9XSwic2NvcGVzIjpbImNybS4qIiwibWFpbC5zZW5kIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJkZWxfZGVwdGgiOjAsImRlbF9tYXhfZGVwdGgiOjcsImV4cCI6MzYwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6Im9yY2hlc3RyYXRvciJ9.d_WnrVyK4uRQKJnj2mDkyUtpIbGZyVT_4P69VEAYd4Y",
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJub25lIn0seyJrZXkiOiJtYXhfcm93cyIsIm1heCI6NTAwMH1dLCJzY29wZXMiOlsiY3JteC5yZWFkIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJkZWxfZGVwdGgiOjEsImV4cCI6OTAwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImp0aSI6ImNoYWluOm4xIiwicGFyX2hhc2giOiJpalBpNlZqaTFhNVF0TmpPZTFHUHFaRW15blJERFN4X0VRNzFfQl84dU1NIiwic3ViIjoic3VtbWFyaXplciJ9.tRuKWM7xO80NG2kLwS_jIq4ywLkB6AEW1TlLuZJGIkE"
+  ]
+}

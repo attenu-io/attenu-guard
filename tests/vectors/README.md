@@ -22,7 +22,7 @@ for name, data in vectors.load_vectors().items():
     assert outcome == (data.get("expect") or data["expect_reject_reason"])
 ```
 
-`vectors.VECTOR_NAMES` lists the eight; `vectors.read_vector_bytes(name)` gives
+`vectors.VECTOR_NAMES` lists the nine; `vectors.read_vector_bytes(name)` gives
 you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
@@ -78,6 +78,12 @@ every CI run, not just a static fixture that can go stale.
   leaf claims strictly more than its parent ever held. The inverse of the
   legitimate direction in `valid_chain.json` (a concrete `crm.read` under a
   `crm.*` parent): wildcards narrow downward only.
+  `"expect_reject_reason": "not_narrower"`.
+- `reject_wildcard_boundary.json` — the leaf's scopes were replaced with
+  `crmx.read` under a root holding the wildcard `crm.*`. The claim shares the
+  wildcard's letters but not its segment boundary: `crm.*` covers `crm.`
+  followed by anything, so a verifier that strips the `.*` and tests
+  `startswith("crm")` wrongly accepts a neighbouring namespace.
   `"expect_reject_reason": "not_narrower"`.
 
 ## File format
