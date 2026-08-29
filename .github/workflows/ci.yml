@@ -45,6 +45,8 @@ jobs:
         run: python tests/test_sinks_identity.py
       - name: Wire format + offline verification
         run: python tests/test_wire.py
+      - name: cross-process revocation (the documented limit, and the seam that closes it)
+        run: python tests/test_cross_process_revocation.py
       - name: verify CLI + sample bundles (ledger, bundle, with/without key)
         run: python tests/test_cli_verify.py
       - name: Interop test vectors self-check
