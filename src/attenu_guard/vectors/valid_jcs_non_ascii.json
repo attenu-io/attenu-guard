@@ -1,0 +1,13 @@
+{
+  "description": "JCS separating case: a non-ASCII subject is raw UTF-8 rather than an ASCII escape.",
+  "expect": "accept",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjYwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImpjc19wcm9iZSI6Im5vbi1hc2NpaSIsImp0aSI6ImNoYWluOm4wIiwic3ViIjoicsOpc3Vtw6kifQ.hpEwkyiG01tBbHlAv5x4aDXPezJOYHnLJNYhS7Y2Qk8"
+  ]
+}

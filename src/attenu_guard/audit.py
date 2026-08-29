@@ -18,13 +18,14 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import canonical
+
 SCHEMA_VERSION = 1
 GENESIS = "0" * 64
 
 
 def _canonical(obj: dict) -> bytes:
-    # Deterministic serialisation so hashes are reproducible across machines.
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+    return canonical.dumps(obj)
 
 
 def _hash(prev_hash: str, payload: dict) -> str:
@@ -66,6 +67,7 @@ class AuditLog:
         with self._lock:
             payload = {
                 "v": SCHEMA_VERSION,
+                "c14n": "JCS",
                 "seq": self._seq,
                 "ts": ts,
                 "event": event,
@@ -78,7 +80,7 @@ class AuditLog:
             self._entries.append(payload)
             if self.path:
                 with self.path.open("a") as f:
-                    f.write(json.dumps(payload, sort_keys=True) + "\n")
+                    f.write(canonical.dumps(payload).decode("utf-8") + "\n")
             for sink in self.sinks:                    # local files only — never the network (see sinks.py)
                 sink.write(payload)
             return payload
@@ -109,8 +111,15 @@ class AuditLog:
         `verify_anchor` then catches a log that was fully rewritten and re-hashed — plain `verify` cannot,
         because a consistent rewrite reproduces its own hashes. The signed head hash is the fixed point."""
         seq, head = self.head()
-        body = {"v": SCHEMA_VERSION, "chain_id": self._chain_id_hint(), "seq": seq, "head": head, "ts": ts}
-        signing_input = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        body = {
+            "v": SCHEMA_VERSION,
+            "c14n": "JCS",
+            "chain_id": self._chain_id_hint(),
+            "seq": seq,
+            "head": head,
+            "ts": ts,
+        }
+        signing_input = canonical.dumps(body)
         return {**body, "kid": getattr(signer, "kid", None), "sig": signer.sign(signing_input).hex()}
 
     def _chain_id_hint(self) -> str:
@@ -122,8 +131,13 @@ class AuditLog:
     @staticmethod
     def verify_anchor(entries: list[dict], anchor: dict, signer) -> tuple[bool, str | None]:
         """The chain reproduces AND its head matches a SIGNED anchor. Catches a consistent full rewrite."""
-        body = {k: anchor[k] for k in ("v", "chain_id", "seq", "head", "ts")}
-        signing_input = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        if anchor.get("c14n") != "JCS":
+            return False, "anchor canonicalization is not JCS"
+        try:
+            body = {k: anchor[k] for k in ("v", "c14n", "chain_id", "seq", "head", "ts")}
+        except KeyError as exc:
+            return False, f"anchor missing field {exc.args[0]}"
+        signing_input = canonical.dumps(body)
         try:
             sig = bytes.fromhex(anchor.get("sig", ""))
         except ValueError:
@@ -145,6 +159,8 @@ class AuditLog:
         prev = GENESIS
         expected_seq = 0
         for e in entries:
+            if e.get("c14n") != "JCS":
+                return False, f"canonicalization is not JCS at seq {expected_seq}"
             if e.get("seq") != expected_seq:
                 return False, f"seq gap at {expected_seq} (got {e.get('seq')})"
             stored = e.get("hash")

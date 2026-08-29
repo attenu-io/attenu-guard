@@ -29,6 +29,10 @@ jobs:
           ! git grep -nE "\\bdelegation[_-]guard\\b|\\bdg (demo|view|scenarios|verify)\\b" -- . ":(exclude)CHANGELOG.md" ":(exclude)docs/draft-*.md"
       - name: Property invariants (4k trials each, zero deps)
         run: python tests/run_properties.py
+      - name: RFC 8785 canonicalization (zero deps)
+        run: python tests/test_canonical.py
+      - name: JCS signing and hashing surfaces (zero deps)
+        run: python tests/test_jcs_surfaces.py
       - name: Red-team (0 unresolved findings required)
         run: python tests/red_team.py
       - name: Core unit tests
@@ -72,7 +76,7 @@ jobs:
       - name: Install with all extras and run the hypothesis suite
         run: |
           pip install -e '.[test,all]'
-          pytest -q tests/test_invariants.py
+          pytest -q tests/test_invariants.py tests/test_core_v02.py
       - name: Ed25519 wire path (cryptography present)
         run: python tests/test_wire.py
   quickstart-canary:
@@ -111,7 +115,7 @@ jobs:
               except wire.WireError as e:
                   outcome = e.reason
               assert outcome == (data.get("expect") or data["expect_reject_reason"]), name
-          assert len(vectors.VECTOR_NAMES) == 9
+          assert len(vectors.VECTOR_NAMES) == 17
           print("packaged interop vectors OK")
           PY
   integrations:

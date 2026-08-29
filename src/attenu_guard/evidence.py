@@ -19,9 +19,9 @@ is the whole input, which is the point.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
+from attenu_guard import canonical
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.authority import Authority
 
@@ -31,7 +31,7 @@ __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "red
 # carry ONLY these — an unknown field is exactly where a raw tool argument would be smuggled, so it is a leak, not a
 # curiosity. This is a test, not a habit: `export_bundle(strict=True)` raises on any field outside this set.
 LEDGER_FIELDS = frozenset({
-    "v", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
+    "v", "c14n", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
     "scope", "tool", "context", "reason", "reasons", "authority", "requested", "granted", "target",
     "revoked", "strikes", "mode", "disposition",
 })
@@ -80,8 +80,15 @@ def _anchor_for(entries: list[dict], signer, ts: int = 0) -> dict:
         seq, head = -1, "GENESIS"
     else:
         seq, head = entries[-1].get("seq", len(entries) - 1), entries[-1]["hash"]
-    body = {"v": SCHEMA_VERSION, "chain_id": _chain_id(entries), "seq": seq, "head": head, "ts": ts}
-    signing_input = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+    body = {
+        "v": SCHEMA_VERSION,
+        "c14n": "JCS",
+        "chain_id": _chain_id(entries),
+        "seq": seq,
+        "head": head,
+        "ts": ts,
+    }
+    signing_input = canonical.dumps(body)
     return {**body, "kid": getattr(signer, "kid", None), "sig": signer.sign(signing_input).hex()}
 
 
@@ -111,7 +118,7 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     anchor = _anchor_for(entries, signer, ts)
     from attenu_guard import AuditLog as _AL
     anchor["verified"] = _AL.verify_anchor(entries, anchor, signer)[0]
-    return {"v": SCHEMA_VERSION, "chain_id": _chain_id(entries), "entries": entries, "anchor": anchor,
+    return {"v": SCHEMA_VERSION, "c14n": "JCS", "chain_id": _chain_id(entries), "entries": entries, "anchor": anchor,
             "redaction": report, "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
 
 
@@ -188,6 +195,9 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
     anchor = bundle.get("anchor") or {}
     checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked"}
     failures: list[str] = []
+    canonical_bundle = bundle.get("c14n") == "JCS"
+    if not canonical_bundle:
+        failures.append("integrity: bundle canonicalization is not JCS")
 
     # (1) integrity: hash chain (+ the signed anchor, when a verifier key is given)
     ok_chain, err = AuditLog.verify(entries)
@@ -196,9 +206,9 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
         ok_anchor, aerr = AuditLog.verify_anchor(entries, anchor, signer)
         checks["anchor"] = "verified" if ok_anchor else "FAILED"
         if not ok_anchor: failures.append(f"integrity(anchor): {aerr}")
-        checks["integrity"] = bool(ok_chain and ok_anchor)
+        checks["integrity"] = bool(canonical_bundle and ok_chain and ok_anchor)
     else:
-        checks["integrity"] = bool(ok_chain)
+        checks["integrity"] = bool(canonical_bundle and ok_chain)
 
     auth, parent, afail = _node_authorities(entries)
     failures += afail

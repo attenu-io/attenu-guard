@@ -92,6 +92,20 @@ invariant — in your framework, in your process — no proxy, and no network ca
 - **Scenario harness** — declarative JSON/YAML authorization tests (`attenu-guard scenarios file.json`); see [`scenarios/`](scenarios/).
 - **Adapters** — shipped, tested integrations for the major agent frameworks as [`attenu_guard.adapters.<name>`](src/attenu_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Microsoft Agent Framework, AG2, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno, Haystack, CAMEL-AI — and, for the **A2A** protocol, a client interceptor plus a guarded `AgentExecutor` that carries the attenuated chain across a hop between processes. Each has an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'attenu-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
+## Canonicalization and compatibility
+
+Version 0.7 uses [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) for every
+signed or hash-linked artifact: Delegation Token protected headers and payloads,
+parent commitments, integrity seals, audit entries, anchors, and evidence bundles.
+Tokens and metadata-bearing artifacts declare `"c14n":"JCS"`. Verifiers reject
+unmarked or non-canonical input, duplicate object member names, non-finite numbers,
+and lone UTF-16 surrogates.
+
+This is a deliberate wire-format break from versions through 0.6.1. Version 0.7 has
+no legacy or dual-format reader. Producers and verifiers in different languages must
+move together; the 17 packaged [interop vectors](tests/vectors/README.md) pin the
+required bytes and rejection reasons.
+
 ## Prove the safety claims yourself
 
 ```bash

@@ -22,7 +22,7 @@ sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "tests" / "vectors"))
 
 from attenu_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
-from attenu_guard import wire  # noqa: E402
+from attenu_guard import canonical, wire  # noqa: E402
 from attenu_guard import vectors  # noqa: E402  (the shipped copy of tests/vectors/)
 
 import generate as vectors_generate  # tests/vectors/generate.py  # noqa: E402
@@ -84,6 +84,13 @@ def _resign(header_b64, payload, signer):
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
+def _sign_raw(header_json: bytes, payload_json: bytes, signer):
+    header_b64 = wire.b64url_encode(header_json)
+    payload_b64 = wire.b64url_encode(payload_json)
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    return f"{header_b64}.{payload_b64}.{wire.b64url_encode(signer.sign(signing_input))}"
+
+
 def _tamper_leaf(token, signer, mutate):
     """Mutate `token`'s payload and re-sign it. Safe ONLY on the LAST token
     of a chain: nothing downstream commits (via par_hash) to a leaf token's
@@ -137,6 +144,85 @@ class TestBase64Url(unittest.TestCase):
         self.assertNotIn("/", encoded)
 
 
+class TestJCSWireContract(unittest.TestCase):
+    def test_new_tokens_declare_jcs_and_each_json_part_is_canonical(self):
+        signer = _signer()
+        root = Guard.issue(
+            "r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}",
+            Authority({"crm.read"}, [SpendCap(100.0)], ttl=60),
+        )
+        token = wire.serialize(root, signer)
+        header_b64, payload_b64, _signature = token.split(".")
+        header_bytes = wire.b64url_decode(header_b64)
+        payload_bytes = wire.b64url_decode(payload_b64)
+        header = json.loads(header_bytes)
+        payload = json.loads(payload_bytes)
+
+        self.assertEqual(header["c14n"], "JCS")
+        self.assertEqual(header_bytes, canonical.dumps(header))
+        self.assertEqual(payload_bytes, canonical.dumps(payload))
+        self.assertIn(b'"max":100', payload_bytes)
+        self.assertIn("r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}".encode(), payload_bytes)
+
+    def test_non_finite_value_cannot_be_minted(self):
+        with self.assertRaises(canonical.NonFiniteNumberError):
+            Guard.issue("root", Authority({"crm.read"}, [SpendCap(float("nan"))], ttl=60))
+
+    def test_load_rejects_non_finite_json_with_declared_reason(self):
+        signer = _signer()
+        token = _sign_raw(
+            b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
+            b'{"authorization_details":[],"del_depth":0,"del_max_depth":1,"exp":NaN,"iat":0}',
+            signer,
+        )
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([token], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NON_FINITE)
+
+    def test_load_rejects_duplicate_object_member_names(self):
+        signer = _signer()
+        token = _sign_raw(
+            b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
+            b'{"del_depth":0,"del_depth":1}',
+            signer,
+        )
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([token], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.DUPLICATE_MEMBER)
+
+    def test_load_rejects_unmarked_and_noncanonical_tokens(self):
+        signer = _signer()
+        unmarked = _sign_raw(
+            b'{"alg":"HS256","kid":"test","typ":"at+jwt"}',
+            b'{}',
+            signer,
+        )
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([unmarked], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.CANONICALIZATION_REQUIRED)
+
+        noncanonical = _sign_raw(
+            b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
+            b'{"authorization_details":[],"del_depth":0,"del_max_depth":1,"exp":60.0,"iat":0}',
+            signer,
+        )
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([noncanonical], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NON_CANONICAL)
+
+    def test_boolean_time_claim_is_not_accepted_as_a_number(self):
+        signer = _signer()
+        root = Guard.issue("root", Authority({"crm.read"}, [], ttl=60), max_depth=1)
+        token = wire.serialize(root, signer)
+        header_b64, payload_b64, _signature = token.split(".")
+        payload = json.loads(wire.b64url_decode(payload_b64))
+        payload["exp"] = True
+        token = _resign(header_b64, payload, signer)
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([token], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+
+
 # =========================================================================
 # serialize() -> load(): single-token round trip
 # =========================================================================
@@ -166,7 +252,9 @@ class TestSingleTokenRoundTrip(unittest.TestCase):
         token = wire.serialize(root, signer, iss="my-issuer", aud="my-audience", iat=1000)
         header, payload = _decode(token)
 
-        self.assertEqual(header, {"typ": "at+jwt", "alg": "HS256", "kid": "root-key-7"})
+        self.assertEqual(header, {
+            "typ": "at+jwt", "alg": "HS256", "kid": "root-key-7", "c14n": "JCS",
+        })
         self.assertEqual(payload["iss"], "my-issuer")
         self.assertEqual(payload["sub"], "orchestrator")
         self.assertEqual(payload["aud"], "my-audience")
@@ -631,6 +719,10 @@ class TestInteropVectors(unittest.TestCase):
             "reject_depth_exceeded.json", "reject_nonmonotonic_exp.json",
             "reject_bad_signature.json", "reject_wildcard_widening.json",
             "reject_wildcard_boundary.json",
+            "valid_jcs_integral_float.json", "valid_jcs_exponent_form.json",
+            "valid_jcs_non_ascii.json", "valid_jcs_utf16_key_order.json",
+            "valid_jcs_big_integer.json", "reject_non_finite.json",
+            "reject_duplicate_member.json", "reject_unmarked_canonicalization.json",
         }
         self.assertEqual(set(self.written), expected)
         for filename in expected:
@@ -661,6 +753,34 @@ class TestInteropVectors(unittest.TestCase):
         # regenerating must reproduce identical JSON, token-for-token.
         again = vectors_generate.generate_all(self.vectors_dir)
         self.assertEqual(self.written, again)
+
+    def test_separating_vectors_pin_the_jcs_bytes(self):
+        expected_fragments = {
+            "valid_jcs_integral_float.json": b'"jcs_probe":100',
+            "valid_jcs_exponent_form.json": b'"jcs_probe":[0.000001,10000000000000000]',
+            "valid_jcs_non_ascii.json": "r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}".encode(),
+            "valid_jcs_utf16_key_order.json": "\"\U00010000\":1,\"\ue000\":2".encode(),
+            "valid_jcs_big_integer.json": b'"jcs_probe":1152921504606847000',
+        }
+        for filename, fragment in expected_fragments.items():
+            with self.subTest(vector=filename):
+                token = self.written[filename]["tokens"][0]
+                header_b64, payload_b64, _signature = token.split(".")
+                header_bytes = wire.b64url_decode(header_b64)
+                payload_bytes = wire.b64url_decode(payload_b64)
+                self.assertEqual(header_bytes, canonical.dumps(json.loads(header_bytes)))
+                self.assertEqual(payload_bytes, canonical.dumps(json.loads(payload_bytes)))
+                self.assertIn(fragment, payload_bytes)
+
+    def test_parse_rejection_vectors_declare_distinct_reasons(self):
+        expected = {
+            "reject_non_finite.json": wire.WireReasonCode.NON_FINITE,
+            "reject_duplicate_member.json": wire.WireReasonCode.DUPLICATE_MEMBER,
+            "reject_unmarked_canonicalization.json": wire.WireReasonCode.CANONICALIZATION_REQUIRED,
+        }
+        for filename, reason in expected.items():
+            with self.subTest(vector=filename):
+                self.assertEqual(self.written[filename]["expect_reject_reason"], reason)
 
 
 # =========================================================================

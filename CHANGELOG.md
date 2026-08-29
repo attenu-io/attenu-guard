@@ -6,6 +6,18 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-08-29
+
+### Changed — BREAKING
+- **All signed and hash-linked artifacts now use RFC 8785 JCS exclusively.** Delegation
+  tokens declare `"c14n":"JCS"`; their protected header and payload must already be
+  canonical JCS bytes. Audit entries, integrity seals, anchors, and evidence bundles use
+  the same canonicalizer and carry the same marker where the artifact has metadata.
+  Duplicate object members, non-finite numbers, lone surrogates, unmarked tokens, and
+  non-canonical encodings are rejected. The interop suite now contains 17 vectors,
+  including all six known Python/ECMAScript divergence classes. There is no legacy or
+  dual-format reader.
+
 ### Added
 - **A ninth interop test vector, `reject_wildcard_boundary.json`** (`"expect_reject_reason":
   "not_narrower"`), shipped in both copies and in the installed package. The leaf claims
@@ -263,4 +275,6 @@ landed as the reference implementation of the Internet-Draft.
 - Initial release: `Authority` / `Guard` core, `meet` attenuation, chain depth /
   fanout / budget ceilings, cascade revocation, and a hash-chained audit log.
 
+[0.7.0]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.7.0
+[0.6.1]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.6.1
 [0.2.0]: https://github.com/attenu-io/delegation-guard/releases/tag/v0.2.0

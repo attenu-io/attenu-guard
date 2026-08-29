@@ -1,14 +1,16 @@
 {
  "anchor": {
+  "c14n": "JCS",
   "chain_id": "chain",
-  "head": "1fab494c389db0f9ecb475c28b03b6da6f2095a1d85636896e3529c0cbf74bef",
+  "head": "7c77d504631f35f026cb9c8613dac52c6139460b6642a6ebe77b2aadeea0e751",
   "kid": "sample",
   "seq": 6,
-  "sig": "957bfc0abdf4e88c9e1cbcc5cfc1bf827e5172eb7611b45fc073da3c71a073b7",
+  "sig": "0b5915a08b1e69fa76e6297a81824045684fa46c7f529ef8aede6906b6951ccb",
   "ts": 0,
   "v": 1,
   "verified": true
  },
+ "c14n": "JCS",
  "chain_id": "chain",
  "entries": [
   {
@@ -30,9 +32,10 @@
     ],
     "ttl": 3600
    },
+   "c14n": "JCS",
    "chain_id": "chain",
    "event": "root",
-   "hash": "92d3c9485b1aa10314ca180a23eb98bc051877e8ad3b1a9c93a0e618c63ceaa2",
+   "hash": "ffe8f8645939268a2cdb44de732bd99bf425c761eb4975175302a638d983fe56",
    "node": "chain:n0",
    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
    "seq": 0,
@@ -41,6 +44,7 @@
   },
   {
    "agent": "reader",
+   "c14n": "JCS",
    "chain_id": "chain",
    "event": "spawn",
    "granted": {
@@ -59,10 +63,10 @@
     ],
     "ttl": 900
    },
-   "hash": "bb84281b570103ee5fe144266c2639bf805b4a56be9c5354272a311fa769991b",
+   "hash": "1986d26e4222fd7d94b642fab89b36cea6a96eee0d953a2757cfbcf936bb48ed",
    "node": "chain:n1",
    "parent": "chain:n0",
-   "prev_hash": "92d3c9485b1aa10314ca180a23eb98bc051877e8ad3b1a9c93a0e618c63ceaa2",
+   "prev_hash": "ffe8f8645939268a2cdb44de732bd99bf425c761eb4975175302a638d983fe56",
    "requested": {
     "constraints": [
      {
@@ -86,6 +90,7 @@
   },
   {
    "agent": "analyst",
+   "c14n": "JCS",
    "chain_id": "chain",
    "event": "spawn",
    "granted": {
@@ -104,10 +109,10 @@
     ],
     "ttl": 600
    },
-   "hash": "ca41d657a150fd92500e2b9cdc1d6a1bc0af587895e7319e59a8bbb0f5fc4f6b",
+   "hash": "9f4be087867c183c67e543132da9a2fe79b0356a20262071fb4a999c1dadd5d2",
    "node": "chain:n2",
    "parent": "chain:n1",
-   "prev_hash": "bb84281b570103ee5fe144266c2639bf805b4a56be9c5354272a311fa769991b",
+   "prev_hash": "1986d26e4222fd7d94b642fab89b36cea6a96eee0d953a2757cfbcf936bb48ed",
    "requested": {
     "constraints": [
      {
@@ -126,14 +131,15 @@
    "v": 1
   },
   {
+   "c14n": "JCS",
    "chain_id": "chain",
    "context": {
     "rows": 4200
    },
    "event": "allow",
-   "hash": "d2604ee10d870cafdc7124788cf1c4d8f8f4d74f63c1f0ec191b84940f857f11",
+   "hash": "0762bdf9032574bd147ed3db59a45c16e30d2d7f59f91bcc942b219f32bca880",
    "node": "chain:n1",
-   "prev_hash": "ca41d657a150fd92500e2b9cdc1d6a1bc0af587895e7319e59a8bbb0f5fc4f6b",
+   "prev_hash": "9f4be087867c183c67e543132da9a2fe79b0356a20262071fb4a999c1dadd5d2",
    "scope": "crm.read",
    "seq": 3,
    "tool": "crm_query",
@@ -141,14 +147,15 @@
    "v": 1
   },
   {
+   "c14n": "JCS",
    "chain_id": "chain",
    "context": {
     "rows": 120
    },
    "event": "allow",
-   "hash": "5cea0fde2be58fa9de4754c45df3978937e8c43b7d036ad811f9a768f5057170",
+   "hash": "93f1dae654bfadfb9171e3d5a5ca87d0c0a06ac346a538eeeaaa93c9cba4b8a5",
    "node": "chain:n2",
-   "prev_hash": "d2604ee10d870cafdc7124788cf1c4d8f8f4d74f63c1f0ec191b84940f857f11",
+   "prev_hash": "0762bdf9032574bd147ed3db59a45c16e30d2d7f59f91bcc942b219f32bca880",
    "scope": "crm.read",
    "seq": 4,
    "tool": "crm_query",
@@ -156,14 +163,15 @@
    "v": 1
   },
   {
+   "c14n": "JCS",
    "chain_id": "chain",
    "context": {
     "rows": 9000
    },
    "event": "deny",
-   "hash": "7bd04e5f5b9843f49a20944087e4ce198c6c3b4108fc383eda1e2584ad8d5dc3",
+   "hash": "2e3e3826b4c3514ef9211270672ba1ad4c3721a8fed2bf338947db18d3866884",
    "node": "chain:n2",
-   "prev_hash": "5cea0fde2be58fa9de4754c45df3978937e8c43b7d036ad811f9a768f5057170",
+   "prev_hash": "93f1dae654bfadfb9171e3d5a5ca87d0c0a06ac346a538eeeaaa93c9cba4b8a5",
    "reason": "ceiling_exceeded",
    "reasons": [
     {
@@ -181,15 +189,16 @@
    "v": 1
   },
   {
+   "c14n": "JCS",
    "chain_id": "chain",
    "context": {
     "egress": "any"
    },
    "disposition": "out_of_authority",
    "event": "deny",
-   "hash": "1fab494c389db0f9ecb475c28b03b6da6f2095a1d85636896e3529c0cbf74bef",
+   "hash": "7c77d504631f35f026cb9c8613dac52c6139460b6642a6ebe77b2aadeea0e751",
    "node": "chain:n1",
-   "prev_hash": "7bd04e5f5b9843f49a20944087e4ce198c6c3b4108fc383eda1e2584ad8d5dc3",
+   "prev_hash": "2e3e3826b4c3514ef9211270672ba1ad4c3721a8fed2bf338947db18d3866884",
    "reason": "scope_not_granted",
    "reasons": [
     {

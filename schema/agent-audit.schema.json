@@ -4,9 +4,10 @@
   "title": "Agent Delegation Audit Event",
   "description": "One decision in an agent delegation chain. Hash-chained, tamper-evident, offline-verifiable. Published as an open standard so SIEMs and observability tools can ingest agent-authority decisions in a common format.",
   "type": "object",
-  "required": ["v", "seq", "ts", "event", "prev_hash", "hash"],
+  "required": ["v", "c14n", "seq", "ts", "event", "prev_hash", "hash"],
   "properties": {
     "v": { "const": 1, "description": "Schema version." },
+    "c14n": { "const": "JCS", "description": "RFC 8785 canonicalization used by the event hash." },
     "seq": { "type": "integer", "minimum": 0, "description": "Monotonic sequence number; gaps are provable evidence of deletion." },
     "ts": { "description": "Trusted timestamp (RFC 3339 string) or monotonic integer in tests." },
     "event": {
@@ -35,7 +36,7 @@
     "disposition": { "type": "string", "enum": ["held_pending_grant", "withheld_tier2", "unresolved", "out_of_authority"],
                      "description": "deny only: WHY the scope was not in the node's authority — held pending an operator grant (waiting on a human) | withheld tier-2 (resolvable only to a heuristic never granted) | unresolved (no authority known for the tool) | out_of_authority (resolved and grantable, but not held by this node: over-reach)." },
     "prev_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || canonical(event-without-hash))." }
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || RFC8785-JCS(event-without-hash))." }
   },
   "additionalProperties": true
 }

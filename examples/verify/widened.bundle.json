@@ -1,14 +1,16 @@
 {
  "anchor": {
+  "c14n": "JCS",
   "chain_id": "chain",
-  "head": "7e7e1b26b0abfb2f858701eecade5801820bbd349f69f68aa9a20043dfcda26b",
+  "head": "57a6fa7a58c512b545855677ea151b596fd5b4eed51fad0dab284e798163b267",
   "kid": "sample",
   "seq": 2,
-  "sig": "970e2329483c980044473a23db43540c31df2d907bd78d293e14d1b9f041e070",
+  "sig": "597fcb72eeb77215a5f3d005e19e23bcec3254fe2b1496e50afdfaf502923bdf",
   "ts": 0,
   "v": 1,
   "verified": true
  },
+ "c14n": "JCS",
  "chain_id": "chain",
  "entries": [
   {
@@ -29,9 +31,10 @@
     ],
     "ttl": 900
    },
+   "c14n": "JCS",
    "chain_id": "chain",
    "event": "root",
-   "hash": "45d8788f2393a7deb704386c84e29cfeb0e683753df4dd7d28304bff74586ef9",
+   "hash": "989509aa8f2a5d9fcf1b2c89ba0f10f1d4b9e741f809cc02dcfd3fdf66e846e9",
    "node": "n0",
    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
    "seq": 0,
@@ -40,6 +43,7 @@
   },
   {
    "agent": "exporter",
+   "c14n": "JCS",
    "chain_id": "chain",
    "event": "spawn",
    "granted": {
@@ -55,24 +59,25 @@
     ],
     "ttl": 900
    },
-   "hash": "1d2c4ca4b1946ebec2be9650d3245f1de0df568c4c6a0db6da7ecef0dea906aa",
+   "hash": "2029c3311c603219d4bc4dd8760eaf2ce34d876d2020da9b1709e7b18b5d99b1",
    "node": "n1",
    "parent": "n0",
-   "prev_hash": "45d8788f2393a7deb704386c84e29cfeb0e683753df4dd7d28304bff74586ef9",
+   "prev_hash": "989509aa8f2a5d9fcf1b2c89ba0f10f1d4b9e741f809cc02dcfd3fdf66e846e9",
    "seq": 1,
    "ts": 2,
    "v": 1
   },
   {
    "agent": "exporter",
+   "c14n": "JCS",
    "chain_id": "chain",
    "context": {
     "egress": "any"
    },
    "event": "allow",
-   "hash": "7e7e1b26b0abfb2f858701eecade5801820bbd349f69f68aa9a20043dfcda26b",
+   "hash": "57a6fa7a58c512b545855677ea151b596fd5b4eed51fad0dab284e798163b267",
    "node": "n1",
-   "prev_hash": "1d2c4ca4b1946ebec2be9650d3245f1de0df568c4c6a0db6da7ecef0dea906aa",
+   "prev_hash": "2029c3311c603219d4bc4dd8760eaf2ce34d876d2020da9b1709e7b18b5d99b1",
    "scope": "crm.export",
    "seq": 2,
    "tool": "crm_export",

@@ -22,7 +22,7 @@ for name, data in vectors.load_vectors().items():
     assert outcome == (data.get("expect") or data["expect_reject_reason"])
 ```
 
-`vectors.VECTOR_NAMES` lists the nine; `vectors.read_vector_bytes(name)` gives
+`vectors.VECTOR_NAMES` lists the 17 vectors; `vectors.read_vector_bytes(name)` gives
 you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
@@ -85,6 +85,19 @@ every CI run, not just a static fixture that can go stale.
   followed by anything, so a verifier that strips the `.*` and tests
   `startswith("crm")` wrongly accepts a neighbouring namespace.
   `"expect_reject_reason": "not_narrower"`.
+- `valid_jcs_integral_float.json` — pins `100.0` to the JCS bytes `100`.
+- `valid_jcs_exponent_form.json` — pins ECMAScript/JCS decimal form at `1e-6`
+  and `1e16`.
+- `valid_jcs_non_ascii.json` — pins raw UTF-8 for a non-ASCII subject.
+- `valid_jcs_utf16_key_order.json` — pins UTF-16 code-unit member ordering.
+- `valid_jcs_big_integer.json` — pins the binary64 form of a Python integer
+  outside the safe-integer range.
+- `reject_non_finite.json` — carries `NaN`, which is not JSON or JCS.
+  `"expect_reject_reason": "non_finite"`.
+- `reject_duplicate_member.json` — carries a duplicate object member name.
+  `"expect_reject_reason": "duplicate_member"`.
+- `reject_unmarked_canonicalization.json` — omits the required JCS marker.
+  `"expect_reject_reason": "canonicalization_required"`.
 
 ## File format
 
@@ -109,6 +122,10 @@ Delegation Token exactly as defined by the draft's Token Format section:
 base64url(signature)`, base64url with no `=` padding (RFC 7515 §2). Decode
 any part with standard base64url decoding (re-pad to a multiple of 4 bytes
 first if your library requires it).
+
+Every accepted token carries `"c14n":"JCS"` in its protected header. The
+decoded protected header and payload bytes MUST already be RFC 8785 JCS; a
+verifier rejects non-canonical bytes rather than parsing and reserializing them.
 
 To check a vector against your own implementation: verify each token's JWS
 signature with HMAC-SHA256 over the ASCII bytes of

@@ -135,6 +135,10 @@ fully-specified algorithm {{RFC9864}}. Implementations MUST support Ed25519
 {{RFC8032}} {{RFC8037}} and MAY support ES256 and, for post-quantum readiness,
 ML-DSA {{RFC9964}}. The token uses the "application/at+jwt" header type of
 {{RFC9068}} and includes its required claims (iss, exp, aud, sub, iat, jti).
+The protected header MUST contain "c14n": "JCS". The protected header and
+payload JSON MUST be serialized with JCS {{RFC8785}} before base64url encoding.
+Verifiers MUST reject non-canonical encodings, duplicate object member names,
+non-finite numbers, and lone UTF-16 surrogates.
 
 In addition, a Delegation Token contains:
 
@@ -212,9 +216,9 @@ Each child token commits to its parent by "par_hash" ({{token-format}}). This
 binds the child to the parent's exact serialized bytes, so a child cannot be
 re-parented onto a different (e.g. broader) token: doing so changes the parent's
 Signing Input and thus its SHA-256 digest, which no longer matches the child's
-"par_hash". Canonicalization is not required for "par_hash" because it digests
-the already-serialized JWS Signing Input directly; where this document compares
-JSON structures (e.g. test vectors), JCS {{RFC8785}} is used.
+"par_hash". The digest is over the already-serialized JWS Signing Input; the
+protected header and payload that form that input are JCS {{RFC8785}} as required
+by {{token-format}}.
 
 # Offline Verification Algorithm {#verify}
 
@@ -336,7 +340,8 @@ acknowledged.
 
 A permissively licensed reference implementation (the "attenu-guard" library)
 and a set of offline-verification test vectors (chains that MUST verify and
-adversarial chains that MUST be rejected: widened scope, exceeded ceiling,
-spliced parent, exceeded depth, non-monotonic expiry, revoked entry, replayed
-token) accompany this draft and are intended for interoperability testing across
-independent implementations.
+adversarial chains that MUST be rejected) accompany this draft. Separating
+vectors cover scope and ceiling widening, parent splicing, depth and expiry
+violations, wildcard errors, RFC 8785 number and string forms, non-finite values,
+duplicate member names, and the required JCS marker. They are intended for
+interoperability testing across independent implementations.

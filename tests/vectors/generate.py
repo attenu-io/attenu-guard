@@ -73,6 +73,14 @@ def _resign(header_b64: str, payload: dict, signer: wire.Signer) -> str:
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
+def _sign_raw(header_json: bytes, payload_json: bytes, signer: wire.Signer) -> str:
+    """Sign exact JSON bytes for parser-rejection vectors that a dict cannot represent."""
+    header_b64 = wire.b64url_encode(header_json)
+    payload_b64 = wire.b64url_encode(payload_json)
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    return f"{header_b64}.{payload_b64}.{wire.b64url_encode(signer.sign(signing_input))}"
+
+
 def _tamper_leaf(token: str, signer: wire.Signer, mutate) -> str:
     """Mutate `token`'s payload and re-sign it. Safe to use ONLY on the last
     (leaf) token of a chain: nothing downstream references a leaf token's
@@ -400,6 +408,95 @@ def gen_reject_wildcard_boundary() -> dict:
     )
 
 
+# =========================================================================
+# RFC 8785 separating vectors
+# =========================================================================
+
+def _jcs_probe(value, *, agent_id: str = "jcs-probe") -> list[str]:
+    signer = _signer()
+    root = Guard.issue(agent_id, Authority({"probe.read"}, [], ttl=60), max_depth=1)
+    token = wire.serialize(root, signer)
+    header_b64, payload_b64, _signature = token.split(".")
+    payload = json.loads(wire.b64url_decode(payload_b64))
+    payload["jcs_probe"] = value
+    return [_resign(header_b64, payload, signer)]
+
+
+def gen_valid_jcs_integral_float() -> dict:
+    return _vector(
+        "JCS separating case: an integral binary64 value is emitted as 100, not 100.0.",
+        _jcs_probe(100.0), expect="accept",
+    )
+
+
+def gen_valid_jcs_exponent_form() -> dict:
+    return _vector(
+        "JCS separating case: 1e-6 and 1e16 use ECMAScript decimal form at both boundaries.",
+        _jcs_probe([1e-6, 1e16]), expect="accept",
+    )
+
+
+def gen_valid_jcs_non_ascii() -> dict:
+    return _vector(
+        "JCS separating case: a non-ASCII subject is raw UTF-8 rather than an ASCII escape.",
+        _jcs_probe("non-ascii", agent_id="r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}"),
+        expect="accept",
+    )
+
+
+def gen_valid_jcs_utf16_key_order() -> dict:
+    return _vector(
+        "JCS separating case: object member names are ordered by UTF-16 code units.",
+        _jcs_probe({"\ue000": 2, "\U00010000": 1}), expect="accept",
+    )
+
+
+def gen_valid_jcs_big_integer() -> dict:
+    return _vector(
+        "JCS separating case: Python's arbitrary-precision integer is serialized through binary64.",
+        _jcs_probe(2**60 + 1), expect="accept",
+    )
+
+
+def _raw_valid_root() -> tuple[bytes, bytes, wire.Signer]:
+    signer = _signer()
+    root = Guard.issue("parser-probe", Authority({"probe.read"}, [], ttl=60), max_depth=1)
+    header_b64, payload_b64, _signature = wire.serialize(root, signer).split(".")
+    return wire.b64url_decode(header_b64), wire.b64url_decode(payload_b64), signer
+
+
+def gen_reject_non_finite() -> dict:
+    header, payload, signer = _raw_valid_root()
+    payload = payload.replace(b'"exp":60', b'"exp":NaN', 1)
+    return _vector(
+        "Invalid JSON/JCS separating case: NaN is rejected before verification.",
+        [_sign_raw(header, payload, signer)],
+        expect_reject_reason=wire.WireReasonCode.NON_FINITE,
+    )
+
+
+def gen_reject_duplicate_member() -> dict:
+    header, payload, signer = _raw_valid_root()
+    payload = payload.replace(b'"del_depth":0', b'"del_depth":0,"del_depth":0', 1)
+    return _vector(
+        "Invalid JSON/JCS separating case: duplicate member names are rejected, never last-value-wins.",
+        [_sign_raw(header, payload, signer)],
+        expect_reject_reason=wire.WireReasonCode.DUPLICATE_MEMBER,
+    )
+
+
+def gen_reject_unmarked_canonicalization() -> dict:
+    header, payload, signer = _raw_valid_root()
+    header_obj = json.loads(header)
+    header_obj.pop("c14n")
+    header = wire._canonical_json(header_obj)
+    return _vector(
+        "Unmarked pre-JCS token: rejected because JCS is the only supported canonicalization.",
+        [_sign_raw(header, payload, signer)],
+        expect_reject_reason=wire.WireReasonCode.CANONICALIZATION_REQUIRED,
+    )
+
+
 GENERATORS = {
     "valid_chain.json": gen_valid_chain,
     "reject_widened_scope.json": gen_reject_widened_scope,
@@ -410,6 +507,14 @@ GENERATORS = {
     "reject_bad_signature.json": gen_reject_bad_signature,
     "reject_wildcard_widening.json": gen_reject_wildcard_widening,
     "reject_wildcard_boundary.json": gen_reject_wildcard_boundary,
+    "valid_jcs_integral_float.json": gen_valid_jcs_integral_float,
+    "valid_jcs_exponent_form.json": gen_valid_jcs_exponent_form,
+    "valid_jcs_non_ascii.json": gen_valid_jcs_non_ascii,
+    "valid_jcs_utf16_key_order.json": gen_valid_jcs_utf16_key_order,
+    "valid_jcs_big_integer.json": gen_valid_jcs_big_integer,
+    "reject_non_finite.json": gen_reject_non_finite,
+    "reject_duplicate_member.json": gen_reject_duplicate_member,
+    "reject_unmarked_canonicalization.json": gen_reject_unmarked_canonicalization,
 }
 
 

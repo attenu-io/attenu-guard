@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
 from .authority import Authority
+from . import canonical
 from .reasons import Decision, ReasonCode
 
 __all__ = [
@@ -88,11 +89,12 @@ def b64url_decode(s: str) -> bytes:
 
 
 def _canonical_json(obj) -> bytes:
-    # Deterministic bytes for a given dict: same key order every time
-    # (sort_keys), no incidental whitespace (compact separators). This is
-    # what makes `par_hash` reproducible and independent of dict insertion
-    # order — mirrors audit.py's `_canonical`/chain.py's `_seal`.
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        return canonical.dumps(obj)
+    except canonical.NonFiniteNumberError as exc:
+        raise WireError(WireReasonCode.NON_FINITE, str(exc)) from exc
+    except canonical.CanonicalizationError as exc:
+        raise WireError(WireReasonCode.NON_CANONICAL, str(exc)) from exc
 
 
 def _encode_part(obj: dict) -> str:
@@ -308,6 +310,10 @@ class WireReasonCode:
     DEPTH_INVALID = "depth_invalid"
     NOT_NARROWER = "not_narrower"
     MALFORMED = "malformed"
+    NON_FINITE = "non_finite"
+    DUPLICATE_MEMBER = "duplicate_member"
+    CANONICALIZATION_REQUIRED = "canonicalization_required"
+    NON_CANONICAL = "non_canonical"
     EXPIRED = ReasonCode.EXPIRED  # "expired" — reuse, don't reinvent
 
 
@@ -341,6 +347,10 @@ def _authority_detail(authority: Authority) -> dict:
     }
 
 
+def _is_json_number(value) -> bool:
+    return type(value) is int or type(value) is float
+
+
 def _authority_from_payload(payload: Mapping) -> Authority:
     """Inverse of `_authority_detail`, reconstituting the FULL Authority
     (including ttl, recovered as `exp - iat`) so that `load()` can hand the
@@ -355,7 +365,7 @@ def _authority_from_payload(payload: Mapping) -> Authority:
         raise WireError(WireReasonCode.MALFORMED,
                          "authorization_details[0].type must be 'agent_delegation'")
     iat, exp = payload.get("iat"), payload.get("exp")
-    if not isinstance(iat, (int, float)) or not isinstance(exp, (int, float)):
+    if not _is_json_number(iat) or not _is_json_number(exp):
         raise WireError(WireReasonCode.MALFORMED, "iat/exp missing or not numeric")
     wire = {
         "scopes": d0.get("scopes", []),
@@ -401,7 +411,12 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
             "Authority.ttl is None; a Delegation Token requires a finite "
             "ttl to compute the required 'exp' claim (RFC 9068)")
 
-    header = {"typ": "at+jwt", "alg": signer.alg, "kid": getattr(signer, "kid", None)}
+    header = {
+        "typ": "at+jwt",
+        "alg": signer.alg,
+        "kid": getattr(signer, "kid", None),
+        "c14n": "JCS",
+    }
     payload = {
         "iss": iss,
         "sub": node.agent_id,
@@ -430,7 +445,7 @@ def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
     """Emit ONE Delegation Token for `guard_or_node` (a `Guard`, or a bare
     `chain.Node`) as a compact JWT: `b64url(header).b64url(payload).b64url(sig)`.
 
-    Header: `{"typ":"at+jwt","alg":signer.alg,"kid":<signer.kid>}`.
+    Header: `{"typ":"at+jwt","alg":signer.alg,"kid":<signer.kid>,"c14n":"JCS"}`.
     Payload: the RFC 9068 access-token claims (`iss`, `sub`=agent_id, `aud`,
     `iat`, `exp`=iat+ttl, `jti`), `authorization_details` built from
     `Authority.to_wire()` (draft {{authority}}), and `del_depth`. The ROOT
@@ -559,13 +574,49 @@ def _parse_token(token: str):
                         f"expected 3 dot-separated parts, got {len(parts)}")
     header_b64, payload_b64, sig_b64 = parts
     try:
-        header = json.loads(b64url_decode(header_b64))
-        payload = json.loads(b64url_decode(payload_b64))
+        header_bytes = b64url_decode(header_b64)
+        payload_bytes = b64url_decode(payload_b64)
         sig = b64url_decode(sig_b64)
     except Exception as e:
         raise WireError(WireReasonCode.MALFORMED, f"could not decode token: {e}") from e
+
+    def reject_duplicates(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise WireError(WireReasonCode.DUPLICATE_MEMBER,
+                                f"duplicate JSON object member {key!r}")
+            obj[key] = value
+        return obj
+
+    def reject_constant(value):
+        raise WireError(WireReasonCode.NON_FINITE,
+                        f"non-finite JSON number {value!r} is not permitted")
+
+    try:
+        header = json.loads(header_bytes, object_pairs_hook=reject_duplicates,
+                            parse_constant=reject_constant)
+        payload = json.loads(payload_bytes, object_pairs_hook=reject_duplicates,
+                             parse_constant=reject_constant)
+    except WireError:
+        raise
+    except Exception as e:
+        raise WireError(WireReasonCode.MALFORMED, f"could not parse token JSON: {e}") from e
     if not isinstance(header, dict) or not isinstance(payload, dict):
         raise WireError(WireReasonCode.MALFORMED, "header/payload must be JSON objects")
+    if header.get("c14n") != "JCS":
+        raise WireError(WireReasonCode.CANONICALIZATION_REQUIRED,
+                        "token header must declare c14n='JCS'")
+    try:
+        canonical_header = canonical.dumps(header)
+        canonical_payload = canonical.dumps(payload)
+    except canonical.NonFiniteNumberError as exc:
+        raise WireError(WireReasonCode.NON_FINITE, str(exc)) from exc
+    except canonical.CanonicalizationError as exc:
+        raise WireError(WireReasonCode.NON_CANONICAL, str(exc)) from exc
+    if header_bytes != canonical_header or payload_bytes != canonical_payload:
+        raise WireError(WireReasonCode.NON_CANONICAL,
+                        "token header and payload must be RFC 8785 JCS bytes")
     signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
     return header, payload, sig, signing_input
 
@@ -588,7 +639,9 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
     deployment would generalize `signer` into a `kid`-keyed resolver, which
     is a straightforward extension left out of this reference implementation.
 
-    Steps performed, in the draft's own order:
+    Before the numbered checks, both JSON parts must declare and already be
+    encoded as RFC 8785 JCS; duplicate members and non-finite values fail
+    closed during parsing. Steps then performed in the draft's own order:
       1. JWS signature of every DT_i (+ alg-confusion guard: the header's
          declared `alg` must equal `signer.alg` — never trust the header's
          own claim about which algorithm verifies it).
@@ -675,9 +728,11 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
     prev_exp = None
     for i, (_h, payload, _s, _si) in enumerate(parsed):
         exp = payload.get("exp")
-        if not isinstance(exp, (int, float)):
+        if not _is_json_number(exp):
             raise WireError(WireReasonCode.MALFORMED, f"token[{i}] missing numeric exp")
         nbf = payload.get("nbf")
+        if nbf is not None and not _is_json_number(nbf):
+            raise WireError(WireReasonCode.MALFORMED, f"token[{i}] nbf must be numeric")
         if nbf is not None and now < nbf:
             raise WireError(WireReasonCode.EXPIRED,
                             f"token[{i}] not yet valid: now={now} < nbf={nbf}")

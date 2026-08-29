@@ -21,13 +21,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import itertools
-import json
 import os
 import threading
 import time
 from dataclasses import dataclass, field
 
 from .authority import Authority, AuthorityError
+from . import canonical
 
 
 class MonotonicClock:
@@ -70,8 +70,7 @@ class Chain:
 
     # ---- integrity -----------------------------------------------------
     def _seal(self, authority: Authority) -> str:
-        blob = json.dumps(authority.to_dict(), sort_keys=True,
-                          separators=(",", ":")).encode()
+        blob = canonical.dumps(authority.to_dict())
         return hmac.new(self._secret, blob, hashlib.sha256).hexdigest()
 
     def verify_integrity(self, node: Node) -> bool:

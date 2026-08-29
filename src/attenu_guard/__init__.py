@@ -31,14 +31,14 @@ from .authority import Authority, AuthorityError
 from .guard import Guard, AuthorityDenied
 from .audit import AuditLog
 from .strikes import StrikePolicy
-from . import wire, scenarios, evidence, identity   # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
+from . import canonical, wire, scenarios, evidence, identity   # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 __all__ = [
     "Authority", "Guard", "Decision", "Reason", "ReasonCode", "Disposition",
     "AuthorityError", "AuthorityDenied", "AuditLog",
     "Ceiling", "RowLimit", "SpendCap", "CallLimit", "EgressRank", "StrikePolicy",
     "Allow", "Deny", "Prefix", "register_ceiling",
-    "wire", "scenarios", "evidence", "identity",
+    "canonical", "wire", "scenarios", "evidence", "identity",
     "__version__",
 ]

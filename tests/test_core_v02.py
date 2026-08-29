@@ -1178,7 +1178,12 @@ def test_evidence_bundle_verifies_offline():
     assert bundle["chain_id"] == "chain" and bundle["entries"] and bundle["anchor"]["verified"] is not None
     rep = evidence.verify_bundle(bundle, signer)
     assert rep["ok"] is True
-    assert rep["checks"] == {"integrity": True, "monotonicity": True, "containment": True}
+    assert rep["checks"] == {
+        "integrity": True,
+        "monotonicity": True,
+        "containment": True,
+        "anchor": "verified",
+    }
     assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
 
 

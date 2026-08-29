@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "attenu-guard"
-version = "0.6.1"
+version = "0.7.0"
 description = "Attenu Guard: enforces per-agent permissions on every tool call and sub-agent handoff — a sub-agent never holds more than its parent — and writes a hash-chained audit log you verify offline. 17 agent frameworks and protocols, unmodified."
 readme = "README.md"
 requires-python = ">=3.9"
