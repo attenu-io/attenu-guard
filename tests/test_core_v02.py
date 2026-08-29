@@ -360,6 +360,39 @@ class TestCustomCeilingEndToEnd(unittest.TestCase):
 
 
 # =========================================================================
+# Authority scope syntax — one interoperable grammar, no glob traps
+# =========================================================================
+class TestScopeSyntax(unittest.TestCase):
+    def test_accepts_lowercase_dot_segments_and_terminal_wildcards(self):
+        valid = {
+            "crm.read", "crm.x.y.z", "crm.*", "crm.x.*",
+            "agent.delegate.research_agent", "s3.write",
+        }
+        self.assertEqual(Authority(valid, [], ttl=100).scopes, valid)
+
+    def test_rejects_bare_empty_uppercase_and_glob_like_scopes(self):
+        invalid = (
+            "", "crm", "*", "crm.re*", "*.read", "crm.*.read",
+            "crm..read", "CRM.Read", "crm.read ",
+        )
+        for scope in invalid:
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "invalid scope"):
+                Authority({scope}, [], ttl=100)
+
+    def test_from_wire_applies_the_same_scope_validation(self):
+        with self.assertRaisesRegex(ValueError, "invalid scope"):
+            Authority.from_wire({"scopes": ["*"], "constraints": [], "ttl": 100})
+
+    def test_terminal_wildcard_is_segment_bounded_and_covers_any_depth(self):
+        authority = Authority({"crm.*"}, [], ttl=100)
+        self.assertTrue(authority.covers_scope("crm.read"))
+        self.assertTrue(authority.covers_scope("crm.x.y.z"))
+        self.assertFalse(authority.covers_scope("crm"))
+        self.assertFalse(authority.covers_scope("crmx.read"))
+        self.assertTrue(Authority({"crm.x.*"}, [], ttl=100).is_narrower_than(authority))
+
+
+# =========================================================================
 # Authority.meet — never widens
 # =========================================================================
 class TestMeetNeverWidens(unittest.TestCase):
@@ -666,13 +699,13 @@ class TestAdapterFacingSurface(unittest.TestCase):
             t = 0
             def now(self): return self.t
         clk = _Clock()
-        r2 = Guard.issue("o", Authority({"x"}, [], ttl=100), clock=clk)
-        c2 = r2.delegate("c", Authority({"x"}, [], ttl=5), task="t")
+        r2 = Guard.issue("o", Authority({"test.x"}, [], ttl=100), clock=clk)
+        c2 = r2.delegate("c", Authority({"test.x"}, [], ttl=5), task="t")
         self.assertFalse(c2.is_expired)
         clk.t = 6
         self.assertTrue(c2.is_expired)
-        self.assertFalse(c2.check("x"))
-        self.assertEqual(c2.check("x").reasons[0].code, ReasonCode.EXPIRED)
+        self.assertFalse(c2.check("test.x"))
+        self.assertEqual(c2.check("test.x").reasons[0].code, ReasonCode.EXPIRED)
 
     def test_reason_code_no_authority_exists(self):
         self.assertEqual(ReasonCode.NO_AUTHORITY, "no_authority")
@@ -788,11 +821,11 @@ class TestPrincipalRevocationAndDelegationDryRun(unittest.TestCase):
         self.assertEqual(len(root.graph()["nodes"]), 2)
 
     def test_would_delegate_reports_depth_and_fanout_ceilings(self):
-        root = Guard.issue("o", Authority({"x"}, [], ttl=100), max_depth=1, max_fanout=1)
-        self.assertTrue(root.would_delegate("a", Authority({"x"}, [], ttl=10)))
-        a = root.delegate("a", Authority({"x"}, [], ttl=10), task="t")
-        self.assertEqual(root.would_delegate("b", Authority({"x"}, [], ttl=10)).reasons[0].code, "max_fanout")
-        self.assertEqual(a.would_delegate("c", Authority({"x"}, [], ttl=10)).reasons[0].code, "max_depth")
+        root = Guard.issue("o", Authority({"test.x"}, [], ttl=100), max_depth=1, max_fanout=1)
+        self.assertTrue(root.would_delegate("a", Authority({"test.x"}, [], ttl=10)))
+        a = root.delegate("a", Authority({"test.x"}, [], ttl=10), task="t")
+        self.assertEqual(root.would_delegate("b", Authority({"test.x"}, [], ttl=10)).reasons[0].code, "max_fanout")
+        self.assertEqual(a.would_delegate("c", Authority({"test.x"}, [], ttl=10)).reasons[0].code, "max_depth")
 
 
 class TestThreadSafetyUnderParallelToolCalls(unittest.TestCase):
@@ -842,15 +875,15 @@ class TestThreadSafetyUnderParallelToolCalls(unittest.TestCase):
         self.assertEqual(tss, sorted(tss), "ts must advance with seq (no out-of-order logging)")
 
     def test_concurrent_delegate_and_revoke_do_not_corrupt_the_chain(self):
-        root = Guard.issue("o", Authority({"x"}, [], ttl=10**6), max_fanout=10**6)
+        root = Guard.issue("o", Authority({"test.x"}, [], ttl=10**6), max_fanout=10**6)
         counter = {"i": 0}
         import threading
         lock = threading.Lock()
         def op():
             with lock:
                 counter["i"] += 1; i = counter["i"]
-            g = root.delegate(f"a{i}", Authority({"x"}, [], ttl=10**6), task="t")
-            g.check("x")
+            g = root.delegate(f"a{i}", Authority({"test.x"}, [], ttl=10**6), task="t")
+            g.check("test.x")
             if i % 3 == 0:
                 root.revoke(g.node_id)
         n = self._hammer(op, threads=8, per_thread=50)
@@ -886,14 +919,14 @@ class TestDescribeAndStructuralReasonCodes(unittest.TestCase):
         self.assertTrue(repr(a).startswith("Authority("))
 
     def test_structural_reason_constants_match_authorityerror_reasons(self):
-        root = Guard.issue("o", Authority({"x"}, [], ttl=100), max_depth=1)
-        a = root.delegate("a", Authority({"x"}, [], ttl=10), task="t")
+        root = Guard.issue("o", Authority({"test.x"}, [], ttl=100), max_depth=1)
+        a = root.delegate("a", Authority({"test.x"}, [], ttl=10), task="t")
         with self.assertRaises(AuthorityError) as cm:
-            a.delegate("b", Authority({"x"}, [], ttl=10), task="t")
+            a.delegate("b", Authority({"test.x"}, [], ttl=10), task="t")
         self.assertEqual(cm.exception.reason, ReasonCode.MAX_DEPTH)
         root.revoke()
         with self.assertRaises(AuthorityError) as cm:
-            root.delegate("c", Authority({"x"}, [], ttl=10), task="t")
+            root.delegate("c", Authority({"test.x"}, [], ttl=10), task="t")
         self.assertEqual(cm.exception.reason, ReasonCode.CHAIN_REVOKED)
         for name in ("CHAIN_REVOKED", "AGENT_BANNED", "TTL_EXPIRED", "MAX_DEPTH", "MAX_FANOUT", "CHAIN_CEILING"):
             self.assertIsInstance(getattr(ReasonCode, name), str)

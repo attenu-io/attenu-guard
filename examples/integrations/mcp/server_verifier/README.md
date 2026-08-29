@@ -49,7 +49,7 @@ denied and each attempt is on the ledger; if the ledger cannot be written the bo
 
 Related: OWASP Top 10 for Agentic Applications 2026 — ASI03, ASI07, ASI08 · Agent Baseline AUT-03 ·
 [`docs/DENIAL-CONTRACT.md`](../../../../docs/DENIAL-CONTRACT.md) · the Delegation Token wire format in
-[`docs/`](../../../../docs/draft-asor-wimse-agent-delegation-chain-00.md).
+[`docs/`](../../../../docs/draft-asor-wimse-agent-delegation-chain-01.md).
 
 ## What remains MCP's
 

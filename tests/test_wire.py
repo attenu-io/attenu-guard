@@ -1,7 +1,7 @@
 """
 tests/test_wire.py — unit tests for the Delegation Token wire format
 (src/attenu_guard/wire.py), per
-docs/draft-asor-wimse-agent-delegation-chain-00.md.
+docs/draft-asor-wimse-agent-delegation-chain-01.md.
 
 stdlib-only (unittest), no pytest, runs with bare `python3`:
 
@@ -388,10 +388,10 @@ class TestValidChain(unittest.TestCase):
         # still pass its own wire-level depth check, not be rejected by it.
         signer = _signer()
         md = 4
-        root = Guard.issue("a0", Authority({"x"}, [RowLimit(1000)], ttl=100), max_depth=md)
+        root = Guard.issue("a0", Authority({"test.x"}, [RowLimit(1000)], ttl=100), max_depth=md)
         cur = root
         for i in range(md):
-            cur = cur.delegate(f"a{i+1}", Authority({"x"}, [RowLimit(1000 - i)],
+            cur = cur.delegate(f"a{i+1}", Authority({"test.x"}, [RowLimit(1000 - i)],
                                                      ttl=100 - i), task="t")
         self.assertEqual(cur._node.depth, md)
         tokens = wire.serialize_chain(cur, signer)
@@ -736,7 +736,8 @@ class TestInteropVectors(unittest.TestCase):
             "reject_exceeded_ceiling.json", "reject_spliced_parent.json",
             "reject_depth_exceeded.json", "reject_nonmonotonic_exp.json",
             "reject_bad_signature.json", "reject_wildcard_widening.json",
-            "reject_wildcard_boundary.json",
+            "reject_wildcard_boundary.json", "reject_bare_wildcard.json",
+            "reject_nonterminal_wildcard.json",
             "valid_jcs_integral_float.json", "valid_jcs_exponent_form.json",
             "valid_jcs_non_ascii.json", "valid_jcs_utf16_key_order.json",
             "valid_jcs_big_integer.json", "valid_jcs_unmarked_header.json",
@@ -802,6 +803,8 @@ class TestInteropVectors(unittest.TestCase):
         expected = {
             "reject_non_finite.json": wire.WireReasonCode.NON_FINITE,
             "reject_duplicate_member.json": wire.WireReasonCode.DUPLICATE_MEMBER,
+            "reject_bare_wildcard.json": wire.WireReasonCode.MALFORMED,
+            "reject_nonterminal_wildcard.json": wire.WireReasonCode.MALFORMED,
         }
         for filename, reason in expected.items():
             with self.subTest(vector=filename):

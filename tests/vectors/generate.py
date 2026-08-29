@@ -1,7 +1,7 @@
 """
 tests/vectors/generate.py — deterministic offline-verification test vectors
 for the Delegation Token wire format, per
-docs/draft-asor-wimse-agent-delegation-chain-00.md (the Internet-Draft).
+docs/draft-asor-wimse-agent-delegation-chain-01.md (the working Internet-Draft).
 
 These are the IETF interoperability artifact the draft's "Reference
 Implementation and Test Vectors" section promises: a chain that MUST verify,
@@ -408,6 +408,46 @@ def gen_reject_wildcard_boundary() -> dict:
     )
 
 
+def gen_reject_bare_wildcard() -> dict:
+    """A bare `*` is not a universal grant; it is malformed."""
+    signer = _signer()
+    _root, child, _leaf = _base_chain()
+    tokens = wire.serialize_chain(child, signer)
+
+    def replace_with_bare_wildcard(payload):
+        payload["authorization_details"][0]["scopes"] = ["*"]
+
+    tokens[-1] = _tamper_leaf(tokens[-1], signer, replace_with_bare_wildcard)
+    return _vector(
+        "Malformed authority: the leaf token's scopes are replaced with the "
+        "bare wildcard '*', then re-signed. A bare '*' is not a universal "
+        "grant in agent_delegation; wildcard syntax is valid only as a complete "
+        "final segment after a concrete dotted prefix, such as 'crm.*'. MUST "
+        "be rejected as malformed before subsumption.",
+        tokens, expect_reject_reason=wire.WireReasonCode.MALFORMED,
+    )
+
+
+def gen_reject_nonterminal_wildcard() -> dict:
+    """A wildcard segment before the end of a scope is malformed, not a glob."""
+    signer = _signer()
+    _root, child, _leaf = _base_chain()
+    tokens = wire.serialize_chain(child, signer)
+
+    def insert_nonterminal_wildcard(payload):
+        payload["authorization_details"][0]["scopes"] = ["crm.*.read"]
+
+    tokens[-1] = _tamper_leaf(tokens[-1], signer, insert_nonterminal_wildcard)
+    return _vector(
+        "Malformed authority: the leaf token's scopes are replaced with "
+        "'crm.*.read', then re-signed. The '*' is not the final segment, so "
+        "the value is neither a literal scope nor the one permitted wildcard "
+        "form. Verifiers MUST NOT interpret it as a glob; they MUST reject "
+        "the token as malformed before subsumption.",
+        tokens, expect_reject_reason=wire.WireReasonCode.MALFORMED,
+    )
+
+
 # =========================================================================
 # RFC 8785 separating vectors
 # =========================================================================
@@ -507,6 +547,8 @@ GENERATORS = {
     "reject_bad_signature.json": gen_reject_bad_signature,
     "reject_wildcard_widening.json": gen_reject_wildcard_widening,
     "reject_wildcard_boundary.json": gen_reject_wildcard_boundary,
+    "reject_bare_wildcard.json": gen_reject_bare_wildcard,
+    "reject_nonterminal_wildcard.json": gen_reject_nonterminal_wildcard,
     "valid_jcs_integral_float.json": gen_valid_jcs_integral_float,
     "valid_jcs_exponent_form.json": gen_valid_jcs_exponent_form,
     "valid_jcs_non_ascii.json": gen_valid_jcs_non_ascii,

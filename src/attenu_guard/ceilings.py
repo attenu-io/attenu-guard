@@ -13,7 +13,7 @@ and write its own wire form. `Authority` no longer needs to know the
 semantics of any particular ceiling — it just calls these methods.
 
 The most important property here is the one demanded by the Internet-Draft's
-constraint vocabulary (docs/draft-asor-wimse-agent-delegation-chain-00.md
+constraint vocabulary (docs/draft-asor-wimse-agent-delegation-chain-01.md
 {{constraints}}): "a verifier that encounters an unknown constraint type MUST
 treat the action as denied (fail-closed), never as unconstrained." That is
 implemented by `ceiling_from_wire`: an unrecognised wire constraint becomes a

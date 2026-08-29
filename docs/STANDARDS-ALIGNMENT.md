@@ -2,7 +2,7 @@
 
 *Verified against primary IETF sources, August 17, 2026. This document decides
 what we reuse, what we invent, where we take it, and how we get it adopted.
-Companion to the Internet-Draft [draft-asor-wimse-agent-delegation-chain-00](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (individual submission, posted 2026-08-27; source `draft-asor-wimse-agent-delegation-chain-00.md`)
+Companion to the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-00`, posted 2026-08-27; current working revision source `draft-asor-wimse-agent-delegation-chain-01.md`)
 and the DevX review (`DEVX-REVIEW.md`).*
 
 ## The one thing to internalize
@@ -145,7 +145,7 @@ opening a new BoF (unnecessary with two live homes).
    multi-vendor co-authorship is precisely the pattern that got Txn-Tokens and
    Identity Chaining through.
 5. **Enter the process cleanly and narrowly.** Post to the WIMSE + OAuth lists
-   now; request a **WIMSE interim before IETF 127**; submit a tight **-00 before
+   now; request a **WIMSE interim before IETF 127**; submit a tight **-01 before
    the Nov 2, 2026 I-D cutoff**; request a WG slot (by Oct 2, 2026) for **IETF
    127, San Francisco, week of Nov 14, 2026**; bring a one-slide gap analysis vs.
    Txn-Tokens/RAR/Identity-Chaining and a **live offline-verify demo**.
@@ -165,9 +165,9 @@ Cold-dropping the draft — socialize on the lists first, then submit.
 
 ## Timeline
 
-- **Now (Aug–Sep 2026):** finalize the -00, ship the reference verifier + test
-  vectors + second impl, open contact with Tenuo/klrc authors, post to WIMSE +
-  OAuth lists.
+- **Now (Aug–Sep 2026):** finalize the -01, maintain the Python and TypeScript
+  reference verifiers and shared vectors, continue convergence with the nearby
+  draft authors, and bring the revision to the WIMSE and OAuth lists.
 - **BoF proposals close Sep 18, 2026; WG session requests close Oct 2, 2026;
   I-D submission cutoff Nov 2, 2026.**
 - **Ask WIMSE chairs for an interim before IETF 127** (they offered).

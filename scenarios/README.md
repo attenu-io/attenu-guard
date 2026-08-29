@@ -41,7 +41,7 @@ a summarizer):
 3. **An IETF-interop-adjacent fixture.** Every `expect: deny` with a
    `because:` is a MUST-be-rejected test vector in the sense
    `docs/STANDARDS-ALIGNMENT.md` and the Internet-Draft
-   (`docs/draft-asor-wimse-agent-delegation-chain-00.md`) care about — a
+   (`docs/draft-asor-wimse-agent-delegation-chain-01.md`) care about — a
    scope-widening attempt, an exceeded ceiling, an unrecognised constraint —
    expressed independently of Python, the same shape an offline verifier in
    any language would need to reject.

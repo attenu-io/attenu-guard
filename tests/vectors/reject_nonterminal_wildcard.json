@@ -1,0 +1,14 @@
+{
+  "description": "Malformed authority: the leaf token's scopes are replaced with 'crm.*.read', then re-signed. The '*' is not the final segment, so the value is neither a literal scope nor the one permitted wildcard form. Verifiers MUST NOT interpret it as a glob; they MUST reject the token as malformed before subsumption.",
+  "expect_reject_reason": "malformed",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJhbnkifSx7ImtleSI6Im1heF9yb3dzIiwibWF4IjoxMDAwMDB9XSwic2NvcGVzIjpbImNybS4qIiwibWFpbC5zZW5kIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJkZWxfZGVwdGgiOjAsImRlbF9tYXhfZGVwdGgiOjcsImV4cCI6MzYwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6Im9yY2hlc3RyYXRvciJ9.gB-ft88Ok2C0B7f2jBK-IgIkXDS-LDAEUcwitNScTEg",
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJub25lIn0seyJrZXkiOiJtYXhfcm93cyIsIm1heCI6NTAwMH1dLCJzY29wZXMiOlsiY3JtLioucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjoxLCJleHAiOjkwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMSIsInBhcl9oYXNoIjoiYXR6RE9HbUdYYnIxS3FwRVRvVEhTaHZLLXVldlRBWXFTbExwaWtuSmNpRSIsInN1YiI6InN1bW1hcml6ZXIifQ.W3djjQIFRHxkLS6TWYTRW3tb-8usDh2P8N2K9KQVGRg"
+  ]
+}

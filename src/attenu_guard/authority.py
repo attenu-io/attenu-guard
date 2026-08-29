@@ -22,17 +22,32 @@ build doesn't recognise fails closed (see ceilings.ceiling_from_wire) instead
 of being silently dropped or silently unbounded.
 
 `is_narrower_than` is exactly the wire protocol's subsumption relation
-(draft-asor-wimse-agent-delegation-chain-00 {{subsumption}}): the library
+(draft-asor-wimse-agent-delegation-chain-01 {{subsumption}}): the library
 relation and the token relation are the *same* relation, so a chain that
 verifies offline is one the library would have permitted, and vice versa.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
 from .ceilings import Ceiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
+
+
+_SCOPE_RE = re.compile(
+    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*\.(?:[a-z][a-z0-9_-]*|\*)$"
+)
+
+
+def _validate_scope(scope: str) -> None:
+    """Validate the agent_delegation scope grammar defined by the I-D."""
+    if not isinstance(scope, str) or _SCOPE_RE.fullmatch(scope) is None:
+        raise ValueError(
+            f"invalid scope {scope!r}: expected lowercase dot-separated segments; "
+            "'*' is permitted only as the complete final segment after a dot"
+        )
 
 
 class AuthorityError(Exception):
@@ -55,10 +70,12 @@ class AuthorityError(Exception):
 class Authority:
     """An immutable capability grant.
 
-    scopes:   set of permission strings, e.g. {"crm.read", "mail.send"}.
-              Scopes support one level of prefix wildcard: "crm.*" covers
-              "crm.read" and "crm.write". A child requesting "crm.read" under
-              a parent holding "crm.*" is allowed; the reverse is not.
+    scopes:   set of lowercase, dot-separated permission strings, e.g.
+              {"crm.read", "mail.send"}. A terminal prefix wildcard such as
+              "crm.*" covers every depth below the dotted "crm." boundary,
+              but not bare "crm" or the adjacent namespace "crmx.read". A
+              child requesting "crm.read" under a parent holding "crm.*" is
+              allowed; the reverse is not. Bare or non-terminal "*" is invalid.
     ceilings: a tuple of typed `Ceiling` objects (RowLimit, SpendCap, ...,
               or any custom Ceiling implementation). Construction accepts any
               iterable of Ceiling and normalises it to a tuple with at most
@@ -77,7 +94,10 @@ class Authority:
 
     def __post_init__(self):
         # Normalise to immutable, comparable, deterministically-ordered forms.
-        object.__setattr__(self, "scopes", frozenset(self.scopes))
+        scopes = frozenset(self.scopes)
+        for scope in scopes:
+            _validate_scope(scope)
+        object.__setattr__(self, "scopes", scopes)
         by_key: dict[str, Ceiling] = {}
         for c in self.ceilings:
             by_key[c.key] = c  # last-one-wins on a duplicate key
@@ -100,7 +120,7 @@ class Authority:
     # ---- scope helpers -----------------------------------------------------
     @staticmethod
     def _scope_covers(held: str, requested: str) -> bool:
-        """Does a held scope cover a requested scope? Supports 'x.*'."""
+        """Exact match, or a terminal `x.*` prefix at the retained dot boundary."""
         if held == requested:
             return True
         if held.endswith(".*"):

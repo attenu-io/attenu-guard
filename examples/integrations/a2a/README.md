@@ -146,7 +146,7 @@ distinct `chain_id`s if you need to tell such hops apart.
 Related: OWASP Top 10 for Agentic Applications 2026 — ASI03, ASI07, ASI08 ·
 [`docs/DENIAL-CONTRACT.md`](../../../docs/DENIAL-CONTRACT.md) ·
 [`docs/THREAT-MODEL.md`](../../../docs/THREAT-MODEL.md) · the Delegation Token wire format in
-[`docs/`](../../../docs/draft-asor-wimse-agent-delegation-chain-00.md).
+[`docs/`](../../../docs/draft-asor-wimse-agent-delegation-chain-01.md).
 
 ## What remains A2A's
 

@@ -2,7 +2,7 @@
 wire.py — the Delegation Token: wire format + offline verification.
 
 Reference implementation of the token defined by
-docs/draft-asor-wimse-agent-delegation-chain-00.md (the Internet-Draft), per
+docs/draft-asor-wimse-agent-delegation-chain-01.md (the working Internet-Draft), per
 the contract in docs/V0.2-SPEC.md's "wire.py" section. A Delegation Token is a
 compact, JWT-shaped, JWS-signed object (draft {{token-format}}) that carries
 one hop's `Authority` (draft {{authority}}) plus enough chain-linkage state

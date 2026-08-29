@@ -1,7 +1,7 @@
 # Delegation Token offline-verification test vectors
 
 This directory holds the interoperability artifact promised by
-`docs/draft-asor-wimse-agent-delegation-chain-00.md`'s "Reference
+`docs/draft-asor-wimse-agent-delegation-chain-01.md`'s "Reference
 Implementation and Test Vectors" section: a Delegation Chain that MUST
 verify, and a set of adversarial chains that MUST each be rejected, each for
 a specific, declared reason. They exist so an **independent implementation**
@@ -22,7 +22,7 @@ for name, data in vectors.load_vectors().items():
     assert outcome == (data.get("expect") or data["expect_reject_reason"])
 ```
 
-`vectors.VECTOR_NAMES` lists the 17 vectors; `vectors.read_vector_bytes(name)` gives
+`vectors.VECTOR_NAMES` lists the 19 vectors; `vectors.read_vector_bytes(name)` gives
 you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
@@ -85,6 +85,12 @@ every CI run, not just a static fixture that can go stale.
   followed by anything, so a verifier that strips the `.*` and tests
   `startswith("crm")` wrongly accepts a neighbouring namespace.
   `"expect_reject_reason": "not_narrower"`.
+- `reject_bare_wildcard.json` — the leaf carries the bare scope `*`. It is not
+  universal authority; it is invalid scope syntax.
+  `"expect_reject_reason": "malformed"`.
+- `reject_nonterminal_wildcard.json` — the leaf carries `crm.*.read`. A wildcard
+  is valid only as the complete final segment, so this is malformed rather than
+  a glob. `"expect_reject_reason": "malformed"`.
 - `valid_jcs_integral_float.json` — pins `100.0` to the JCS bytes `100`.
 - `valid_jcs_exponent_form.json` — pins ECMAScript/JCS decimal form at `1e-6`
   and `1e16`.
