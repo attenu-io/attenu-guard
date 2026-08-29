@@ -3,7 +3,7 @@ attenu_guard.vectors — the Delegation Chain interop test vectors, shipped.
 
 These are the interoperability artifact promised by
 docs/draft-asor-wimse-agent-delegation-chain-00.md's "Reference Implementation
-and Test Vectors" section: one Delegation Chain that MUST verify and six
+and Test Vectors" section: one Delegation Chain that MUST verify and seven
 adversarial chains that MUST each be rejected, every one naming the specific
 reason it must be rejected FOR. They exist so an implementation written in
 ANY language, from the draft alone, can score its own offline verifier against
@@ -45,6 +45,7 @@ VECTOR_NAMES = (
     "reject_depth_exceeded.json",
     "reject_nonmonotonic_exp.json",
     "reject_bad_signature.json",
+    "reject_wildcard_widening.json",
 )
 
 

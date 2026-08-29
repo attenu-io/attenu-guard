@@ -1,0 +1,15 @@
+{
+  "description": "Adversarial: the leaf (formatter) token's scopes are replaced with the wildcard 'crm.*', then re-signed. Its parent (summarizer) holds only the concrete scope 'crm.read', so the leaf now claims strictly more than its parent ever held \u2014 'crm.*' also covers crm.export, crm.delete and every other crm scope. This is the INVERSE of the legitimate direction in valid_chain.json, where a concrete 'crm.read' sits under a 'crm.*' parent: wildcards narrow downward only. MUST be rejected: a child's wildcard is permitted only when an ancestor granted a wildcard that covers it, so a verifier that merely tests whether the parent's and child's scopes are wildcard-compatible, without checking WHICH side is the broader one, will wrongly accept this (subsumption rule 1).",
+  "expect_reject_reason": "not_narrower",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJhbnkifSx7ImtleSI6Im1heF9yb3dzIiwibWF4IjoxMDAwMDB9XSwic2NvcGVzIjpbImNybS4qIiwibWFpbC5zZW5kIl0sInR5cGUiOiJhZ2VudF9kZWxlZ2F0aW9uIn1dLCJkZWxfZGVwdGgiOjAsImRlbF9tYXhfZGVwdGgiOjcsImV4cCI6MzYwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6Im9yY2hlc3RyYXRvciJ9.d_WnrVyK4uRQKJnj2mDkyUtpIbGZyVT_4P69VEAYd4Y",
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJub25lIn0seyJrZXkiOiJtYXhfcm93cyIsIm1heCI6NTAwMH1dLCJzY29wZXMiOlsiY3JtLnJlYWQiXSwidHlwZSI6ImFnZW50X2RlbGVnYXRpb24ifV0sImRlbF9kZXB0aCI6MSwiZXhwIjo5MDAsImlhdCI6MCwiaXNzIjoiYXR0ZW51LWd1YXJkIiwianRpIjoiY2hhaW46bjEiLCJwYXJfaGFzaCI6ImlqUGk2VmppMWE1UXROak9lMUdQcVpFbXluUkREU3hfRVE3MV9CXzh1TU0iLCJzdWIiOiJzdW1tYXJpemVyIn0.fvAMLi5S-q_NvXoMvZlIRihMkgmbO0_3-b8Av1SnIoY",
+    "eyJhbGciOiJIUzI1NiIsImtpZCI6ImludGVyb3AtdjEiLCJ0eXAiOiJhdCtqd3QifQ.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOlt7ImtleSI6ImVncmVzcyIsInJhbmsiOiJub25lIn0seyJrZXkiOiJtYXhfcm93cyIsIm1heCI6MTAwfV0sInNjb3BlcyI6WyJjcm0uKiJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjoyLCJleHAiOjMwMCwiaWF0IjowLCJpc3MiOiJhdHRlbnUtZ3VhcmQiLCJqdGkiOiJjaGFpbjpuMiIsInBhcl9oYXNoIjoiU0NXTE41ME9aMEJ6eExmYWFmb3lFa2hNeXBZSlpZenZYYWY4OFNteTNIYyIsInN1YiI6ImZvcm1hdHRlciJ9.bl8jkwD2QYqqzQTc2hM3_KlqpAoBRVP8b5Ot9HC8TSU"
+  ]
+}

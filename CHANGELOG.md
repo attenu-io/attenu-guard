@@ -6,6 +6,18 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **An eighth interop test vector, `reject_wildcard_widening.json`** (`"expect_reject_reason":
+  "not_narrower"`), shipped in both copies and in the installed package. The leaf's scopes are
+  replaced with the wildcard `crm.*` while its parent holds only the concrete `crm.read`, so the
+  leaf claims strictly more than any ancestor ever held. It pins down the direction of the
+  wildcard rule, which the existing seven left implicit: `valid_chain.json` shows a concrete
+  `crm.read` sitting legitimately under a `crm.*` parent, and this is that turned round. An
+  independent verifier that tests only whether a parent scope and a child scope are
+  wildcard-*compatible*, rather than which side is the broader one, accepts both directions and
+  lets a leaf hand itself `crm.export` — it now fails a vector instead of shipping. The reference
+  implementation already rejected it; this is coverage, not a fix.
+
 ## [0.6.0] — 2026-08-28
 
 ### Added

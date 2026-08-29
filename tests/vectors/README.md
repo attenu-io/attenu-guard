@@ -22,7 +22,7 @@ for name, data in vectors.load_vectors().items():
     assert outcome == (data.get("expect") or data["expect_reject_reason"])
 ```
 
-`vectors.VECTOR_NAMES` lists the seven; `vectors.read_vector_bytes(name)` gives
+`vectors.VECTOR_NAMES` lists the eight; `vectors.read_vector_bytes(name)` gives
 you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
@@ -73,6 +73,12 @@ every CI run, not just a static fixture that can go stale.
   `"expect_reject_reason": "expired"`.
 - `reject_bad_signature.json` — one byte of the leaf token's signature was
   flipped. `"expect_reject_reason": "signature_invalid"`.
+- `reject_wildcard_widening.json` — the leaf's scopes were replaced with the
+  wildcard `crm.*` while its parent holds only the concrete `crm.read`, so the
+  leaf claims strictly more than its parent ever held. The inverse of the
+  legitimate direction in `valid_chain.json` (a concrete `crm.read` under a
+  `crm.*` parent): wildcards narrow downward only.
+  `"expect_reject_reason": "not_narrower"`.
 
 ## File format
 

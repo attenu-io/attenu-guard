@@ -318,6 +318,45 @@ def gen_reject_bad_signature() -> dict:
     )
 
 
+def gen_reject_wildcard_widening() -> dict:
+    """(g) wildcard widening — a child claiming a wildcard its parent never held.
+
+    The inverse of the accepting direction valid_chain.json already exercises,
+    where the summarizer's concrete 'crm.read' sits legitimately UNDER the
+    root's 'crm.*'. Turning that round is an attenuation break, not a
+    formatting one, and it is the case a verifier is most likely to get wrong:
+    'crm.*' and 'crm.read' plainly relate to each other, so a matcher that
+    asks only whether a parent scope and a child scope are wildcard-COMPATIBLE
+    — rather than whether the parent's set COVERS the child's — accepts it in
+    both directions and lets a leaf hand itself crm.export and crm.delete.
+    """
+    signer = _signer()
+    _root, _child, leaf = _base_chain()
+    tokens = wire.serialize_chain(leaf, signer)
+
+    def widen_to_wildcard(payload):
+        # The parent (summarizer) holds exactly {'crm.read'} — a concrete scope,
+        # never a wildcard — so nothing up this chain grants 'crm.*' to a leaf.
+        payload["authorization_details"][0]["scopes"] = ["crm.*"]
+
+    tokens[-1] = _tamper_leaf(tokens[-1], signer, widen_to_wildcard)
+    return _vector(
+        "Adversarial: the leaf (formatter) token's scopes are replaced with "
+        "the wildcard 'crm.*', then re-signed. Its parent (summarizer) holds "
+        "only the concrete scope 'crm.read', so the leaf now claims strictly "
+        "more than its parent ever held — 'crm.*' also covers crm.export, "
+        "crm.delete and every other crm scope. This is the INVERSE of the "
+        "legitimate direction in valid_chain.json, where a concrete "
+        "'crm.read' sits under a 'crm.*' parent: wildcards narrow downward "
+        "only. MUST be rejected: a child's wildcard is permitted only when an "
+        "ancestor granted a wildcard that covers it, so a verifier that "
+        "merely tests whether the parent's and child's scopes are "
+        "wildcard-compatible, without checking WHICH side is the broader one, "
+        "will wrongly accept this (subsumption rule 1).",
+        tokens, expect_reject_reason=wire.WireReasonCode.NOT_NARROWER,
+    )
+
+
 GENERATORS = {
     "valid_chain.json": gen_valid_chain,
     "reject_widened_scope.json": gen_reject_widened_scope,
@@ -326,6 +365,7 @@ GENERATORS = {
     "reject_depth_exceeded.json": gen_reject_depth_exceeded,
     "reject_nonmonotonic_exp.json": gen_reject_nonmonotonic_exp,
     "reject_bad_signature.json": gen_reject_bad_signature,
+    "reject_wildcard_widening.json": gen_reject_wildcard_widening,
 }
 
 

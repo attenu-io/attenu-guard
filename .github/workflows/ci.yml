@@ -111,7 +111,7 @@ jobs:
               except wire.WireError as e:
                   outcome = e.reason
               assert outcome == (data.get("expect") or data["expect_reject_reason"]), name
-          assert len(vectors.VECTOR_NAMES) == 7
+          assert len(vectors.VECTOR_NAMES) == 8
           print("packaged interop vectors OK")
           PY
   integrations:
