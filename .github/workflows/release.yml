@@ -43,3 +43,26 @@ jobs:
         with: { name: dist, path: dist/ }
       - name: Publish to PyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+  github-release:
+    # Without this the tag exists but no Release object does, so the repository's
+    # front page keeps advertising an older version than PyPI actually serves —
+    # which is what happened between 0.5.0 and 0.6.1.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with: { name: dist, path: dist/ }
+      - name: Cut the GitHub Release from this version's CHANGELOG section
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          V="${GITHUB_REF_NAME#v}"
+          # The section for this version only: from its heading to the next one.
+          awk -v v="$V" '$0 ~ "^## \\[" v "\\]" {p=1; next} p && /^## \[/ {exit} p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md for ${V}." > notes.md
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "attenu-guard ${V}" --notes-file notes.md
