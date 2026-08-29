@@ -6,6 +6,8 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-08-29
+
 ### Added
 - **An eighth interop test vector, `reject_wildcard_widening.json`** (`"expect_reject_reason":
   "not_narrower"`), shipped in both copies and in the installed package. The leaf's scopes are
