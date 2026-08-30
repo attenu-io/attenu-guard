@@ -35,6 +35,24 @@ def _hash(prev_hash: str, payload: dict) -> str:
     return h.hexdigest()
 
 
+class CommittedAuditError(RuntimeError):
+    """Raised by `AuditLog.append` when the entry was committed to the in-memory chain but
+    persisting it afterward (the audit-path file write, or a sink) raised.
+
+    The entry IS committed — it is in `entries`/`head()` and every later `hash`/`prev_hash`
+    is computed on top of it. Callers must not retry the operation that produced this entry
+    merely because this was raised: retrying would record it a second time. The original
+    exception is chained as `__cause__`.
+    """
+
+    def __init__(self, entry: dict, cause: BaseException):
+        self.entry = entry
+        super().__init__(
+            f"entry seq={entry.get('seq')} was committed to the audit log, but persisting it "
+            f"failed: {cause!r}"
+        )
+
+
 @dataclass
 class AuditLog:
     """Append-only, hash-chained decision log.
@@ -46,6 +64,7 @@ class AuditLog:
 
     path: Path | None = None
     sinks: tuple = ()                 # local-file sinks (see sinks.py); each gets every entry after the file write
+    overwrite: bool = False           # False: refuse to silently erase a pre-existing non-empty ledger at `path`
     _prev: str = GENESIS
     _seq: int = 0
     _entries: list[dict] = None  # in-memory mirror
@@ -61,6 +80,11 @@ class AuditLog:
         if self.path:
             self.path = Path(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists() and self.path.stat().st_size > 0 and not self.overwrite:
+                raise FileExistsError(
+                    f"{self.path} already has a ledger; pass overwrite=True to replace it "
+                    "(this permanently discards the existing entries)"
+                )
             self.path.write_text("")  # fresh log
 
     def append(self, event: str, ts: str | int, **fields) -> dict:
@@ -77,12 +101,15 @@ class AuditLog:
             payload["hash"] = _hash(self._prev, payload)
             self._prev = payload["hash"]
             self._seq += 1
-            self._entries.append(payload)
-            if self.path:
-                with self.path.open("a") as f:
-                    f.write(canonical.dumps(payload).decode("utf-8") + "\n")
-            for sink in self.sinks:                    # local files only — never the network (see sinks.py)
-                sink.write(payload)
+            self._entries.append(payload)          # committed: the entry now exists in the chain
+            try:
+                if self.path:
+                    with self.path.open("a") as f:
+                        f.write(canonical.dumps(payload).decode("utf-8") + "\n")
+                for sink in self.sinks:                # local files only — never the network (see sinks.py)
+                    sink.write(payload)
+            except Exception as exc:
+                raise CommittedAuditError(payload, exc) from exc
             return payload
 
     @property

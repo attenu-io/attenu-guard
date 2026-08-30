@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from attenu_guard import (
     Authority, Guard, AuthorityError, AuthorityDenied,
-    Decision, Reason, ReasonCode, AuditLog,
+    Decision, Reason, ReasonCode, AuditLog, CommittedAuditError,
     Ceiling, RowLimit, SpendCap, CallLimit, EgressRank, Allow, Deny, Prefix,
     register_ceiling,
 )
@@ -564,6 +564,75 @@ class TestAuditSideEffects(unittest.TestCase):
         real = g.check("crm.read", context={"rows": 999})
         self.assertEqual(bool(probe), bool(real))
         self.assertEqual(probe.reasons[0].code, real.reasons[0].code)
+
+
+# =========================================================================
+# AuditLog persistence contract (0.8.1): a post-commit failure must be
+# distinguishable from "nothing was recorded", and construction must never
+# silently erase an existing ledger.
+# =========================================================================
+class TestAuditLogPersistenceContract(unittest.TestCase):
+    def test_post_commit_failure_raises_committed_audit_error_with_entry_attached(self):
+        class _ExplodingSink:
+            def write(self, payload):
+                raise OSError("disk full")
+
+        log = AuditLog(sinks=(_ExplodingSink(),))
+        with self.assertRaises(CommittedAuditError) as ctx:
+            log.append("root", 0, chain_id="c", node="c:n0", agent="a")
+        err = ctx.exception
+        self.assertIsInstance(err.__cause__, OSError)
+        # committed: the entry is IN the chain despite the raise, and the
+        # in-memory chain still verifies (nothing was rolled back).
+        self.assertEqual(len(log.entries), 1)
+        self.assertEqual(err.entry, log.entries[0])
+        ok, reason = AuditLog.verify(log.entries)
+        self.assertTrue(ok, reason)
+
+    def test_guard_append_lets_committed_audit_error_propagate(self):
+        class _ExplodingSink:
+            def write(self, payload):
+                raise OSError("disk full")
+
+        g = Guard.issue("p", Authority({"crm.read"}, [], ttl=100))   # root append: sink not attached yet
+        g.audit_log().sinks = (_ExplodingSink(),)                    # now make the NEXT append (via check()) fail
+        with self.assertRaises(CommittedAuditError):
+            g.check("crm.read")
+        # the denial decision was still committed to the in-memory ledger
+        ok, reason = AuditLog.verify(g.audit_log().entries)
+        self.assertTrue(ok, reason)
+
+    def test_existing_nonempty_ledger_path_is_refused(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "ledger.jsonl"
+            p.write_text('{"seq": 0}\n')
+            with self.assertRaises(FileExistsError) as ctx:
+                AuditLog(p)
+            self.assertIn("overwrite", str(ctx.exception))
+            self.assertEqual(p.read_text(), '{"seq": 0}\n')   # refused BEFORE touching the file
+
+    def test_overwrite_true_replaces_an_existing_ledger(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "ledger.jsonl"
+            p.write_text('{"seq": 0}\n')
+            log = AuditLog(p, overwrite=True)
+            self.assertEqual(p.read_text(), "")
+            log.append("root", 0, chain_id="c", node="c:n0", agent="a")
+            self.assertEqual(len(p.read_text().splitlines()), 1)
+
+    def test_missing_or_empty_path_is_unaffected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "new.jsonl"
+            AuditLog(missing)                          # no pre-existing file: fine, no overwrite needed
+            self.assertTrue(missing.exists())
+
+            empty = Path(td) / "empty.jsonl"
+            empty.write_text("")
+            AuditLog(empty)                             # pre-existing but empty: fine
+            self.assertEqual(empty.read_text(), "")
 
 
 # =========================================================================

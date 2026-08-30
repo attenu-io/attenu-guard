@@ -133,7 +133,7 @@ def agent_invocation(payload, context):
 
     reset()
     orchestrator, _analyst, guard = build_session(
-        task=prompt, audit_path=LEDGER_PATH
+        task=prompt, audit_path=LEDGER_PATH, audit_overwrite=True
     )
     result = orchestrator(prompt)
 
