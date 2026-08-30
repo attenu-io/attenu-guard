@@ -707,7 +707,8 @@ def _call(name: str, payload: dict) -> list:
 
 def test_native_function_calling_path_is_guarded_too(effects, tools):
     """The bridge must hold on BOTH tool-dispatch paths. This one runs through
-    `crew_agent_executor.py:962`, not `tool_utils.py:123`."""
+    `experimental/agent_executor.py:2024` on the default executor (`:962` is the
+    deprecated executor's copy), not `tool_utils.py:286`."""
     root = _root_guard()
     bridge = _bridge(root)
 

@@ -14,9 +14,14 @@ Hook points used (CrewAI 1.15.16, paths relative to site-packages/)
 2. TOOL INVOCATION — `crewai.hooks.register_before_tool_call_hook`
    (`crewai/hooks/tool_hooks.py:208`). CrewAI dispatches this at
    `InterceptionPoint.PRE_TOOL_CALL` on every tool path:
-   `crewai/utilities/tool_utils.py:123` (ReAct), `:286` (async ReAct),
-   `crewai/agents/crew_agent_executor.py:962` (native function calling) and
-   `crewai/utilities/agent_utils.py:1693` — always *before* the tool body.
+   `crewai/utilities/tool_utils.py:286` (text tool call, sync; shared by both
+   executors), `:123` (its async twin), `crewai/experimental/agent_executor.py:2024`
+   (native function calling on the DEFAULT executor — `Agent.executor_class`
+   defaults to the experimental `AgentExecutor` in 1.15.16),
+   `crewai/agents/crew_agent_executor.py:962` (the same, on the deprecated
+   executor) and `crewai/utilities/agent_utils.py:1693` — always *before* the
+   tool body. Verified against the installed 1.15.16 source (AST + frame
+   tracing); see tests/integrations/test_crewai_conformance.py DECLARED_PATHS.
    We run `guard.check(scope, context=..., tool=...)` there.
 
 Blocking semantics — why we do NOT raise `AuthorityDenied`
