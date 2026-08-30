@@ -19,18 +19,24 @@ is the whole input, which is the point.
 """
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Mapping
 
 from attenu_guard import canonical
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.authority import Authority
+from attenu_guard.reasons import Capture, BodyState
+from attenu_guard.params import ParamsHashReason
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
            "SUPPORTED_BUNDLE_VERSIONS"]
 
 # Bundle schema versions this build knows how to verify. A bundle (or anchor) declaring anything
 # else is rejected rather than verified against a schema this code doesn't actually understand.
-SUPPORTED_BUNDLE_VERSIONS = frozenset({SCHEMA_VERSION})
+# 2 (0.9.0): execution binding — call_id, capture/adapter, outcome events, params commitments.
+# v1 bundles verify exactly as before; `execution_binding` reports "not applicable" for them
+# (docs/execution-binding spec section 9).
+SUPPORTED_BUNDLE_VERSIONS = frozenset({1, 2})
 
 # The COMPLETE set of top-level ledger field names the shim emits. Custody guarantee (A2b): an exported bundle may
 # carry ONLY these — an unknown field is exactly where a raw tool argument would be smuggled, so it is a leak, not a
@@ -39,6 +45,9 @@ LEDGER_FIELDS = frozenset({
     "v", "c14n", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
     "scope", "tool", "context", "reason", "reasons", "authority", "requested", "granted", "target",
     "revoked", "strikes", "mode", "disposition",
+    # 0.9.0 execution binding (schema_version=2 chains): every field named in the spec.
+    "call_id", "capture", "adapter", "authorized_params_hash", "params_hash_reason", "params_salt",
+    "body_state", "error_code", "invoked_params_hash", "duration_ms", "receipt", "pending_at_kill",
 })
 # `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
 
@@ -78,6 +87,15 @@ def _chain_id(entries: list[dict]) -> str:
     return "chain"
 
 
+def _bundle_version(entries: list[dict]) -> int:
+    """The chain's declared schema version, read off the `root` entry (falls back to
+    SCHEMA_VERSION for an empty/rootless list — the historical default)."""
+    for e in entries:
+        if e.get("event") == "root" and "v" in e:
+            return e["v"]
+    return SCHEMA_VERSION
+
+
 def _anchor_for(entries: list[dict], signer, ts: int = 0) -> dict:
     """A signed commitment to the head of `entries` (mirrors AuditLog.anchor, but over a plain list — used by
     export and by tests that re-anchor a rewritten bundle)."""
@@ -86,7 +104,7 @@ def _anchor_for(entries: list[dict], signer, ts: int = 0) -> dict:
     else:
         seq, head = entries[-1].get("seq", len(entries) - 1), entries[-1]["hash"]
     body = {
-        "v": SCHEMA_VERSION,
+        "v": _bundle_version(entries),
         "c14n": "JCS",
         "chain_id": _chain_id(entries),
         "seq": seq,
@@ -123,8 +141,9 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     anchor = _anchor_for(entries, signer, ts)
     from attenu_guard import AuditLog as _AL
     anchor["verified"] = _AL.verify_anchor(entries, anchor, signer)[0]
-    return {"v": SCHEMA_VERSION, "c14n": "JCS", "chain_id": _chain_id(entries), "entries": entries, "anchor": anchor,
-            "redaction": report, "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
+    return {"v": _bundle_version(entries), "c14n": "JCS", "chain_id": _chain_id(entries), "entries": entries,
+            "anchor": anchor, "redaction": report,
+            "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
 
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, list]:
@@ -188,6 +207,231 @@ def denials(bundle: dict) -> list[dict]:
     return sorted(rows.values(), key=lambda r: r["first_seq"])
 
 
+# =========================================================================
+# Execution binding (0.9.0): offline checks over call_id/allow/outcome, from
+# the ledger alone — docs/execution-binding spec section 5. Schema_version=2
+# chains only; a v1 bundle's execution_binding is {"status": "not applicable"}.
+# =========================================================================
+
+_HEX32 = re.compile(r"^[0-9a-f]{32}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _valid_call_id(e: dict) -> str | None:
+    cid = e.get("call_id")
+    if not isinstance(cid, str) or not _HEX32.match(cid):
+        return f"call_id missing or malformed ({cid!r})"
+    return None
+
+
+def _valid_hash_field(e: dict, field: str) -> str | None:
+    v = e.get(field)
+    if v is None:
+        return None
+    if not isinstance(v, str) or not _HEX64.match(v):
+        return f"{field} malformed ({v!r})"
+    return None
+
+
+def _validate_allow(e: dict) -> str | None:
+    err = _valid_call_id(e)
+    if err:
+        return err
+    capture = e.get("capture")
+    if capture is not None and capture not in Capture.ALL:
+        return f"capture {capture!r} not a known value"
+    if capture is not None:
+        adapter = e.get("adapter")
+        if not isinstance(adapter, Mapping) or any(k not in adapter for k in ("module", "version", "hook_path")):
+            return "adapter missing module/version/hook_path alongside capture"
+    err = _valid_hash_field(e, "authorized_params_hash")
+    if err:
+        return err
+    reason = e.get("params_hash_reason")
+    if reason is not None and reason not in ParamsHashReason.ALL:
+        return f"params_hash_reason {reason!r} not a known value"
+    if reason is not None and e.get("authorized_params_hash") is not None:
+        return "params_hash_reason present alongside authorized_params_hash (illegal conditional field)"
+    return None
+
+
+def _validate_deny(e: dict) -> str | None:
+    return _valid_call_id(e)
+
+
+def _validate_outcome(e: dict) -> str | None:
+    err = _valid_call_id(e)
+    if err:
+        return err
+    body_state = e.get("body_state")
+    if body_state not in BodyState.ALL:
+        return f"body_state {body_state!r} not a known value"
+    error_code = e.get("error_code")
+    if body_state == BodyState.RAISED:
+        if not isinstance(error_code, str) or not error_code:
+            return "error_code required when body_state == raised"
+    elif error_code is not None:
+        return "error_code present but body_state != raised (illegal conditional field)"
+    duration = e.get("duration_ms")
+    if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
+        return f"duration_ms invalid ({duration!r})"
+    err = _valid_hash_field(e, "invoked_params_hash")
+    if err:
+        return err
+    reason = e.get("params_hash_reason")
+    if reason is not None and reason not in ParamsHashReason.ALL:
+        return f"params_hash_reason {reason!r} not a known value"
+    if reason is not None and e.get("invoked_params_hash") is not None:
+        return "params_hash_reason present alongside invoked_params_hash (illegal conditional field)"
+    receipt = e.get("receipt")
+    if receipt is not None:
+        if not isinstance(receipt, Mapping) or any(k not in receipt for k in ("type", "ref", "digest")):
+            return "receipt malformed (expected type/ref/digest)"
+    return None
+
+
+def _params_coverage(allows: dict, outcomes: dict) -> str:
+    """`complete | partial | none`, from how many calls that have BOTH an allow and an outcome
+    carry both hashes (spec section 5). No comparable calls at all -> "none" (no coverage shown)."""
+    total = both = 0
+    for cid, oc in outcomes.items():
+        a = allows.get(cid)
+        if a is None:
+            continue
+        total += 1
+        if a.get("authorized_params_hash") and oc.get("invoked_params_hash"):
+            both += 1
+    if total == 0 or both == 0:
+        return "none"
+    return "complete" if both == total else "partial"
+
+
+def _execution_binding(entries: list[dict], bundle_v) -> dict:
+    if bundle_v != 2:
+        return {"status": "not applicable"}
+
+    failures: list[str] = []
+    seen_call_ids: dict[str, tuple] = {}     # call_id -> (event, node, seq) — first sighting, allow OR deny
+    allows: dict[str, dict] = {}
+    outcomes: dict[str, dict] = {}
+    invalid_allow_ids: set = set()
+    nodes: set = set()
+    finalized_nodes: set = set()
+    revoked_nodes: set = set()
+
+    for e in entries:
+        ev = e.get("event")
+        if ev in ("root", "spawn"):
+            nodes.add(e.get("node"))
+        elif ev == "done":
+            finalized_nodes.add(e.get("node"))
+        elif ev == "kill":
+            revoked_nodes.update(e.get("revoked") or [])
+
+        if ev in ("allow", "deny"):
+            cid = e.get("call_id")
+            if cid is not None:
+                prior = seen_call_ids.get(cid)
+                if prior is not None:
+                    failures.append(f"duplicate_call_id: call_id {cid} on seq {e.get('seq')} ({ev}) "
+                                    f"already used at seq {prior[2]} ({prior[0]})")
+                else:
+                    seen_call_ids[cid] = (ev, e.get("node"), e.get("seq"))
+            validator = _validate_allow if ev == "allow" else _validate_deny
+            err = validator(e)
+            if err:
+                failures.append(f"invalid_{ev}: {err} (seq {e.get('seq')})")
+                if ev == "allow" and cid is not None:
+                    invalid_allow_ids.add(cid)
+                continue
+            if ev == "allow" and cid is not None:
+                allows[cid] = e
+        elif ev == "outcome":
+            cid = e.get("call_id")
+            err = _validate_outcome(e)
+            if err:
+                failures.append(f"invalid_outcome: {err} (seq {e.get('seq')})")
+                continue
+            if cid in outcomes:
+                failures.append(f"duplicate_outcome: call_id {cid} at seq {e.get('seq')} "
+                                f"(first at seq {outcomes[cid].get('seq')})")
+                continue
+            outcomes[cid] = e
+
+    # Bind each outcome to its allow: outcome_without_allow / cross_ref / outcome_before_allow / params_mismatch.
+    for cid, oc in outcomes.items():
+        allow_e = allows.get(cid)
+        if allow_e is None:
+            failures.append(f"outcome_without_allow: call_id {cid} at seq {oc.get('seq')} has no allow in this chain")
+            continue
+        if allow_e.get("node") != oc.get("node"):
+            failures.append(f"cross_ref: call_id {cid} allow on node {allow_e.get('node')!r} "
+                            f"but outcome on node {oc.get('node')!r}")
+        if not (oc.get("seq") is not None and allow_e.get("seq") is not None and oc["seq"] > allow_e["seq"]):
+            failures.append(f"outcome_before_allow: call_id {cid} outcome seq {oc.get('seq')} "
+                            f"not after allow seq {allow_e.get('seq')}")
+        ah, ih = allow_e.get("authorized_params_hash"), oc.get("invoked_params_hash")
+        if ah is not None and ih is not None and ah != ih:
+            failures.append(f"params_mismatch: call_id {cid} authorized_params_hash {ah} != invoked_params_hash {ih}")
+
+    # Per-call observation + per-node pending, from valid allows only.
+    per_call: dict[str, str] = {}
+    node_pending: dict[str, list] = {}
+    for cid, allow_e in allows.items():
+        if cid in invalid_allow_ids:
+            continue
+        capture = allow_e.get("capture")
+        if capture is None or capture == Capture.PRE_HOOK_ONLY:
+            per_call[cid] = "unobserved"
+        elif cid in outcomes:
+            per_call[cid] = "observed"
+        else:
+            per_call[cid] = "unaccounted"
+            node_pending.setdefault(allow_e.get("node"), []).append(cid)
+
+    # Per-node lifecycle. "revoked" (clean kill, nothing pending) is not one of the spec's three
+    # named states (finalized/in_progress/revoked_with_pending) — it names the gap those three
+    # leave for a cleanly-killed node, distinct from revoked_with_pending, and never escalates
+    # the aggregate (a smallest-honest addition; see the 0.9.0 implementation report).
+    lifecycle: dict[str, str] = {}
+    for n in nodes:
+        if n in finalized_nodes:
+            lifecycle[n] = "finalized"
+        elif n in revoked_nodes:
+            lifecycle[n] = "revoked_with_pending" if node_pending.get(n) else "revoked"
+        else:
+            lifecycle[n] = "in_progress"
+
+    # Aggregate: clean < incomplete < failed: never downgrade once escalated.
+    order = {"clean": 0, "incomplete": 1, "failed": 2}
+    aggregate = "clean"
+
+    def escalate(level: str) -> None:
+        nonlocal aggregate
+        if order[level] > order[aggregate]:
+            aggregate = level
+
+    if failures:
+        # Any binding failure or invalid record is a genuine inconsistency, not a benign gap —
+        # worse than "incomplete", which spec reserves for gaps that are no producer fault.
+        escalate("failed")
+    for n, state in lifecycle.items():
+        if state == "finalized" and node_pending.get(n):
+            escalate("failed")            # an unaccounted call in a finalized node (spec section 5)
+        elif state in ("in_progress", "revoked_with_pending"):
+            escalate("incomplete")
+    if any(s == "unobserved" for s in per_call.values()):
+        escalate("incomplete")
+
+    return {
+        "aggregate": aggregate,
+        "params_coverage": _params_coverage(allows, outcomes),
+        "per_call": per_call,
+        "per_node_lifecycle": lifecycle,
+        "failures": failures,
+    }
+
+
 def verify_bundle(bundle: dict, signer=None) -> dict:
     """Verify integrity, monotonicity and containment from the bundle alone. Returns {ok, checks, failures, ...}.
 
@@ -211,6 +455,16 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
     if anchor and anchor.get("v") != bundle_v:
         version_ok = False
         failures.append(f"anchor_version_mismatch: anchor v={anchor.get('v')!r} != bundle v={bundle_v!r}")
+    # 0.9.0: a chain is created at ONE schema version and never mixes (spec section 9) — the root
+    # entry's v must equal the bundle's declared v, and no OTHER entry may carry a different v.
+    root_entry = next((e for e in entries if e.get("event") == "root"), None)
+    if root_entry is not None and root_entry.get("v") != bundle_v:
+        version_ok = False
+        failures.append(f"root_version_mismatch: root v={root_entry.get('v')!r} != bundle v={bundle_v!r}")
+    mixed = sorted({e.get("v") for e in entries if e.get("v") != bundle_v})
+    if mixed:
+        version_ok = False
+        failures.append(f"mixed_entry_versions: entries declare v in {mixed}, bundle v={bundle_v!r}")
     checks["version"] = version_ok
 
     # (0b) chain identity: the bundle, every entry, and — when an anchor is present — the anchor
@@ -262,5 +516,10 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
             contained = False; failures.append(f"containment: allow of {scope!r} on {node} outside its authority {sorted(a.scopes)}")
     checks["containment"] = contained
 
+    execution_binding = _execution_binding(entries, bundle_v) if version_ok else {"status": "not applicable"}
+    if execution_binding.get("failures"):
+        failures += execution_binding["failures"]
+
     return {"ok": all(v for k, v in checks.items() if k != "anchor") and not failures, "checks": checks, "failures": failures,
-            "nodes": len(auth), "actions_checked": actions, "chain_id": bundle.get("chain_id")}
+            "nodes": len(auth), "actions_checked": actions, "chain_id": bundle.get("chain_id"),
+            "execution_binding": execution_binding}
