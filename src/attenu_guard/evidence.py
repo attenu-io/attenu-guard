@@ -25,7 +25,12 @@ from attenu_guard import canonical
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.authority import Authority
 
-__all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS"]
+__all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
+           "SUPPORTED_BUNDLE_VERSIONS"]
+
+# Bundle schema versions this build knows how to verify. A bundle (or anchor) declaring anything
+# else is rejected rather than verified against a schema this code doesn't actually understand.
+SUPPORTED_BUNDLE_VERSIONS = frozenset({SCHEMA_VERSION})
 
 # The COMPLETE set of top-level ledger field names the shim emits. Custody guarantee (A2b): an exported bundle may
 # carry ONLY these — an unknown field is exactly where a raw tool argument would be smuggled, so it is a leak, not a
@@ -193,8 +198,33 @@ def verify_bundle(bundle: dict, signer=None) -> dict:
     """
     entries = bundle.get("entries") or []
     anchor = bundle.get("anchor") or {}
-    checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked"}
+    checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked",
+              "version": False, "chain_id": False}
     failures: list[str] = []
+
+    # (0) version: the bundle must declare a schema version this build understands, and — when an
+    # anchor is present — the anchor must be anchoring THAT version, not a different one.
+    bundle_v = bundle.get("v")
+    version_ok = bundle_v in SUPPORTED_BUNDLE_VERSIONS
+    if not version_ok:
+        failures.append(f"unsupported_version: bundle v={bundle_v!r} not in {sorted(SUPPORTED_BUNDLE_VERSIONS)}")
+    if anchor and anchor.get("v") != bundle_v:
+        version_ok = False
+        failures.append(f"anchor_version_mismatch: anchor v={anchor.get('v')!r} != bundle v={bundle_v!r}")
+    checks["version"] = version_ok
+
+    # (0b) chain identity: the bundle, every entry, and — when an anchor is present — the anchor
+    # must all name the SAME chain. Without this a correctly-signed, internally-consistent bundle
+    # for a DIFFERENT chain could be handed to a verifier who believes it is checking this one.
+    bundle_chain_id = bundle.get("chain_id")
+    entries_ok = all(e.get("chain_id") == bundle_chain_id for e in entries)
+    if not entries_ok:
+        failures.append(f"chain_id_mismatch: an entry does not carry chain_id={bundle_chain_id!r}")
+    anchor_chain_ok = not anchor or anchor.get("chain_id") == bundle_chain_id
+    if not anchor_chain_ok:
+        failures.append(f"chain_id_mismatch: anchor chain_id={anchor.get('chain_id')!r} != bundle chain_id={bundle_chain_id!r}")
+    checks["chain_id"] = entries_ok and anchor_chain_ok
+
     # (1) integrity: hash chain (+ the signed anchor, when a verifier key is given)
     ok_chain, err = AuditLog.verify(entries)
     if not ok_chain: failures.append(f"integrity: {err}")

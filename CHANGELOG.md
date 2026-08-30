@@ -11,6 +11,9 @@ All notable changes to attenu-guard are documented here. The format follows
   `RowLimit`/`SpendCap`/`CallLimit` construction, and by `wire.load` (as `malformed`) — instead of
   silently colliding with a neighbouring integer once rendered through binary64. A tenth reject
   vector, `reject_unsafe_integer.json`, brings the interop suite to 20.
+- `evidence.verify_bundle` and `AuditLog.verify_anchor` now check the bundle/anchor schema version
+  and chain identity instead of ignoring them, so a bundle for the wrong version or the wrong chain
+  no longer verifies.
 
 ## [0.8.0] — 2026-08-29
 

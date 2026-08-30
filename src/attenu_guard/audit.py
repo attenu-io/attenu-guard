@@ -149,6 +149,9 @@ class AuditLog:
             return False, err
         if not entries:
             return (anchor["seq"] == -1), None
+        entry_chain_id = next((e["chain_id"] for e in entries if e.get("chain_id")), None)
+        if anchor["chain_id"] != entry_chain_id:
+            return False, "anchor chain_id does not match the ledger entries"
         if entries[-1]["hash"] != anchor["head"] or entries[-1]["seq"] != anchor["seq"]:
             return False, "anchor head does not match the ledger head (ledger rewritten?)"
         return True, None

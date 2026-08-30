@@ -1189,6 +1189,21 @@ def test_anchor_rejects_a_forged_signature():
     ok, err = AuditLog.verify_anchor(entries, bad, signer); assert not ok and "signature" in err.lower()
 
 
+def test_anchor_rejects_a_chain_id_that_does_not_match_the_entries():
+    from attenu_guard import Authority, Guard, AuditLog, canonical
+    from attenu_guard.wire import HS256TestSigner
+    signer = HS256TestSigner(secret=b"real-key", kid="k1")
+    root = Guard.issue("o", Authority({"crm.read"}, [], ttl=None), task="t")
+    entries = root.audit_log().entries
+    anchor = root.audit_log().anchor(signer)
+    # an honestly-signed anchor for a DIFFERENT chain than the one the entries actually belong to
+    wrong_chain = dict(anchor, chain_id="some-other-chain")
+    body = {k: v for k, v in wrong_chain.items() if k not in ("kid", "sig", "verified")}
+    wrong_chain["sig"] = signer.sign(canonical.dumps(body)).hex()
+    ok, err = AuditLog.verify_anchor(entries, wrong_chain, signer)
+    assert not ok and "chain_id" in err.lower()
+
+
 # ---- Offline evidence bundle + verifier (attenu-derive T33a): an auditor verifies, from the bundle ALONE with no --------
 # access to the engine, that (1) every action was within the acting node's authority, (2) the chain was monotonic at
 # every hop, (3) the ledger is untampered against its anchor. -----------------------------------------------------------
@@ -1216,6 +1231,8 @@ def test_evidence_bundle_verifies_offline():
         "monotonicity": True,
         "containment": True,
         "anchor": "verified",
+        "version": True,
+        "chain_id": True,
     }
     assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
 
@@ -1264,6 +1281,40 @@ def test_altered_bundle_fails_each_check_independently():
     b3["anchor"] = evidence._anchor_for(b3["entries"], signer)
     r3 = evidence.verify_bundle(b3, signer)
     assert r3["checks"]["integrity"] is True and r3["checks"]["containment"] is False and r3["ok"] is False
+
+    # (4) UNSUPPORTED VERSION: a bundle declaring a schema version this build doesn't know
+    b4 = copy.deepcopy(good); b4["v"] = 999
+    r4 = evidence.verify_bundle(b4, signer)
+    assert r4["checks"]["version"] is False and r4["ok"] is False
+    assert any(f.startswith("unsupported_version:") for f in r4["failures"])
+
+    # (5) ANCHOR VERSION MISMATCH: an honestly-signed anchor for a DIFFERENT version than the bundle
+    from attenu_guard import canonical
+    tampered_anchor = dict(good["anchor"]); tampered_anchor["v"] = 2
+    body = {k: v for k, v in tampered_anchor.items() if k not in ("kid", "sig", "verified")}
+    tampered_anchor["sig"] = signer.sign(canonical.dumps(body)).hex()
+    b5 = copy.deepcopy(good); b5["anchor"] = tampered_anchor
+    r5 = evidence.verify_bundle(b5, signer)
+    assert r5["checks"]["version"] is False and r5["ok"] is False
+    assert any(f.startswith("anchor_version_mismatch:") for f in r5["failures"])
+
+    # (6) CHAIN_ID MISMATCH (entries): an entry claims a different chain than the bundle declares,
+    #     re-hashed and re-anchored honestly so only the chain_id check is isolated
+    b6 = copy.deepcopy(good); b6["entries"][1]["chain_id"] = "other-chain"
+    prev = GENESIS
+    for e in b6["entries"]:
+        e["prev_hash"] = prev; payload = {k: v for k, v in e.items() if k != "hash"}; e["hash"] = _hash(prev, payload); prev = e["hash"]
+    b6["anchor"] = evidence._anchor_for(b6["entries"], signer)
+    r6 = evidence.verify_bundle(b6, signer)
+    assert r6["checks"]["integrity"] is True and r6["checks"]["chain_id"] is False and r6["ok"] is False
+
+    # (7) CHAIN_ID MISMATCH (anchor): an honestly-signed anchor for a DIFFERENT chain than the entries
+    tampered_anchor2 = dict(good["anchor"]); tampered_anchor2["chain_id"] = "other-chain"
+    body2 = {k: v for k, v in tampered_anchor2.items() if k not in ("kid", "sig", "verified")}
+    tampered_anchor2["sig"] = signer.sign(canonical.dumps(body2)).hex()
+    b7 = copy.deepcopy(good); b7["anchor"] = tampered_anchor2
+    r7 = evidence.verify_bundle(b7, signer)
+    assert r7["checks"]["chain_id"] is False and r7["ok"] is False
 
 
 def test_delegation_graph_view_from_the_bundle():
