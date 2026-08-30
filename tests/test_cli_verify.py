@@ -4,6 +4,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -51,6 +53,14 @@ class TestVerifyCli(unittest.TestCase):
         m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)  # type: ignore[union-attr]
         fresh = m.clean(); on_disk = json.loads((SAMPLES / "clean.bundle.json").read_text())
         self.assertEqual([e["event"] for e in fresh["entries"]], [e["event"] for e in on_disk["entries"]])
+
+    def test_help_exits_zero_over_a_real_subprocess(self):
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        for args in (["--help"], ["-h"], ["verify", "--help"]):
+            proc = subprocess.run([sys.executable, "-m", "attenu_guard.cli", *args],
+                                   env=env, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, msg=f"{args}: {proc.stdout}{proc.stderr}")
+            self.assertIn("attenu-guard", proc.stdout)
 
     def test_ledger_jsonl_still_verifies(self):
         import tempfile

@@ -114,6 +114,9 @@ def main(argv=None):
         print(__doc__)
         return 1
     cmd, *rest = argv
+    if cmd in ("-h", "--help") or any(a in ("-h", "--help") for a in rest):
+        print(__doc__)
+        return 0
     if cmd == "demo":
         from attenu_guard._demo import main as demo_main
         demo_main()
