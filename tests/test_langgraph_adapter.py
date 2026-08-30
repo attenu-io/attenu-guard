@@ -21,7 +21,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))        # so adapters/langgraph.py's own
                                                     # `from attenu_guard import ...` resolves
 
+import asyncio
+
 from attenu_guard import Authority, AuthorityDenied, Guard, RowLimit
+from attenu_guard.reasons import BodyState, Capture
 
 from attenu_guard.adapters.langgraph import (
     DelegatedToolNode, add_guarded_node, guard_node, is_langgraph_available,
@@ -57,6 +60,15 @@ def _make_tool_guard():
     ceiling -- the Guard a 'summarizer' node's tools would be checked
     against."""
     root = Guard.issue("planner", Authority({"crm.read", "crm.write"}, [], ttl=3600))
+    return root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(10)], ttl=900),
+                         task="summarize")
+
+
+def _make_v2_tool_guard():
+    """Same shape as _make_tool_guard, but on a schema_version=2 chain -- the guard the
+    execution-binding wiring tests below check against."""
+    root = Guard.issue("planner", Authority({"crm.read", "crm.write"}, [], ttl=3600),
+                       schema_version=2)
     return root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(10)], ttl=900),
                          task="summarize")
 
@@ -275,6 +287,103 @@ class TestAddGuardedNode(unittest.TestCase):
         with self.assertRaises(AuthorityDenied):
             graph.nodes["summarize"](rows=999)  # denied -- ceiling exceeded
         self.assertEqual(len(tool.calls), 1)  # unchanged: still just the one allowed call
+
+
+class TestExecutionBindingWiring(unittest.TestCase):
+    """0.9.0: guard_node()/DelegatedToolNode as the reference wiring for record_outcome() --
+    only active when the guard's chain is schema_version=2 (see test_v1_guard_gets_no_call_id_
+    or_outcome below for the unchanged v1 behaviour)."""
+
+    def setUp(self):
+        self.guard = _make_v2_tool_guard()
+
+    def test_sync_allowed_call_records_a_returned_outcome_with_wrapper_sync_capture(self):
+        tool = _Recorder()
+
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        def summarize(**kwargs):
+            return tool(**kwargs)
+
+        result = summarize(rows=1)
+        self.assertTrue(result["ok"])
+        entries = self.guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        self.assertEqual(allow["capture"], Capture.WRAPPER_SYNC)
+        self.assertEqual(allow["adapter"]["module"], "attenu_guard.adapters.langgraph")
+        self.assertEqual(outcome["call_id"], allow["call_id"])
+        self.assertEqual(outcome["body_state"], BodyState.RETURNED)
+        self.assertIn("authorized_params_hash", allow)
+        self.assertEqual(allow["authorized_params_hash"], outcome["invoked_params_hash"])
+
+    def test_sync_raising_call_records_a_raised_outcome_with_error_code(self):
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        def summarize(**kwargs):
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            summarize(rows=1)
+        outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
+        self.assertEqual(outcome["body_state"], BodyState.RAISED)
+        self.assertEqual(outcome["error_code"], "ValueError")
+
+    def test_denied_call_never_records_an_outcome(self):
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        def summarize(**kwargs):
+            return {"ok": True}
+
+        with self.assertRaises(AuthorityDenied):
+            summarize(rows=999)   # ceiling exceeded
+        outcomes = [e for e in self.guard.audit_log().entries if e["event"] == "outcome"]
+        self.assertEqual(outcomes, [])
+
+    def test_async_allowed_call_uses_wrapper_async_capture(self):
+        tool = _Recorder()
+
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        async def summarize(**kwargs):
+            return tool(**kwargs)
+
+        result = asyncio.run(summarize(rows=1))
+        self.assertTrue(result["ok"])
+        entries = self.guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        self.assertEqual(allow["capture"], Capture.WRAPPER_ASYNC)
+        self.assertEqual(outcome["body_state"], BodyState.RETURNED)
+
+    def test_async_raising_call_records_a_raised_outcome(self):
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        async def summarize(**kwargs):
+            raise RuntimeError("async boom")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(summarize(rows=1))
+        outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
+        self.assertEqual(outcome["body_state"], BodyState.RAISED)
+        self.assertEqual(outcome["error_code"], "RuntimeError")
+
+    def test_v1_guard_gets_no_call_id_or_outcome(self):
+        guard = _make_tool_guard()   # schema_version=1 (the default)
+        tool = _Recorder()
+
+        @guard_node(guard, "crm.read", context_fn=_rows_context)
+        def summarize(**kwargs):
+            return tool(**kwargs)
+
+        summarize(rows=1)
+        entries = guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        self.assertNotIn("call_id", allow)
+        self.assertNotIn("capture", allow)
+        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
+
+    def test_delegated_tool_node_also_records_outcomes(self):
+        tool = _Recorder()
+        node = DelegatedToolNode(self.guard, "crm.read", tool, context_fn=_rows_context)
+        node(rows=1)
+        outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
+        self.assertEqual(outcome["body_state"], BodyState.RETURNED)
 
 
 if __name__ == "__main__":

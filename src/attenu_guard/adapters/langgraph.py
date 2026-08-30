@@ -64,13 +64,32 @@ LangGraph graph can catch `AuthorityDenied` around `graph.invoke(...)`, or
 route around it with LangGraph's own conditional-edge error handling — this
 adapter doesn't prescribe which; it only guarantees the tool body never
 executes on a denial.
+
+Execution binding (0.9.0, reference wiring for this adapter): when `guard`'s
+chain was issued with `schema_version=2` (see `Guard.issue`), `guard_node`
+also passes `capture`/`adapter`/`authorized_params` to `check()` and calls
+`guard.record_outcome()` once the wrapped callable finishes — `wrapper_sync`
+for a plain callable, `wrapper_async` when `fn` is a coroutine function
+(`await`ed by this wrapper, so it observes the body directly either way).
+`authorized_params`/`invoked_params` are `{"args": [...], "kwargs": {...}}`
+built from exactly what the wrapped callable is called with — unchanged
+between the two observations here, since this decorator itself never
+mutates them; a framework that DOES mutate arguments between authorization
+and invocation is where a real substitution would become visible. On a
+`schema_version=1` chain (the default), this adapter behaves exactly as it
+did before 0.9.0: no `capture`/`authorized_params`, no `record_outcome`
+call. Every other framework adapter is unchanged in this release — this is
+the one reference wiring; see CHANGELOG.md.
 """
 from __future__ import annotations
 
 import functools
+import inspect
+import time
 from typing import Callable, Mapping, Optional
 
-from .. import AuthorityDenied
+from .. import AuthorityDenied, __version__
+from ..reasons import Capture, BodyState
 
 __all__ = ["guard_node", "DelegatedToolNode", "add_guarded_node", "is_langgraph_available"]
 
@@ -113,19 +132,71 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
     `not decision`, raises `AuthorityDenied(decision)` and the wrapped
     callable is NEVER invoked. Otherwise, calls through to the wrapped
     callable with the original `*args, **kwargs` and returns its result
-    unchanged.
+    unchanged. On a `schema_version=2` guard, also binds the call's outcome
+    via `guard.record_outcome()` — see the module docstring's "Execution
+    binding" section.
     """
     def decorator(fn):
         resolved_tool = tool if tool is not None else getattr(fn, "__name__", None)
+        is_async = inspect.iscoroutinefunction(fn)
+        capture = Capture.WRAPPER_ASYNC if is_async else Capture.WRAPPER_SYNC
+        adapter_info = {"module": __name__, "version": __version__,
+                        "hook_path": f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', resolved_tool)}"}
 
-        @functools.wraps(fn)
-        def wrapped(*args, **kwargs):
+        def _params(args, kwargs) -> dict:
+            # The exact tool-call arguments this wrapper is called with — see the module
+            # docstring: unchanged between authorization and invocation in THIS decorator
+            # (nothing here mutates them), so a mismatch would mean a framework did.
+            return {"args": list(args), "kwargs": dict(kwargs)}
+
+        def _check(args, kwargs):
             context: Mapping = context_fn(*args, **kwargs) if context_fn else {}
+            v2 = guard.schema_version == 2
+            extra = dict(capture=capture, adapter=adapter_info, authorized_params=_params(args, kwargs)) if v2 else {}
             decision = guard.check(tool_scope, context=context, tool=resolved_tool,
-                                   disposition=disposition)
+                                   disposition=disposition, **extra)
             if not decision:
                 raise AuthorityDenied(decision)
-            return fn(*args, **kwargs)
+            return decision, v2
+
+        if is_async:
+            @functools.wraps(fn)
+            async def wrapped(*args, **kwargs):
+                decision, v2 = _check(args, kwargs)
+                start = time.monotonic()
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as exc:
+                    if v2:
+                        guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                             error_code=type(exc).__name__,
+                                             invoked_params=_params(args, kwargs),
+                                             duration_ms=int((time.monotonic() - start) * 1000))
+                    raise
+                if v2:
+                    guard.record_outcome(decision.call_id, BodyState.RETURNED,
+                                         invoked_params=_params(args, kwargs),
+                                         duration_ms=int((time.monotonic() - start) * 1000))
+                return result
+        else:
+            @functools.wraps(fn)
+            def wrapped(*args, **kwargs):
+                decision, v2 = _check(args, kwargs)
+                start = time.monotonic()
+                try:
+                    result = fn(*args, **kwargs)
+                except Exception as exc:
+                    if v2:
+                        guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                             error_code=type(exc).__name__,
+                                             invoked_params=_params(args, kwargs),
+                                             duration_ms=int((time.monotonic() - start) * 1000))
+                    raise
+                if v2:
+                    guard.record_outcome(decision.call_id, BodyState.RETURNED,
+                                         invoked_params=_params(args, kwargs),
+                                         duration_ms=int((time.monotonic() - start) * 1000))
+                return result
 
         # Introspection hooks -- useful for tooling/tests, harmless otherwise.
         wrapped.guard = guard

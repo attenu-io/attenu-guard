@@ -223,8 +223,16 @@ class Guard:
         return bool(getattr(self._node, "complete", False))
 
     @property
+    def schema_version(self) -> int:
+        """Read-only: the schema version this Guard's chain was issued at (1 or 2 — see
+        `Guard.issue(schema_version=)`). Adapters use this to decide whether to pass
+        `capture`/`adapter`/`authorized_params` to `check()` and call `record_outcome()`
+        afterwards, rather than reaching into `_audit` directly."""
+        return self._audit.schema_version
+
+    @property
     def _is_v2(self) -> bool:
-        return self._audit.schema_version == 2
+        return self.schema_version == 2
 
     def complete(self) -> "CompletionResult":
         """Mark this node's work FINISHED — one `done` audit event. Returns a `CompletionResult`
