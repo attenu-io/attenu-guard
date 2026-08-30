@@ -20,6 +20,25 @@ All notable changes to attenu-guard are documented here. The format follows
   an entry fails after it was already committed to the in-memory chain — the file write or a sink
   raising no longer looks the same as nothing having been recorded. The entry stays committed;
   callers must not retry the call that produced it on the strength of this error alone.
+- **Execution binding**, opt-in per chain via `Guard.issue(..., schema_version=2)` (schema version 1
+  is unchanged and remains the default): `check()`/`record_denial()` now allocate a `call_id`
+  (fail-closed, with meters restored, if the CSPRNG fails) and return it on `Decision.call_id`;
+  `check()` gains `authorized_params`/`capture`/`adapter` and refuses further calls once the node
+  is `complete()`d (`ReasonCode.NODE_FINALIZED`). `Guard.record_outcome(call_id, body_state, ...)`
+  binds what a body-owning wrapper observed afterwards — `returned`/`raised`/`abandoned`/`deferred`,
+  with `error_code` required exactly when raised. `complete()` now returns a bool-coercible
+  `CompletionResult` and refuses while calls are pending; `revoke()`/`revoke_agent()` snapshot
+  still-pending call_ids onto the `kill` entry as `pending_at_kill` without clearing them, so a late
+  `record_outcome()` after a kill is still accepted. Arguments are committed via `params_c14n_v1`
+  (`attenu_guard.params`): `SHA-256(raw_salt || JCS(params))`, never the raw value — closing, for
+  this profile only, the one gap the shared JCS canonicalizer leaves open for out-of-range integral
+  floats, without changing that canonicalizer's own behaviour elsewhere. `evidence.verify_bundle`
+  gains `execution_binding`: per-call observed/unobserved/unaccounted, per-node
+  finalized/in_progress/revoked_with_pending, an aggregate clean/incomplete/failed, and
+  `params_coverage` as its own axis — `not applicable` for a schema-version-1 bundle. The LangGraph
+  adapter (`adapters.langgraph`) is the reference wiring: `guard_node`/`DelegatedToolNode` call
+  `record_outcome` on a `schema_version=2` guard, sync and async. Schema
+  `schema/agent-audit.schema.json` documents version 2 alongside the unchanged version 1.
 
 ### Changed
 - Behaviour change: constructing an `AuditLog` (or `Guard.issue`) with a `path`/`audit_path` that

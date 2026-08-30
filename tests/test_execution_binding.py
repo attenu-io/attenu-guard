@@ -107,6 +107,44 @@ class TestCallIdTransition(unittest.TestCase):
         self.assertFalse(d)
         self.assertIsNotNone(d.call_id)
 
+    def test_post_commit_file_write_failure_is_also_a_committed_audit_error(self):
+        # A DIFFERENT persistence path than the sink test above: the audit-path file write
+        # itself fails (here: the path now names a directory, so .open("a") raises).
+        import tempfile
+        d = tempfile.mkdtemp(prefix="attenu-post-commit-")
+        audit_path = Path(d) / "ledger.jsonl"
+        g = _v2_root(audit_path=audit_path)
+        audit_path.unlink()
+        audit_path.mkdir()                    # put a directory where the ledger file was
+        with self.assertRaises(CommittedAuditError) as ctx:
+            g.check("crm.read")
+        self.assertIsInstance(ctx.exception.__cause__, OSError)
+        self.assertTrue(ctx.exception.decision.allowed)
+
+    def test_retry_after_committed_audit_error_is_a_new_call_with_no_shared_statement(self):
+        class _ExplodingSink:
+            def __init__(self):
+                self.calls = 0
+            def write(self, payload):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("disk full")
+
+        g = _v2_root()
+        sink = _ExplodingSink()
+        g.audit_log().sinks = (sink,)
+        with self.assertRaises(CommittedAuditError) as ctx:
+            g.check("crm.read")
+        first_call_id = ctx.exception.decision.call_id
+        retry = g.check("crm.read")   # the caller retries the same logical operation
+        self.assertNotEqual(first_call_id, retry.call_id)
+        allows = [e for e in g.audit_log().entries if e["event"] == "allow"]
+        self.assertEqual(len(allows), 2)
+        # neither record states they were attempts at one logical operation
+        for e in allows:
+            self.assertNotIn("retry_of", e)
+            self.assertNotIn("attempt", e)
+
 
 # =========================================================================
 # capture / adapter on the allow entry
@@ -371,6 +409,15 @@ class TestParamsCommitment(unittest.TestCase):
         allow4 = next(e for e in g.audit_log().entries if e["event"] == "allow" and e["call_id"] == d4.call_id)
         outcome4 = next(e for e in g.audit_log().entries if e["event"] == "outcome" and e["call_id"] == d4.call_id)
         self.assertNotEqual(allow4["authorized_params_hash"], outcome4["invoked_params_hash"])
+
+    def test_invoked_params_unsupported_is_independent_of_the_authorized_side(self):
+        g = _v2_root()
+        d = g.check("crm.read", authorized_params={"x": 1})   # authorized side: supported
+        entry = g.record_outcome(d.call_id, BodyState.RETURNED, invoked_params={"n": 1e16}, duration_ms=1)
+        self.assertNotIn("invoked_params_hash", entry)
+        self.assertEqual(entry["params_hash_reason"], "unsupported")
+        allow = next(e for e in g.audit_log().entries if e["event"] == "allow" and e["call_id"] == d.call_id)
+        self.assertIn("authorized_params_hash", allow)   # the allow side is unaffected
 
     def test_params_salt_is_fixed_for_the_chain_and_written_once_on_root(self):
         g = _v2_root()
