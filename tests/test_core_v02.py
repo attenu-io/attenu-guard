@@ -602,6 +602,38 @@ class TestAuditLogPersistenceContract(unittest.TestCase):
         ok, reason = AuditLog.verify(g.audit_log().entries)
         self.assertTrue(ok, reason)
 
+    def test_existing_nonempty_ledger_path_is_refused(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "ledger.jsonl"
+            p.write_text('{"seq": 0}\n')
+            with self.assertRaises(FileExistsError) as ctx:
+                AuditLog(p)
+            self.assertIn("overwrite", str(ctx.exception))
+            self.assertEqual(p.read_text(), '{"seq": 0}\n')   # refused BEFORE touching the file
+
+    def test_overwrite_true_replaces_an_existing_ledger(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "ledger.jsonl"
+            p.write_text('{"seq": 0}\n')
+            log = AuditLog(p, overwrite=True)
+            self.assertEqual(p.read_text(), "")
+            log.append("root", 0, chain_id="c", node="c:n0", agent="a")
+            self.assertEqual(len(p.read_text().splitlines()), 1)
+
+    def test_missing_or_empty_path_is_unaffected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "new.jsonl"
+            AuditLog(missing)                          # no pre-existing file: fine, no overwrite needed
+            self.assertTrue(missing.exists())
+
+            empty = Path(td) / "empty.jsonl"
+            empty.write_text("")
+            AuditLog(empty)                             # pre-existing but empty: fine
+            self.assertEqual(empty.read_text(), "")
+
 
 # =========================================================================
 # enforce() vs check() — raising gate vs. Decision

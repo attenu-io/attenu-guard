@@ -87,6 +87,7 @@ def build_session(
     *,
     task: str = "investigate the 5xx spike",
     audit_path: str | None = None,
+    audit_overwrite: bool = False,
 ) -> tuple[Agent, Agent, DelegationGuard]:
     """One orchestrator, one sub-agent reached as a tool, one guard.
 
@@ -96,6 +97,12 @@ def build_session(
     `orchestrator_model` / `analyst_model` are `None` on the Runtime, so
     Strands uses its Bedrock default. The offline run passes a scripted
     model in their place.
+
+    `audit_overwrite` is for a caller that reuses the same `audit_path` across
+    invocations on purpose (the Runtime entrypoint: one container, one fixed
+    `/tmp` path, a fresh ledger per invocation) — it must opt in explicitly,
+    since `AuditLog` otherwise refuses to erase a non-empty ledger it did not
+    just create.
     """
     analyst = Agent(
         name=ANALYST_NAME,
@@ -118,6 +125,7 @@ def build_session(
             ORCHESTRATOR,
             task=task,
             audit_path=audit_path,
+            audit_overwrite=audit_overwrite,
         ),
         root_agent=orchestrator,
         scope_for=SCOPE_FOR,

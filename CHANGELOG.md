@@ -21,6 +21,12 @@ All notable changes to attenu-guard are documented here. The format follows
   raising no longer looks the same as nothing having been recorded. The entry stays committed;
   callers must not retry the call that produced it on the strength of this error alone.
 
+### Changed
+- Behaviour change: constructing an `AuditLog` (or `Guard.issue`) with a `path`/`audit_path` that
+  already names a non-empty file now raises `FileExistsError` instead of silently truncating it.
+  Pass `overwrite=True` (`Guard.issue(..., audit_overwrite=True)`) to keep the old reset-on-open
+  behaviour where that is what you want.
+
 ## [0.8.0] — 2026-08-29
 
 ### Changed

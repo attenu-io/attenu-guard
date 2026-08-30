@@ -42,6 +42,9 @@ DEFAULT_PROMPT = (
 # Where the ledger is written inside the container. AgentCore Runtime
 # gives you a writable /tmp; point this at a mounted volume or ship the
 # exported bundle onward if you need the record to outlive the session.
+# Every invocation reuses this same path and is meant to start a fresh
+# ledger (see `audit_overwrite=True` below) — the record from a finished
+# invocation does not outlive it unless you export the bundle first.
 LEDGER_PATH = os.getenv("ATTENU_GUARD_LEDGER", "/tmp/attenu-guard.jsonl")
 
 
@@ -57,7 +60,7 @@ def agent_invocation(payload, context):
 
     reset()
     orchestrator, _analyst, guard = build_session(
-        task=prompt, audit_path=LEDGER_PATH
+        task=prompt, audit_path=LEDGER_PATH, audit_overwrite=True
     )
     result = orchestrator(prompt)
 

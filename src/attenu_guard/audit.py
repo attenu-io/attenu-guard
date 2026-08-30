@@ -64,6 +64,7 @@ class AuditLog:
 
     path: Path | None = None
     sinks: tuple = ()                 # local-file sinks (see sinks.py); each gets every entry after the file write
+    overwrite: bool = False           # False: refuse to silently erase a pre-existing non-empty ledger at `path`
     _prev: str = GENESIS
     _seq: int = 0
     _entries: list[dict] = None  # in-memory mirror
@@ -79,6 +80,11 @@ class AuditLog:
         if self.path:
             self.path = Path(self.path)
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.exists() and self.path.stat().st_size > 0 and not self.overwrite:
+                raise FileExistsError(
+                    f"{self.path} already has a ledger; pass overwrite=True to replace it "
+                    "(this permanently discards the existing entries)"
+                )
             self.path.write_text("")  # fresh log
 
     def append(self, event: str, ts: str | int, **fields) -> dict:

@@ -370,8 +370,10 @@ def wb_wildcard_pruning_false_deny():
 
 def wb_audit_tamper():
     """Mutating an audit entry must break offline verification."""
+    import tempfile
+    audit_path = pathlib.Path(tempfile.mkdtemp(prefix="attenu-guard-rt-")) / "rt_audit.jsonl"
     root = Guard.issue("root", Authority({"crm.*"}, [RowLimit(10**9)], ttl=10**9),
-                       audit_path="/tmp/rt_audit.jsonl")
+                       audit_path=audit_path)
     c = root.delegate("c", Authority({"crm.read"}, [RowLimit(10)], ttl=100), task="t")
     c.check("crm.read", context={"rows": 5}, tool="crm")
     entries = root.audit_log().entries
