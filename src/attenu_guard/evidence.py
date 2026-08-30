@@ -380,11 +380,16 @@ def _execution_binding(entries: list[dict], bundle_v) -> dict:
     for cid, allow_e in allows.items():
         if cid in invalid_allow_ids:
             continue
+        # Spec order matters: "observed" (an outcome exists, bound correctly) is checked FIRST,
+        # unconditionally — an outcome that actually arrived is observed regardless of what
+        # capture was declared (or not declared) at allow time. Only once no outcome exists does
+        # capture decide unobserved (none was promised) vs unaccounted (one was, and is absent).
+        if cid in outcomes:
+            per_call[cid] = "observed"
+            continue
         capture = allow_e.get("capture")
         if capture is None or capture == Capture.PRE_HOOK_ONLY:
             per_call[cid] = "unobserved"
-        elif cid in outcomes:
-            per_call[cid] = "observed"
         else:
             per_call[cid] = "unaccounted"
             node_pending.setdefault(allow_e.get("node"), []).append(cid)

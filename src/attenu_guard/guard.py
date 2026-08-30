@@ -498,6 +498,11 @@ class Guard:
                 try:
                     call_id = os.urandom(16).hex()
                 except Exception as exc:  # pragma: no cover - CSPRNG failure is not reproducible
+                    # Pre-commit failure (spec section 1): meters are restored, nothing is
+                    # pending, the call is denied, nothing is appended.
+                    if decision:
+                        for c in filled:
+                            self._chain.uncount_call(nid, getattr(c, "meter_key", "*"))
                     return Decision.deny(
                         Reason(ReasonCode.CALL_ID_UNAVAILABLE, message=str(exc)), node=nid)
 

@@ -206,6 +206,15 @@ class Chain:
             self._calls[(node_id, scope)] = n
             return n
 
+    def uncount_call(self, node_id: str, scope: str) -> int:
+        """Undo one count_call — used when a call's metering was applied but the transition then
+        failed BEFORE the commit point (0.9.0: call_id allocation; spec section 1, 'meters are
+        restored'), so the meter reads as if the call had never been evaluated."""
+        with self._lock:
+            n = max(0, self._calls.get((node_id, scope), 0) - 1)
+            self._calls[(node_id, scope)] = n
+            return n
+
     def record_strike(self, key: tuple) -> int:
         """Count a denial for the strike policy; returns the running total for `key`."""
         with self._lock:
