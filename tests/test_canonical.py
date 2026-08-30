@@ -19,7 +19,13 @@ class IntSubclass(int):
 
 
 class TestCanonicalBytes(unittest.TestCase):
-    def test_six_reachable_divergence_classes_use_jcs_bytes(self):
+    def test_five_reachable_divergence_classes_use_jcs_bytes(self):
+        # A sixth class existed here through v0.7: a Python arbitrary-precision int
+        # rendered through binary64 (2**60 + 1 -> b"1152921504606847000", silently
+        # losing precision). That class is no longer reachable: canonical.dumps now
+        # rejects any int outside \u00b1MAX_SAFE_INTEGER instead of lossily rendering it
+        # (see TestClosedInputModel.test_unsafe_integers_are_rejected below), so
+        # there is no longer a divergent byte form to pin for it.
         cases = (
             (100.0, b"100"),
             (1e-6, b"0.000001"),
@@ -28,7 +34,6 @@ class TestCanonicalBytes(unittest.TestCase):
              "\"r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}\"".encode()),
             ({"\ue000": 2, "\U00010000": 1},
              "{\"\U00010000\":1,\"\ue000\":2}".encode()),
-            (2**60 + 1, b"1152921504606847000"),
         )
         for value, expected in cases:
             with self.subTest(value=value):
@@ -55,6 +60,23 @@ class TestClosedInputModel(unittest.TestCase):
         for value in ("\ud800", {"\udfff": "value"}):
             with self.subTest(value=repr(value)), self.assertRaises(canonical.LoneSurrogateError):
                 canonical.dumps(value)
+
+    def test_unsafe_integers_are_rejected(self):
+        self.assertEqual(canonical.dumps(canonical.MAX_SAFE_INTEGER), b"9007199254740991")
+        self.assertEqual(canonical.dumps(-canonical.MAX_SAFE_INTEGER), b"-9007199254740991")
+        for value in (canonical.MAX_SAFE_INTEGER + 1, -(canonical.MAX_SAFE_INTEGER + 1)):
+            with self.subTest(value=value), self.assertRaises(canonical.UnsafeIntegerError):
+                canonical.dumps(value)
+
+    def test_the_collision_pair_no_longer_produces_equal_bytes(self):
+        # The bug this closes: two DIFFERENT integers converted through binary64
+        # used to render as IDENTICAL JCS bytes (a collision at the signing
+        # surface). Now the larger one raises instead of silently colliding.
+        two53 = 2**53
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            canonical.dumps({"max": two53})
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            canonical.dumps({"max": two53 + 1})
 
     def test_non_json_and_subclass_values_are_rejected(self):
         values = (

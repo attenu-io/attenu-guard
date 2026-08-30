@@ -57,6 +57,7 @@ VECTOR_NAMES = (
     "valid_jcs_unmarked_header.json",
     "reject_non_finite.json",
     "reject_duplicate_member.json",
+    "reject_unsafe_integer.json",
 )
 
 

@@ -1,0 +1,13 @@
+{
+  "description": "Invalid JSON/JCS separating case: an integer whose magnitude exceeds the safe range \u00b1(2**53-1) collides with its neighbours once canonicalized through binary64 (RFC 8785 numbers are IEEE 754 doubles), so it is rejected before verification rather than silently rounded. The inverse of valid_jcs_big_integer.json, one magnitude past its boundary.",
+  "expect_reject_reason": "malformed",
+  "now": 0,
+  "signer": {
+    "alg": "HS256",
+    "kid": "interop-v1",
+    "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
+  },
+  "tokens": [
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjkwMDcxOTkyNTQ3NDA5OTIsImlhdCI6MCwiaXNzIjoiYXR0ZW51LWd1YXJkIiwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJwYXJzZXItcHJvYmUifQ.PyTDQ9pQrdRjMLnA0Vi9mBItw8g-nK_p3kXGlU8yVIU"
+  ]
+}

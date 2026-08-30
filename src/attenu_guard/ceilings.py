@@ -25,7 +25,23 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
+from .canonical import MAX_SAFE_INTEGER
 from .reasons import Decision, Reason, ReasonCode
+
+
+def _validate_safe_number(key: str, value) -> None:
+    """Reject a ceiling bound whose magnitude can't survive the signing surface intact.
+
+    RFC 8785 numbers are binary64: an int past ±(2**53-1) can collide with a
+    neighbouring integer once canonicalized (see canonical.UnsafeIntegerError),
+    so a ceiling built from one would silently admit or deny a different value
+    than the one the caller constructed. Fail at construction, not at signing —
+    mirrors authority.py's `_validate_scope`."""
+    if type(value) is int and abs(value) > MAX_SAFE_INTEGER:
+        raise ValueError(
+            f"{key} value {value!r} exceeds the safe integer range "
+            f"±{MAX_SAFE_INTEGER} for a binary64 signing surface (RFC 8785)"
+        )
 
 # Ordered enum for egress: index 0 is the strictest. A value outside this
 # vocabulary is treated as *maximally permissive-requested* (worst case), so
@@ -134,6 +150,9 @@ class RowLimit:
     key: str = field(default="max_rows", init=False, repr=False)
     ctx_field: str = field(default="rows", init=False, repr=False, compare=False)
 
+    def __post_init__(self):
+        _validate_safe_number(self.key, self.max_rows)
+
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("rows")
         if n is None or n <= self.max_rows:
@@ -163,6 +182,9 @@ class SpendCap:
     max_spend: float
     key: str = field(default="max_spend", init=False, repr=False)
     ctx_field: str = field(default="spend", init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        _validate_safe_number(self.key, self.max_spend)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("spend")
@@ -207,6 +229,7 @@ class CallLimit:
     ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _validate_safe_number(self.key, self.max_calls)
         if self.applies_to:
             object.__setattr__(self, "key", f"max_calls[{self.applies_to}]")
             object.__setattr__(self, "ctx_field", f"calls[{self.applies_to}]")   # own meter, coexists with unscoped `calls`

@@ -12,7 +12,9 @@ __all__ = [
     "CanonicalizationError",
     "LoneSurrogateError",
     "NonFiniteNumberError",
+    "UnsafeIntegerError",
     "UnsupportedTypeError",
+    "MAX_SAFE_INTEGER",
     "dumps",
 ]
 
@@ -25,12 +27,31 @@ class NonFiniteNumberError(CanonicalizationError):
     """A number is NaN, infinite, or outside the binary64 domain."""
 
 
+class UnsafeIntegerError(CanonicalizationError):
+    """An integer's magnitude exceeds what binary64 can represent exactly.
+
+    RFC 8785 numbers ARE IEEE 754 doubles: every JCS number, integer or not,
+    is rendered by converting it through binary64 first. A double's mantissa
+    holds 53 bits, so two distinct Python ints past 2**53-1 (e.g. 2**53 and
+    2**53+1) can convert to the SAME double and therefore produce IDENTICAL
+    signed bytes — a collision at the signing surface, not a rounding
+    curiosity. There is no lossless rendering to fall back to (JCS defines
+    exactly one number format), so the only safe rule is to reject rather
+    than silently coerce."""
+
+
 class LoneSurrogateError(CanonicalizationError):
     """A string contains an unpaired UTF-16 surrogate code point."""
 
 
 class UnsupportedTypeError(CanonicalizationError, TypeError):
     """A value is outside the library's closed JSON input model."""
+
+
+#: The largest (and, negated, the smallest) integer magnitude a binary64
+#: double represents exactly. Every int strictly beyond this range raises
+#: `UnsafeIntegerError` rather than being canonicalized.
+MAX_SAFE_INTEGER = 2**53 - 1
 
 
 _ESCAPES = {
@@ -46,10 +67,16 @@ _ESCAPES = {
 
 def _number(value: int | float) -> str:
     """ECMAScript ``Number::toString`` formatting required by RFC 8785."""
-    try:
-        number = float(value) if type(value) is int else value
-    except OverflowError as exc:
-        raise NonFiniteNumberError("integer is outside the binary64 domain") from exc
+    if type(value) is int:
+        if abs(value) > MAX_SAFE_INTEGER:
+            raise UnsafeIntegerError(
+                f"integer {value!r} exceeds the safe range "
+                f"±{MAX_SAFE_INTEGER} for a binary64 signing surface "
+                "(RFC 8785 numbers are IEEE 754 doubles)"
+            )
+        number = float(value)
+    else:
+        number = value
     if not math.isfinite(number):
         raise NonFiniteNumberError("non-finite numbers are not permitted")
     if number == 0:

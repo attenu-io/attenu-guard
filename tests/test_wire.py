@@ -179,6 +179,29 @@ class TestJCSWireContract(unittest.TestCase):
             wire.load([token], signer)
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NON_FINITE)
 
+    def test_load_rejects_an_integer_beyond_the_safe_range_as_malformed(self):
+        signer = _signer()
+        two53 = 2**53  # canonical.MAX_SAFE_INTEGER + 1: one magnitude past the boundary
+        token = _sign_raw(
+            b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
+            f'{{"authorization_details":[],"del_depth":0,"del_max_depth":1,"exp":{two53},"iat":0}}'.encode(),
+            signer,
+        )
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load([token], signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+
+    def test_load_accepts_the_largest_safe_integer(self):
+        signer = _signer()
+        token = _sign_raw(
+            b'{"alg":"HS256","c14n":"JCS","kid":"test","typ":"at+jwt"}',
+            (f'{{"authorization_details":[{{"constraints":[],"scopes":[],"type":"agent_delegation"}}],'
+             f'"del_depth":0,"del_max_depth":1,"exp":{canonical.MAX_SAFE_INTEGER},"iat":0}}').encode(),
+            signer,
+        )
+        vc = wire.load([token], signer)
+        self.assertEqual(vc.leaf_authority.ttl, canonical.MAX_SAFE_INTEGER)
+
     def test_load_rejects_duplicate_object_member_names(self):
         signer = _signer()
         token = _sign_raw(
@@ -742,6 +765,7 @@ class TestInteropVectors(unittest.TestCase):
             "valid_jcs_non_ascii.json", "valid_jcs_utf16_key_order.json",
             "valid_jcs_big_integer.json", "valid_jcs_unmarked_header.json",
             "reject_non_finite.json", "reject_duplicate_member.json",
+            "reject_unsafe_integer.json",
         }
         self.assertEqual(set(self.written), expected)
         for filename in expected:
@@ -776,10 +800,10 @@ class TestInteropVectors(unittest.TestCase):
     def test_separating_vectors_pin_the_jcs_bytes(self):
         expected_fragments = {
             "valid_jcs_integral_float.json": b'"jcs_probe":100',
-            "valid_jcs_exponent_form.json": b'"jcs_probe":[0.000001,10000000000000000]',
+            "valid_jcs_exponent_form.json": b'"jcs_probe":[0.000001,1000000000000000]',
             "valid_jcs_non_ascii.json": "r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}".encode(),
             "valid_jcs_utf16_key_order.json": "\"\U00010000\":1,\"\ue000\":2".encode(),
-            "valid_jcs_big_integer.json": b'"jcs_probe":1152921504606847000',
+            "valid_jcs_big_integer.json": b'"jcs_probe":9007199254740991',
         }
         for filename, fragment in expected_fragments.items():
             with self.subTest(vector=filename):
@@ -805,6 +829,7 @@ class TestInteropVectors(unittest.TestCase):
             "reject_duplicate_member.json": wire.WireReasonCode.DUPLICATE_MEMBER,
             "reject_bare_wildcard.json": wire.WireReasonCode.MALFORMED,
             "reject_nonterminal_wildcard.json": wire.WireReasonCode.MALFORMED,
+            "reject_unsafe_integer.json": wire.WireReasonCode.MALFORMED,
         }
         for filename, reason in expected.items():
             with self.subTest(vector=filename):

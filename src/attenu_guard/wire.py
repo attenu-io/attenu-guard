@@ -592,11 +592,21 @@ def _parse_token(token: str):
         raise WireError(WireReasonCode.NON_FINITE,
                         f"non-finite JSON number {value!r} is not permitted")
 
+    def reject_unsafe_int(text):
+        value = int(text)
+        if abs(value) > canonical.MAX_SAFE_INTEGER:
+            raise WireError(
+                WireReasonCode.MALFORMED,
+                f"integer {value!r} exceeds the safe range "
+                f"±{canonical.MAX_SAFE_INTEGER} for a binary64 signing surface "
+                "(RFC 8785 numbers are IEEE 754 doubles)")
+        return value
+
     try:
         header = json.loads(header_bytes, object_pairs_hook=reject_duplicates,
-                            parse_constant=reject_constant)
+                            parse_constant=reject_constant, parse_int=reject_unsafe_int)
         payload = json.loads(payload_bytes, object_pairs_hook=reject_duplicates,
-                             parse_constant=reject_constant)
+                             parse_constant=reject_constant, parse_int=reject_unsafe_int)
     except WireError:
         raise
     except Exception as e:

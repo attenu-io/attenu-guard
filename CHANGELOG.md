@@ -6,6 +6,12 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Integers beyond the RFC 8785 safe range (±(2**53-1)) are now rejected — at canonicalization, at
+  `RowLimit`/`SpendCap`/`CallLimit` construction, and by `wire.load` (as `malformed`) — instead of
+  silently colliding with a neighbouring integer once rendered through binary64. A tenth reject
+  vector, `reject_unsafe_integer.json`, brings the interop suite to 20.
+
 ## [0.8.0] — 2026-08-29
 
 ### Changed

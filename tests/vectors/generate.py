@@ -38,7 +38,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / "src"))
 
 from attenu_guard import Authority, Guard, RowLimit, EgressRank  # noqa: E402
-from attenu_guard import wire  # noqa: E402
+from attenu_guard import canonical, wire  # noqa: E402
 
 VECTORS_DIR = Path(__file__).resolve().parent
 # The shipped copy: package data, so `pip install attenu-guard` carries the
@@ -471,8 +471,12 @@ def gen_valid_jcs_integral_float() -> dict:
 
 def gen_valid_jcs_exponent_form() -> dict:
     return _vector(
-        "JCS separating case: 1e-6 and 1e16 use ECMAScript decimal form at both boundaries.",
-        _jcs_probe([1e-6, 1e16]), expect="accept",
+        "JCS separating case: 1e-6 and 1e15 use ECMAScript decimal form at both boundaries. 1e15 "
+        "is chosen rather than 1e16 because it stays inside the safe-integer domain "
+        "(±(2**53-1), see reject_unsafe_integer.json): on the wire, a large integral number is "
+        "indistinguishable from an actual out-of-range integer once serialized, so this build "
+        "rejects either at parse time regardless of the sender's original Python type.",
+        _jcs_probe([1e-6, 1e15]), expect="accept",
     )
 
 
@@ -493,8 +497,12 @@ def gen_valid_jcs_utf16_key_order() -> dict:
 
 def gen_valid_jcs_big_integer() -> dict:
     return _vector(
-        "JCS separating case: Python's arbitrary-precision integer is serialized through binary64.",
-        _jcs_probe(2**60 + 1), expect="accept",
+        "JCS separating case: the largest safe integer (2**53 - 1) is the boundary this build "
+        "accepts — it is the last value a binary64 double still represents exactly, so it "
+        "canonicalizes to plain decimal digits with no precision loss. One magnitude further "
+        "(2**53) is outside that domain and MUST be rejected instead of silently rounded; see "
+        "reject_unsafe_integer.json.",
+        _jcs_probe(canonical.MAX_SAFE_INTEGER), expect="accept",
     )
 
 
@@ -522,6 +530,21 @@ def gen_reject_duplicate_member() -> dict:
         "Invalid JSON/JCS separating case: duplicate member names are rejected, never last-value-wins.",
         [_sign_raw(header, payload, signer)],
         expect_reject_reason=wire.WireReasonCode.DUPLICATE_MEMBER,
+    )
+
+
+def gen_reject_unsafe_integer() -> dict:
+    header, payload, signer = _raw_valid_root()
+    unsafe = canonical.MAX_SAFE_INTEGER + 1  # 2**53: one magnitude past the safe boundary
+    payload = payload.replace(b'"exp":60', f'"exp":{unsafe}'.encode(), 1)
+    return _vector(
+        "Invalid JSON/JCS separating case: an integer whose magnitude exceeds the safe range "
+        "±(2**53-1) collides with its neighbours once canonicalized through binary64 (RFC 8785 "
+        "numbers are IEEE 754 doubles), so it is rejected before verification rather than "
+        "silently rounded. The inverse of valid_jcs_big_integer.json, one magnitude past its "
+        "boundary.",
+        [_sign_raw(header, payload, signer)],
+        expect_reject_reason=wire.WireReasonCode.MALFORMED,
     )
 
 
@@ -556,6 +579,7 @@ GENERATORS = {
     "valid_jcs_big_integer.json": gen_valid_jcs_big_integer,
     "reject_non_finite.json": gen_reject_non_finite,
     "reject_duplicate_member.json": gen_reject_duplicate_member,
+    "reject_unsafe_integer.json": gen_reject_unsafe_integer,
     "valid_jcs_unmarked_header.json": gen_valid_jcs_unmarked_header,
 }
 

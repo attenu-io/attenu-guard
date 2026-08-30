@@ -22,7 +22,7 @@ for name, data in vectors.load_vectors().items():
     assert outcome == (data.get("expect") or data["expect_reject_reason"])
 ```
 
-`vectors.VECTOR_NAMES` lists the 19 vectors; `vectors.read_vector_bytes(name)` gives
+`vectors.VECTOR_NAMES` lists the 20 vectors; `vectors.read_vector_bytes(name)` gives
 you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
@@ -96,12 +96,16 @@ every CI run, not just a static fixture that can go stale.
   and `1e16`.
 - `valid_jcs_non_ascii.json` — pins raw UTF-8 for a non-ASCII subject.
 - `valid_jcs_utf16_key_order.json` — pins UTF-16 code-unit member ordering.
-- `valid_jcs_big_integer.json` — pins the binary64 form of a Python integer
-  outside the safe-integer range.
+- `valid_jcs_big_integer.json` — pins the binary64 form of the largest safe
+  integer, `2**53 - 1`: the last value a double still represents exactly.
 - `reject_non_finite.json` — carries `NaN`, which is not JSON or JCS.
   `"expect_reject_reason": "non_finite"`.
 - `reject_duplicate_member.json` — carries a duplicate object member name.
   `"expect_reject_reason": "duplicate_member"`.
+- `reject_unsafe_integer.json` — carries an integer one magnitude past the safe
+  range (`2**53`), which collides with its neighbours once rendered through
+  binary64. The inverse of `valid_jcs_big_integer.json`.
+  `"expect_reject_reason": "malformed"`.
 - `valid_jcs_unmarked_header.json` — omits the informational `c14n` marker while
   retaining canonical JCS header and payload bytes. `"expect": "accept"`.
 

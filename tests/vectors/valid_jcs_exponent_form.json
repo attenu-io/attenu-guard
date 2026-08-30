@@ -1,5 +1,5 @@
 {
-  "description": "JCS separating case: 1e-6 and 1e16 use ECMAScript decimal form at both boundaries.",
+  "description": "JCS separating case: 1e-6 and 1e15 use ECMAScript decimal form at both boundaries. 1e15 is chosen rather than 1e16 because it stays inside the safe-integer domain (\u00b1(2**53-1), see reject_unsafe_integer.json): on the wire, a large integral number is indistinguishable from an actual out-of-range integer once serialized, so this build rejects either at parse time regardless of the sender's original Python type.",
   "expect": "accept",
   "now": 0,
   "signer": {
@@ -8,6 +8,6 @@
     "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
   },
   "tokens": [
-    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjYwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImpjc19wcm9iZSI6WzAuMDAwMDAxLDEwMDAwMDAwMDAwMDAwMDAwXSwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJqY3MtcHJvYmUifQ.MsT57uEtVCgbWYbp1b-fNPQ4NtTRBlcSuxcJs048hH0"
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjYwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImpjc19wcm9iZSI6WzAuMDAwMDAxLDEwMDAwMDAwMDAwMDAwMDBdLCJqdGkiOiJjaGFpbjpuMCIsInN1YiI6Impjcy1wcm9iZSJ9.uAEp2xLLScul4KEq_ZUVp1H55HYCnA9FxoVUCyk23BM"
   ]
 }

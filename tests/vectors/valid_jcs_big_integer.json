@@ -1,5 +1,5 @@
 {
-  "description": "JCS separating case: Python's arbitrary-precision integer is serialized through binary64.",
+  "description": "JCS separating case: the largest safe integer (2**53 - 1) is the boundary this build accepts \u2014 it is the last value a binary64 double still represents exactly, so it canonicalizes to plain decimal digits with no precision loss. One magnitude further (2**53) is outside that domain and MUST be rejected instead of silently rounded; see reject_unsafe_integer.json.",
   "expect": "accept",
   "now": 0,
   "signer": {
@@ -8,6 +8,6 @@
     "secret_hex": "617474656e752d67756172642d696e7465726f702d766563746f72732d76312d66697865642d736563726574"
   },
   "tokens": [
-    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjYwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImpjc19wcm9iZSI6MTE1MjkyMTUwNDYwNjg0NzAwMCwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJqY3MtcHJvYmUifQ.gP_p8GjjExsZVOgbDUNeFUVCA4qj0gPhasY120uYEYA"
+    "eyJhbGciOiJIUzI1NiIsImMxNG4iOiJKQ1MiLCJraWQiOiJpbnRlcm9wLXYxIiwidHlwIjoiYXQrand0In0.eyJhdWQiOm51bGwsImF1dGhvcml6YXRpb25fZGV0YWlscyI6W3siY29uc3RyYWludHMiOltdLCJzY29wZXMiOlsicHJvYmUucmVhZCJdLCJ0eXBlIjoiYWdlbnRfZGVsZWdhdGlvbiJ9XSwiZGVsX2RlcHRoIjowLCJkZWxfbWF4X2RlcHRoIjoyLCJleHAiOjYwLCJpYXQiOjAsImlzcyI6ImF0dGVudS1ndWFyZCIsImpjc19wcm9iZSI6OTAwNzE5OTI1NDc0MDk5MSwianRpIjoiY2hhaW46bjAiLCJzdWIiOiJqY3MtcHJvYmUifQ.2u57FKaBFM_vXkUydfuGx-9p_X1z3tACQJT5Jhisq5I"
   ]
 }
