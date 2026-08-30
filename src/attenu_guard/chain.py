@@ -67,6 +67,11 @@ class Chain:
         self._strikes: dict[tuple, int] = {}      # (node_id, scope|*) -> denials so far (strike policy)
         self._secret = os.urandom(32)             # per-chain integrity key
         self._lock = threading.RLock()            # mutations from parallel tool calls
+        # 0.9.0 execution binding (schema_version=2 chains only; see guard.py):
+        self.params_salt: bytes | None = None     # 16 raw bytes, set once by Guard.issue(); shared
+                                                    # by every node in the chain (see params.py)
+        self._pending: dict[str, set[str]] = {}    # node_id -> call_ids awaiting an outcome
+        self._outcomed: set[str] = set()           # call_ids that already received an outcome, chain-wide
 
     # ---- integrity -----------------------------------------------------
     def _seal(self, authority: Authority) -> str:
@@ -207,6 +212,40 @@ class Chain:
             n = self._strikes.get(key, 0) + 1
             self._strikes[key] = n
             return n
+
+    # ---- execution binding: pending calls + exactly-one-outcome (0.9.0, v2 chains) ------------
+    def register_pending(self, node_id: str, call_id: str) -> None:
+        """An `allow`ed call now awaits an outcome. Not locked here — callers already hold
+        `self._lock` for the whole check() transition (see guard.py); this method itself takes
+        the lock too so it stays correct if ever called standalone."""
+        with self._lock:
+            self._pending.setdefault(node_id, set()).add(call_id)
+
+    def resolve_pending(self, call_id: str) -> str | None:
+        """Remove `call_id` from whichever node's pending set holds it (record_outcome's job);
+        returns that node_id, or None if it was not pending anywhere in this chain. A call_id
+        that never was pending (e.g. bound to a deny, or foreign) is left for the offline
+        verifier to flag — this is a best-effort runtime cleanup, not a gate."""
+        with self._lock:
+            for nid, calls in self._pending.items():
+                if call_id in calls:
+                    calls.discard(call_id)
+                    return nid
+            return None
+
+    def pending_for(self, node_id: str) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._pending.get(node_id, ())))
+
+    def mark_outcomed(self, call_id: str) -> bool:
+        """True the FIRST time `call_id` is marked (and it is now recorded as outcomed); False if
+        it was already outcomed — the runtime half of "exactly one outcome per call_id" (the
+        restart rule is what makes this enforceable within one chain's continuous lifetime)."""
+        with self._lock:
+            if call_id in self._outcomed:
+                return False
+            self._outcomed.add(call_id)
+            return True
 
     def graph(self) -> dict:
         return {

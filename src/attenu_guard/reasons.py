@@ -46,6 +46,10 @@ class ReasonCode:
     NO_AUTHORITY = "no_authority"               # principal holds no Authority at all in this chain
                                                 # (adapter-level: unknown/undelegated agent, unmapped
                                                 # tool, unparseable args) — upstream of scope/ceilings
+    # 0.9.0 execution-binding transition (schema_version=2 chains only — see guard.py):
+    NODE_FINALIZED = "node_finalized"           # check() refused: the node already called complete()
+    CALL_ID_UNAVAILABLE = "call_id_unavailable"  # the OS CSPRNG failed while allocating call_id;
+                                                 # fail-closed — the call is denied and nothing is written
 
 
 class Disposition:
@@ -62,6 +66,46 @@ class Disposition:
     UNRESOLVED = "unresolved"                   # no authority known for this tool at all
     OUT_OF_AUTHORITY = "out_of_authority"       # resolved and grantable, but not held by THIS node — real over-reach
     ALL = frozenset({HELD_PENDING_GRANT, WITHHELD_TIER2, UNRESOLVED, OUT_OF_AUTHORITY})
+
+
+class Capture:
+    """What the adapter's code path WILL observe for a given `check()`ed call — recorded on the
+    `allow` entry alongside `adapter` (module/version/hook_path). Describes observation CAPABILITY
+    only, never a claim of quality (docs/execution-binding spec section 2): a verifier routes a
+    call into observed/unobserved reporting from this label, never trusts it as evidence on its own.
+    """
+    WRAPPER_SYNC = "wrapper_sync"                 # the adapter's wrapper calls the body itself, synchronously
+    WRAPPER_ASYNC = "wrapper_async"                # ... and awaits it
+    FRAMEWORK_POST_HOOK = "framework_post_hook"    # the framework itself calls back after the body runs
+    PRE_HOOK_ONLY = "pre_hook_only"                # the adapter sees the call authorized but never observes it finish
+    ALL = frozenset({WRAPPER_SYNC, WRAPPER_ASYNC, FRAMEWORK_POST_HOOK, PRE_HOOK_ONLY})
+
+
+class BodyState:
+    """The `outcome` record's observation of how a body-owning wrapper's call ended (docs/
+    execution-binding spec section 3) — an OBSERVATION, not a judgment about the world. There is no
+    `executed`/`blocked`/`timeout`/`cancelled` at this layer; each of those words claims knowledge a
+    wrapper does not always have. Adapters emitting into a richer outcome vocabulary own that mapping."""
+    RETURNED = "returned"     # the body returned to the wrapper
+    RAISED = "raised"         # it raised (error_code required, from the exception's class name)
+    ABANDONED = "abandoned"   # the wrapper stopped observing while the body may still run
+    DEFERRED = "deferred"     # the wrapper returned a generator/stream/future it does not itself consume
+    ALL = frozenset({RETURNED, RAISED, ABANDONED, DEFERRED})
+
+
+@dataclass(frozen=True)
+class CompletionResult:
+    """`Guard.complete()`'s return value (docs/execution-binding spec section 1): whether the node
+    was actually finalized, and — when it refused because calls are still pending an outcome — the
+    `call_id`s it is waiting on. Bool-coercible so `if guard.complete():` keeps reading naturally;
+    `is True`/`is False` identity checks do NOT survive this change (`complete()` used to return a
+    bare bool) — that is a deliberate, documented break, not an oversight.
+    """
+    completed: bool
+    pending_call_ids: tuple[str, ...] = ()
+
+    def __bool__(self) -> bool:
+        return self.completed
 
 
 @dataclass(frozen=True)
@@ -110,6 +154,9 @@ class Decision:
     allowed: bool
     reasons: tuple[Reason, ...] = ()
     determining_node: str | None = None
+    call_id: str | None = None    # 0.9.0 execution binding: set only on a schema_version=2 chain
+                                   # (Guard.check()/record_denial()); None on v1 chains and on any
+                                   # Decision built outside a Guard transition (would_allow(), tests).
 
     def __bool__(self) -> bool:
         return self.allowed
@@ -127,6 +174,7 @@ class Decision:
             "allowed": self.allowed,
             "reasons": [r.to_dict() for r in self.reasons],
             "determining_node": self.determining_node,
+            "call_id": self.call_id,
         }
 
     @classmethod

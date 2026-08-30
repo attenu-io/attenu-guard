@@ -1168,8 +1168,11 @@ def test_complete_records_a_done_event_once_and_leaves_authority_intact():
     root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t")
     child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
     assert child.check("fs.read").allowed
-    assert child.complete() is True and child.is_complete
-    assert child.complete() is False                                    # idempotent: one lifecycle end per node
+    # complete() returns a bool-coercible CompletionResult (0.9.0), not a bare bool — `is True`/
+    # `is False` identity checks are the one thing that does NOT survive that change (see
+    # reasons.CompletionResult's docstring); plain truthiness does.
+    assert child.complete() and child.is_complete
+    assert not child.complete()                                          # idempotent: one lifecycle end per node
     dones = [e for e in root.audit_log().entries if e["event"] == "done"]
     assert len(dones) == 1 and dones[0]["node"] == child.node_id and dones[0]["agent"] == "researcher"
     assert child.check("fs.read").allowed                                # informational marker: authority itself is unchanged (revocation is the hard stop)

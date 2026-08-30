@@ -21,6 +21,9 @@ Guard — the runtime object a developer actually holds.
                       record as though the action were attempted.
   revoke(...)     -> cascade-revoke a node (default: this one) and its whole
                       subtree.
+  record_outcome(...) -> (schema_version=2 chains only) bind what happened
+                      after an `allow`ed call to that call's `call_id` — see
+                      "Execution binding" below.
 
 `AuthorityError` (raised by issue/delegate — bad input / invalid chain state)
 and `AuthorityDenied` (raised only by enforce() — wraps a policy Decision)
@@ -29,9 +32,43 @@ are deliberately distinct: a policy denial is not an error.
 v0.1's `root`/`spawn`/`kill` remain as thin deprecated aliases (process
 metaphor -> authority vocabulary; docs/DEVX-REVIEW.md principle 4) and emit
 `DeprecationWarning`.
+
+Execution binding (0.9.0, `Guard.issue(..., schema_version=2)` only)
+---------------------------------------------------------------------
+`schema_version=1` chains (the default — nothing below applies to them) behave
+EXACTLY as they did before 0.9.0: no `call_id`, no pending tracking, no
+`node_finalized` refusal, `check()`'s new `authorized_params`/`capture`/
+`adapter` kwargs are refused with `ValueError` if supplied. A caller opts in
+per chain, once, at `Guard.issue()` — schema versions never mix within a
+chain (docs/execution-binding spec section 9).
+
+On a `schema_version=2` chain, `check()`'s locked transition (spec section 1)
+is, in order, under one lock (`self._chain._lock`, re-entrant):
+
+  1. refuse if the node is already `complete()`d (`ReasonCode.NODE_FINALIZED`);
+  2. otherwise evaluate authority/ceilings and update meters (`_evaluate` +
+     auto-metering, unchanged from v1);
+  3. allocate `call_id` — 16 bytes from `os.urandom`, lowercase hex; if the
+     CSPRNG raises, the call is denied and NOTHING is appended
+     (`ReasonCode.CALL_ID_UNAVAILABLE`);
+  4. commit the entry (append to the audit log — may raise
+     `CommittedAuditError` if persistence fails AFTER the in-memory commit;
+     this method attaches `.decision` to that exception before it propagates,
+     per spec section 1: "carries the committed `entry` and the `decision`");
+  5. register an allowed call as pending (even across a `CommittedAuditError`
+     — spec: "the guard registers an allowed call as pending before raising");
+  6. return the `Decision`, which now carries `.call_id`.
+
+`record_outcome()` is the producer API a body-owning wrapper calls once it
+knows how the call ended; `complete()` refuses (returns a falsy
+`CompletionResult`) while calls are still pending; `revoke()`/`revoke_agent()`
+snapshot the still-pending call_ids onto the `kill` entry as `pending_at_kill`
+without clearing them — a late `record_outcome()` after a kill is accepted.
 """
 from __future__ import annotations
 
+import dataclasses
+import os
 import threading
 import warnings
 from contextlib import contextmanager
@@ -39,11 +76,23 @@ from typing import Mapping
 
 from .authority import Authority, AuthorityError
 from .chain import Chain, Node, MonotonicClock
-from .audit import AuditLog
-from .reasons import Decision, Reason, ReasonCode, Disposition
+from .audit import AuditLog, CommittedAuditError
+from .reasons import (
+    Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult,
+)
 from .ceilings import ctx_field_of, is_metered
+from . import params as params_mod
 
-__all__ = ["Guard", "AuthorityDenied"]
+__all__ = ["Guard", "AuthorityDenied", "DuplicateOutcomeError"]
+
+# Sentinel distinguishing "the caller never attempted a params commitment at all" (nothing
+# written — a deployment opted out of the whole feature) from "attempted, but the value was
+# outside the params_c14n_v1 domain" (params_hash_reason: unsupported). See params.py and
+# docs/execution-binding spec section 4/5 ("A deployment that must not disclose argument
+# equality omits the hashes").
+_UNSET = object()
+
+_REQUIRED_ADAPTER_KEYS = ("module", "version", "hook_path")
 
 
 class AuthorityDenied(Exception):
@@ -56,6 +105,14 @@ class AuthorityDenied(Exception):
     def __init__(self, decision: Decision):
         self.decision = decision
         super().__init__(decision.explain())
+
+
+class DuplicateOutcomeError(ValueError):
+    """Raised by `Guard.record_outcome()` when `call_id` already has a recorded outcome in this
+    chain's lifetime. A programming error in the caller (a wrapper observing the same call
+    twice), not a policy outcome — "exactly one outcome per call_id, enforced at append under
+    the lock" (docs/execution-binding spec section 3); the restart rule (audit.py) is what makes
+    that enforceable within one continuous chain lifetime."""
 
 
 class _SeqClock:
@@ -87,14 +144,27 @@ class Guard:
     def issue(cls, agent_id: str, authority: Authority, task: str = "root",
               *, chain_id: str = "chain", max_depth: int = 6, max_fanout: int = 16,
               audit_path=None, clock=None, strict_metering: bool = False, strikes=None,
-              audit_sinks=None, audit_overwrite: bool = False) -> "Guard":
+              audit_sinks=None, audit_overwrite: bool = False,
+              schema_version: int = 1) -> "Guard":
+        """`schema_version` (default 1, unchanged from every prior release): pass 2 to opt this
+        WHOLE chain into execution binding (call_id, capture/adapter, params commitments,
+        `record_outcome()` — see the module docstring). A chain never mixes schema versions
+        (docs/execution-binding spec section 9); the version is stated once, here, on the `root`
+        entry, and every Guard delegated from this one inherits it."""
+        if schema_version not in (1, 2):
+            raise ValueError(f"unsupported schema_version {schema_version!r}; expected 1 or 2")
         chain = Chain(chain_id, max_depth=max_depth, max_fanout=max_fanout,
                       clock=clock or MonotonicClock())
-        audit = AuditLog(audit_path, sinks=tuple(audit_sinks or ()), overwrite=audit_overwrite)
+        audit = AuditLog(audit_path, sinks=tuple(audit_sinks or ()), overwrite=audit_overwrite,
+                        schema_version=schema_version)
         seq = _SeqClock()
         node = chain.add_root(agent_id, authority, task)
-        audit.append("root", seq.now(), chain_id=chain_id, node=node.node_id,
-                     agent=agent_id, authority=authority.to_wire())
+        root_fields = dict(chain_id=chain_id, node=node.node_id, agent=agent_id,
+                           authority=authority.to_wire())
+        if schema_version == 2:
+            chain.params_salt = os.urandom(16)
+            root_fields["params_salt"] = chain.params_salt.hex()
+        audit.append("root", seq.now(), **root_fields)
         return cls(node, chain, audit, seq, strict_metering, strikes)
 
     @classmethod
@@ -152,16 +222,27 @@ class Guard:
         """Read-only lifecycle state: did the holder mark this node's work finished (`complete()`)?"""
         return bool(getattr(self._node, "complete", False))
 
-    def complete(self) -> bool:
-        """Mark this node's work FINISHED — one `done` audit event (idempotent: returns False if already
-        marked). Purely a lifecycle marker for the ledger and for downstream analytics (a delegation that
-        never reached `done` was cut short); it does NOT change authority — revocation is the hard stop.
-        Adapters call it when the delegation returns to its parent."""
+    @property
+    def _is_v2(self) -> bool:
+        return self._audit.schema_version == 2
+
+    def complete(self) -> "CompletionResult":
+        """Mark this node's work FINISHED — one `done` audit event. Returns a `CompletionResult`
+        (bool-coercible, so `if guard.complete():` still reads naturally). On a `schema_version=2`
+        chain, refuses (returns a falsy `CompletionResult` carrying `.pending_call_ids`) while
+        this node has `allow`ed calls that have not yet reported an outcome — completing while a
+        call is still open would be a false claim that the node's work is finished. On a v1
+        chain, or once no calls are pending, marks complete and returns
+        `CompletionResult(True, ())`. Idempotent: `CompletionResult(False, ())` if already marked.
+        Purely a lifecycle marker — it does NOT change authority; revocation is the hard stop."""
         if getattr(self._node, "complete", False):
-            return False
+            return CompletionResult(False, ())
+        pending = self._chain.pending_for(self._node.node_id) if self._is_v2 else ()
+        if pending:
+            return CompletionResult(False, pending)
         self._node.complete = True
         self._append("done", chain_id=self.chain_id, node=self._node.node_id, agent=self._node.agent_id)
-        return True
+        return CompletionResult(True, ())
 
     # ---- delegation ----------------------------------------------------
     def delegate(self, agent_id: str, request: Authority, task: str) -> "Guard":
@@ -283,7 +364,7 @@ class Guard:
 
     def _log_decision(self, decision: Decision, scope: str,
                        tool: str | None, context: Mapping,
-                       disposition: str | None = None) -> None:
+                       disposition: str | None = None, extra_fields: dict | None = None) -> dict:
         event = "allow" if decision else "deny"
         fields = dict(chain_id=self.chain_id, node=self._node.node_id, scope=scope,
                      tool=tool, context=dict(context))
@@ -305,7 +386,9 @@ class Guard:
                                 if fields["reason"] == ReasonCode.SCOPE_NOT_GRANTED else None)
             if d is not None:
                 fields["disposition"] = d
-        self._append(event, **fields)
+        if extra_fields:
+            fields.update(extra_fields)
+        return self._append(event, **fields)
 
     # ---- enforcement ---------------------------------------------------
     def _call_limits(self):
@@ -326,10 +409,38 @@ class Guard:
                 filled.append(c)
         return filled
 
+    @staticmethod
+    def _attach_call_id(decision: Decision, call_id: str | None) -> Decision:
+        return decision if call_id is None else dataclasses.replace(decision, call_id=call_id)
+
+    def _params_commitment(self, value) -> tuple[str | None, str | None]:
+        """(hash_hex, reason) against this chain's params_salt — see params.py. `(None, None)`
+        if the caller passed the `_UNSET` sentinel (opted out of this specific commitment)."""
+        if value is _UNSET:
+            return None, None
+        salt = self._chain.params_salt
+        if salt is None:      # cannot happen for a properly-issued v2 chain; defensive fallback only
+            return None, params_mod.ParamsHashReason.UNSUPPORTED
+        return params_mod.commit(value, salt)
+
+    @staticmethod
+    def _validate_capture_adapter(capture, adapter) -> None:
+        if capture is not None and capture not in Capture.ALL:
+            raise ValueError(f"unknown capture {capture!r}; expected one of {sorted(Capture.ALL)}")
+        if capture is not None and adapter is None:
+            raise ValueError("adapter={module,version,hook_path} is required alongside capture "
+                             "(docs/execution-binding spec section 2)")
+        if adapter is not None:
+            missing = [k for k in _REQUIRED_ADAPTER_KEYS if k not in adapter]
+            if missing:
+                raise ValueError(f"adapter is missing {missing}; expected {list(_REQUIRED_ADAPTER_KEYS)}")
+
     def check(self, scope: str, *, context: Mapping | None = None,
               metered: bool = False, tool: str | None = None,
               rows=None, spend=None, egress=None,
-              disposition: str | None = None) -> Decision:
+              disposition: str | None = None,
+              authorized_params=_UNSET, capture: str | None = None,
+              adapter: Mapping | None = None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
 
@@ -343,21 +454,92 @@ class Guard:
         held pending an operator grant, withheld tier-2, unresolved tool. It
         is recorded on a `deny` entry only; on a plain `scope_not_granted`
         deny with no statement the ledger records `out_of_authority`.
+
+        `authorized_params`/`capture`/`adapter` (schema_version=2 chains
+        only — `ValueError` otherwise): the execution-binding inputs, see
+        the module docstring and docs/execution-binding spec sections 1-4.
+        `authorized_params` is the exact tool-call JSON object presented at
+        authorization time (hashed, never logged); `capture` is one of the
+        `Capture` constants describing what the caller's wrapper will be
+        able to observe; `adapter` is `{module, version, hook_path}`,
+        required together with `capture`. On a v2 chain, the returned
+        `Decision.call_id` is what a later `record_outcome()` call binds to.
         """
         self._check_disposition(disposition)                      # refuse before anything reaches the ledger
+        is_v2 = self._is_v2
+        if not is_v2 and (authorized_params is not _UNSET or capture is not None or adapter is not None):
+            raise ValueError("authorized_params/capture/adapter require a schema_version=2 chain "
+                             "(Guard.issue(..., schema_version=2))")
+        self._validate_capture_adapter(capture, adapter)
+
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
-        filled = self._auto_meter(scope, ctx)
-        decision = self._evaluate(scope, ctx, metered)
-        if decision:
-            for c in filled:
-                self._chain.count_call(self._node.node_id, getattr(c, "meter_key", "*"))
-        self._log_decision(decision, scope, tool, ctx, disposition)
-        if not decision and self._strikes is not None and self._strikes.enabled and not self._chain.is_revoked(self._node.node_id):
-            count = self._chain.record_strike(self._strikes.key(self._node.node_id, scope))
+        nid = self._node.node_id
+
+        with self._chain._lock:
+            # 1. refuse if the node is finalized (v2 only — a v1 chain's complete() has always
+            #    been a pure informational marker that leaves authority, and check(), untouched;
+            #    see complete()'s docstring and Guard.issue()'s module-docstring note on v1/v2).
+            if is_v2 and getattr(self._node, "complete", False):
+                decision = Decision.deny(
+                    Reason(ReasonCode.NODE_FINALIZED, message="node already finalized (complete())"),
+                    node=nid)
+                filled = []
+            else:
+                # 2. evaluate authority/ceilings; update meters on allow.
+                filled = self._auto_meter(scope, ctx)
+                decision = self._evaluate(scope, ctx, metered)
+                if decision:
+                    for c in filled:
+                        self._chain.count_call(nid, getattr(c, "meter_key", "*"))
+
+            # 3. allocate call_id (v2 only) — fail-closed, nothing written, on a CSPRNG failure.
+            call_id = None
+            if is_v2:
+                try:
+                    call_id = os.urandom(16).hex()
+                except Exception as exc:  # pragma: no cover - CSPRNG failure is not reproducible
+                    return Decision.deny(
+                        Reason(ReasonCode.CALL_ID_UNAVAILABLE, message=str(exc)), node=nid)
+
+            extra = {}
+            if is_v2:
+                extra["call_id"] = call_id
+                if decision:
+                    if capture is not None:
+                        extra["capture"] = capture
+                        extra["adapter"] = {k: adapter[k] for k in _REQUIRED_ADAPTER_KEYS}
+                    ph, preason = self._params_commitment(authorized_params)
+                    if ph is not None:
+                        extra["authorized_params_hash"] = ph
+                    elif preason is not None:
+                        extra["params_hash_reason"] = preason
+
+            # 4. commit (append) — a post-commit persistence failure raises CommittedAuditError;
+            #    attach `.decision` (spec: "carries the committed entry and the decision") before
+            #    it propagates, and still register the pending call first (step 5).
+            try:
+                self._log_decision(decision, scope, tool, ctx, disposition, extra_fields=extra)
+            except CommittedAuditError as exc:
+                decision_with_id = self._attach_call_id(decision, call_id)
+                if is_v2 and decision:
+                    self._chain.register_pending(nid, call_id)
+                exc.decision = decision_with_id
+                raise
+
+            decision = self._attach_call_id(decision, call_id)
+            # 5. register pending (allows only).
+            if is_v2 and decision:
+                self._chain.register_pending(nid, call_id)
+            # 6. return the Decision — falls through to strike-policy handling below, then returns.
+
+        if not decision and self._strikes is not None and self._strikes.enabled and not self._chain.is_revoked(nid):
+            count = self._chain.record_strike(self._strikes.key(nid, scope))
             if count >= self._strikes.n:
-                revoked = self._chain.revoke(self._node.node_id)
-                self._append("kill", chain_id=self.chain_id, target=self._node.node_id,
-                             reason="strike_policy", scope=scope, strikes=count, mode=self._strikes.mode, revoked=revoked)
+                revoked = self._chain.revoke(nid)
+                kill_extra = self._pending_at_kill(revoked) if is_v2 else {}
+                self._append("kill", chain_id=self.chain_id, target=nid,
+                             reason="strike_policy", scope=scope, strikes=count,
+                             mode=self._strikes.mode, revoked=revoked, **kill_extra)
         return decision
 
     def enforce(self, scope: str, **kwargs) -> None:
@@ -374,7 +556,8 @@ class Guard:
         """Pure dry-run: identical policy evaluation to `check()`, but never
         raises and — critically — writes NOTHING to the audit log. For
         planners/UIs that want to ask "could I do this?" without leaving a
-        record as though the action were actually attempted."""
+        record as though the action were actually attempted. Never allocates
+        a `call_id` (there is nothing to bind an outcome to)."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         self._auto_meter(scope, ctx)                                  # read the meters, never consume them
         return self._evaluate(scope, ctx, metered)
@@ -394,13 +577,81 @@ class Guard:
         `ReasonCode.NO_AUTHORITY`); `message` is used only when a code is
         given. `scope` defaults to `tool` (or "-") because the published
         audit schema requires a string scope on allow/deny events.
-        """
+
+        On a `schema_version=2` chain this also allocates and attaches a
+        `call_id` (same fail-closed CSPRNG handling as `check()`) — every
+        `allow`/`deny` entry carries one; a deny never expects an outcome."""
         self._check_disposition(disposition)
         r = reason if isinstance(reason, Reason) else Reason(str(reason), message=message)
         decision = Decision.deny(r, node=self._node.node_id)
-        self._log_decision(decision, scope if scope is not None else (tool or "-"),
-                           tool, dict(context) if context else {}, disposition)
-        return decision
+        is_v2 = self._is_v2
+        resolved_scope = scope if scope is not None else (tool or "-")
+        resolved_ctx = dict(context) if context else {}
+
+        with self._chain._lock:
+            call_id = None
+            if is_v2:
+                try:
+                    call_id = os.urandom(16).hex()
+                except Exception as exc:  # pragma: no cover - CSPRNG failure is not reproducible
+                    return Decision.deny(r, node=self._node.node_id)  # fail-closed: nothing written
+            try:
+                self._log_decision(decision, resolved_scope, tool, resolved_ctx, disposition,
+                                   extra_fields={"call_id": call_id} if is_v2 else None)
+            except CommittedAuditError as exc:
+                exc.decision = self._attach_call_id(decision, call_id)
+                raise
+            return self._attach_call_id(decision, call_id)
+
+    def record_outcome(self, call_id: str, body_state: str, *, error_code: str | None = None,
+                       invoked_params=_UNSET, duration_ms: int, receipt: Mapping | None = None) -> dict:
+        """The body-owning wrapper's report of how an `allow`ed call (identified by `call_id`,
+        from that `check()` call's `Decision.call_id`) ended. `schema_version=2` chains only.
+
+        `body_state`: one of the `BodyState` constants. `error_code` is required exactly when
+        `body_state == BodyState.RAISED` (a normalized exception class name, never a message) and
+        forbidden otherwise. `duration_ms` (observation start to observation end) is required.
+        `invoked_params` is the corresponding JSON object the wrapper observed immediately before
+        the actual invocation — hashed the same way as `check()`'s `authorized_params` (see
+        params.py); pass the `_UNSET`-equivalent default (omit the kwarg) to opt out. `receipt`
+        is unverified carriage, `{type, ref, digest}` (docs/execution-binding spec section 7).
+
+        Exactly one outcome per `call_id` is enforced here (raises `DuplicateOutcomeError`); a
+        second outcome for the same call_id is a caller bug, not a policy outcome. A call_id that
+        was never pending anywhere in this chain (bound to a deny, or foreign) is still recorded
+        — this is a best-effort runtime cleanup, not a gate; the offline verifier is what flags
+        `outcome_without_allow`/`cross_ref` from the ledger alone.
+        """
+        if not self._is_v2:
+            raise ValueError("record_outcome requires a schema_version=2 chain "
+                             "(Guard.issue(..., schema_version=2))")
+        if body_state not in BodyState.ALL:
+            raise ValueError(f"unknown body_state {body_state!r}; expected one of {sorted(BodyState.ALL)}")
+        if (error_code is not None) != (body_state == BodyState.RAISED):
+            raise ValueError("error_code is required exactly when body_state == BodyState.RAISED")
+        if not isinstance(duration_ms, int) or isinstance(duration_ms, bool) or duration_ms < 0:
+            raise ValueError(f"duration_ms must be a non-negative integer; got {duration_ms!r}")
+        if receipt is not None:
+            missing = [k for k in ("type", "ref", "digest") if k not in receipt]
+            if missing:
+                raise ValueError(f"receipt is missing {missing}; expected type/ref/digest")
+
+        with self._chain._lock:
+            if not self._chain.mark_outcomed(call_id):
+                raise DuplicateOutcomeError(f"call_id {call_id!r} already has a recorded outcome")
+            self._chain.resolve_pending(call_id)
+            fields = dict(chain_id=self.chain_id, node=self._node.node_id, call_id=call_id,
+                         body_state=body_state, duration_ms=duration_ms)
+            if error_code is not None:
+                fields["error_code"] = error_code
+            ph, preason = self._params_commitment(invoked_params)
+            if ph is not None:
+                fields["invoked_params_hash"] = ph
+            elif preason is not None:
+                fields["params_hash_reason"] = preason
+            if receipt is not None:
+                fields["receipt"] = dict(receipt)
+            return self._append("outcome", **fields)
 
     @contextmanager
     def authorize(self, scope: str, **kwargs):
@@ -412,13 +663,23 @@ class Guard:
         yield
 
     # ---- chain controls ------------------------------------------------
+    def _pending_at_kill(self, revoked_nodes: list) -> dict:
+        """`{"pending_at_kill": [...]}` — the still-open call_ids across every node a kill
+        revoked, snapshotted (NOT cleared: a late `record_outcome()` after this kill is still
+        accepted — spec section 1). Only meaningful on v2 chains; called only when `_is_v2`."""
+        pending: set = set()
+        for nid in revoked_nodes:
+            pending.update(self._chain.pending_for(nid))
+        return {"pending_at_kill": sorted(pending)}
+
     def revoke(self, node_id: str | None = None) -> list:
         # Audit event stays "kill" (v0.1 wire vocabulary) — see the note in
         # delegate() about schema/agent-audit.schema.json and cli.py.
         target = node_id or self._node.node_id
         revoked = self._chain.revoke(target)
+        extra = self._pending_at_kill(revoked) if self._is_v2 else {}
         self._append("kill", chain_id=self.chain_id,
-                           target=target, revoked=revoked)
+                           target=target, revoked=revoked, **extra)
         return revoked
 
     def revoke_agent(self, agent_id: str) -> list:
@@ -429,8 +690,9 @@ class Guard:
         because frameworks re-hand-off to the same agent freely and a fresh
         `delegate()` would otherwise mint it clean authority. One audit event."""
         revoked = self._chain.revoke_agent(agent_id)
+        extra = self._pending_at_kill(revoked) if self._is_v2 else {}
         self._append("kill", chain_id=self.chain_id,
-                           target=self._node.node_id, agent=agent_id, revoked=revoked)
+                           target=self._node.node_id, agent=agent_id, revoked=revoked, **extra)
         return revoked
 
     def would_delegate(self, agent_id: str, request: Authority) -> Decision:
