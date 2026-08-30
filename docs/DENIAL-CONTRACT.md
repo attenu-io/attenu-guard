@@ -52,6 +52,22 @@ node and emit one `kill` event with `reason="strike_policy"`. This is "what happ
 getting blocked": the node is cut off and the parent sees why. Off by default; `enabled`, `n`, `mode`
 (`same_scope`|`total`) are per-installation config.
 
+## The A2A receiving hop
+
+`GuardedAgentExecutor` (`attenu_guard.adapters.a2a`) gates every inbound task before `inner.execute`
+runs. After the chain itself is read and verified offline (a missing or invalid chain is refused
+first), three more gates can still refuse the served `Guard`:
+
+| gate | condition | error | disposition |
+|---|---|---|---|
+| `revocation_check=` | the deployment's own status-list/revocation feed returns a reason for the verified leaf | `revoked` | `out_of_authority` |
+| `authority_for(agent_id, task)` | returns `None` — no permissions defined for what this agent's task needs | `no_authority` | `unresolved` |
+| `authority_for(agent_id, task)` | returns an authority the verified leaf cannot meet — `Guard.delegate` raises `AuthorityError` rather than serve a widened `Guard` | `no_authority` | `out_of_authority` |
+
+Every refusal reaches the caller as the executor's own denial message (same shape as any other
+deny, `extension` field set) before `inner.execute` runs, and lands on the ledger through the same
+`Guard`/`AuditLog` path as a denial inside the remote agent's own tools.
+
 ## What the parent sees
 
 A child's denials and any strike revocation are on the same chain ledger the parent's Guard owns, so a
