@@ -13,10 +13,10 @@ active corners of the IETF right now — roughly sixteen individual drafts, two 
 them near-twins of our design, and a multi-vendor umbrella draft
 (`draft-klrc-aiagent-auth`, authored across Defakto/AWS/Zscaler/Ping/OpenAI/Okta)
 heading for WIMSE adoption. **None is WG-adopted yet**, so the mechanism slot is
-still open. The failure mode is not "nobody cares" — it is "you are the
-seventeenth redundant capability-token draft and the working group ignores you."
-The winning move is **convergence plus one narrow, well-justified differentiator
-backed by running code**, not a fresh standalone land-grab. Everything below
+still open. The real risk is becoming the seventeenth redundant
+capability-token draft the working group ignores. The winning move is
+**convergence plus one narrow, well-justified differentiator backed by running
+code**, not a fresh standalone land-grab. Everything below
 serves that.
 
 ## What we reuse vs. what we invent (the whole strategy in one table)

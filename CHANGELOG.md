@@ -298,4 +298,3 @@ landed as the reference implementation of the Internet-Draft.
 [0.7.1]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.7.1
 [0.7.0]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.7.0
 [0.6.1]: https://github.com/attenu-io/attenu-guard/releases/tag/v0.6.1
-[0.2.0]: https://github.com/attenu-io/delegation-guard/releases/tag/v0.2.0

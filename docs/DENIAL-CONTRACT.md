@@ -26,9 +26,9 @@ A `deny` entry — and the denial an adapter hands back to the model — carries
 
 | disposition | meaning | what it tells a human |
 |---|---|---|
-| `held_pending_grant` | a known, curated tool whose tier-2 scope awaits an explicit operator grant | **waiting on you** |
-| `withheld_tier2` | resolvable only to a tier-2 heuristic the deriver never grants | curate it, or leave it held |
-| `unresolved` | no authority is known for this tool at all (no policy / no catalog entry) | declare it |
+| `held_pending_grant` | a known tool in your policy pack whose scope awaits an explicit operator grant | **Held — waiting for your approval** |
+| `withheld_tier2` | resolvable to a scope in your policy pack that needs one manual approval | grant it, or leave it held |
+| `unresolved` | no authority is known for this tool at all (no policy / not in your policy pack) | declare it |
 | `out_of_authority` | resolved and grantable, but not held by **this** node | **we stopped something** — real over-reach |
 
 A plain `scope_not_granted` deny the caller did not explain records `out_of_authority` (the shim's own truth);

@@ -1,6 +1,6 @@
 # Red-Team Report & Threat Model — attenu-guard authorization protocol
 
-*Adversarial assessment of the attenu-guard v0.1 authorization protocol.
+*Adversarial assessment of the attenu-guard authorization protocol.
 Reproduce with `python tests/red_team.py` (exit code = number of unresolved
 findings; currently 0). This is a living document — every new attack idea
 becomes a case in `tests/red_team.py`, and the harness runs in CI as a gate.*
@@ -20,23 +20,21 @@ record can be altered undetected (**integrity**). We also treat refusing a
 *legitimately*-granted action as a defect (**false-deny**) — for an
 authorization product, false denials break the workflows we exist to enable.
 
-## Threat model — who the attacker is, per tier
+## Threat model — who the attacker is
 
-The library has an **in-process tier** (this repo) and a **production
-data-plane** (the commercial Attenu plane). They have different trust boundaries,
-and honesty about the difference is the whole point of this document.
+The library runs in-process. Its job is to make **child ⊆ parent** true and
+enforced for honest infrastructure running dishonest *agents*. Authority is a
+Python object with a per-chain HMAC seal, and the library trusts its own
+process.
 
-| | In-process library (OSS) | Production data-plane |
-|---|---|---|
-| Authority representation | Python object + per-chain HMAC seal | signed, offline-verifiable grant (Biscuit-class) |
-| Trusts | its own process | nothing on the hot path; verifies signatures |
-| In-scope attacker | a hostile *agent* / malicious delegation request / poisoned tool input; accidental or unsophisticated in-process mutation | + a compromised same-process component; + a malicious enforcement node |
-| Out of scope | a same-process adversary that reads process memory | (folded in-scope via signatures) |
+**In scope:** a hostile *agent*, a malicious delegation request, poisoned tool
+input, and accidental or unsophisticated in-process mutation.
+**Out of scope:** a same-process adversary that reads process memory or the
+chain secret directly — see "Same-process re-seal" under Documented
+limitations, below.
 
-The in-process tier's job is to make **child ⊆ parent** true and enforced for
-honest infrastructure running dishonest *agents*. That is exactly the OWASP
-ASI07/ASI08 threat (a delegated or hijacked agent abusing inherited authority),
-and it is what the harness below hammers.
+That is exactly the OWASP ASI07/ASI08 threat (a delegated or hijacked agent
+abusing inherited authority), and it is what the harness below hammers.
 
 ## The two boxes
 
@@ -48,9 +46,9 @@ and it is what the harness below hammers.
   relation, re-sealing forged authority. This is a correctness audit of the
   proof machinery plus the same-process boundary.
 
-## Results (v0.1, after the first red-team pass)
+## Results (after the first red-team pass)
 
-16 attacks · **14 defended · 0 unresolved · 2 documented limitations.**
+17 attacks · **15 defended · 0 unresolved · 2 documented limitations.**
 
 ### Defended — the protocol holds
 
@@ -94,28 +92,26 @@ that fails the build if it regresses:
 ### Documented limitations — by design for the in-process tier
 
 Two attacks are *not* code bugs; they are properties of enforcing in a shared
-process, mitigated (not eliminated) here and fully addressed by the production
-data-plane. We label them honestly rather than pretend a fix.
+process. We label them honestly rather than pretend a fix.
 
 - **Declared-quantity trust** (`unenforced`, black-box). Aggregate budgets are
   enforced against the number the caller supplies; an agent that omits the row
   count reads unmetered, because the in-process library cannot observe the true
-  size. *Mitigations:* (a) `strict_metering=True` fails closed when a call
-  flagged `metered=True` accesses a metered resource without declaring the
-  quantity — framework adapters flag consuming calls; (b) the production
-  data-plane measures at the gateway, which the agent does not control. The
-  honest rule: **place enforcement where the real quantity is observable.**
+  size. *Mitigation:* `strict_metering=True` fails closed when a call flagged
+  `metered=True` accesses a metered resource without declaring the quantity —
+  framework adapters flag consuming calls. Measuring the true quantity somewhere
+  outside the calling agent's control is not in the library; see the roadmap.
+  The honest rule: **place enforcement where the real quantity is observable.**
 - **Same-process re-seal** (`escalation`, white-box). The integrity seal catches
   naive mutation of node authority, but a component running in the same process
   can read the per-chain secret and re-seal a forged authority. This is out of
-  scope for the library tier by definition. *Mitigation:* the production
-  data-plane replaces the shared HMAC secret with signed, offline-verifiable
-  grants, so a forged authority is detectable without any shared secret.
+  scope for the library tier by definition; there is no mitigation for it in
+  the library today. A signed, offline-verifiable grant format that would close
+  this gap without a shared secret is not in the library; see the roadmap.
 
 ## How to extend this
 
 Add an attack as a function returning `("DEFENDED" | "BROKEN" | "LIMITATION",
 evidence)` and register it in `BLACK` or `WHITE` in `tests/red_team.py`. A
 `BROKEN` result fails CI. New attack ideas welcome via the process in
-[SECURITY.md](../SECURITY.md) — including the standing **Break-Our-Plane** pledge
-for a commercial layer above the library.
+[SECURITY.md](../SECURITY.md).
