@@ -198,17 +198,21 @@ scope          = literal-scope / wildcard-scope
 
 Thus, scope values are lowercase, dot-separated names with at least two
 segments. A wildcard is permitted only as the complete final segment following
-a dot. The bare value "*", partial-segment forms such as "crm.re*", and
-non-terminal forms such as "crm.*.read" are invalid. A producer MUST NOT emit
+a dot. The bare value `*`, partial-segment forms such as `crm.re*`, and
+non-terminal forms such as `crm.*.read` are invalid. A producer MUST NOT emit
 an invalid scope. A verifier that encounters one MUST reject the Delegation
 Token as malformed before evaluating subsumption.
 
 A parent literal scope covers only an identical child scope. A parent wildcard
 scope covers any child scope whose value begins with the parent value after
-removing only the final "*" and retaining the dot. Therefore "crm.*" covers
-"crm.read", "crm.x.y.z", and "crm.x.*"; it does not cover the bare name "crm"
+removing only the final `*` and retaining the dot. Therefore `crm.*` covers
+"crm.read", "crm.x.y.z", and `crm.x.*`; it does not cover the bare name "crm"
 or the adjacent namespace "crmx.read". Wildcard coverage is segment-bounded and
 extends to any depth below the named prefix.
+
+This wildcard-covering rule applies only to the "scopes" member of the
+"agent_delegation" authorization detail type defined in {{authority}}; other
+authorization detail types, if defined, specify their own scope semantics.
 
 ## Constraint Vocabulary {#constraints}
 
