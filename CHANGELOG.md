@@ -15,6 +15,12 @@ All notable changes to attenu-guard are documented here. The format follows
   and chain identity instead of ignoring them, so a bundle for the wrong version or the wrong chain
   no longer verifies.
 
+### Added
+- `AuditLog.append` now raises `CommittedAuditError` (carrying the committed `entry`) if persisting
+  an entry fails after it was already committed to the in-memory chain — the file write or a sink
+  raising no longer looks the same as nothing having been recorded. The entry stays committed;
+  callers must not retry the call that produced it on the strength of this error alone.
+
 ## [0.8.0] — 2026-08-29
 
 ### Changed

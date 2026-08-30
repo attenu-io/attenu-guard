@@ -29,14 +29,14 @@ from .ceilings import (
 )
 from .authority import Authority, AuthorityError
 from .guard import Guard, AuthorityDenied
-from .audit import AuditLog
+from .audit import AuditLog, CommittedAuditError
 from .strikes import StrikePolicy
 from . import canonical, wire, scenarios, evidence, identity   # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
 
 __version__ = "0.8.0"
 __all__ = [
     "Authority", "Guard", "Decision", "Reason", "ReasonCode", "Disposition",
-    "AuthorityError", "AuthorityDenied", "AuditLog",
+    "AuthorityError", "AuthorityDenied", "AuditLog", "CommittedAuditError",
     "Ceiling", "RowLimit", "SpendCap", "CallLimit", "EgressRank", "StrikePolicy",
     "Allow", "Deny", "Prefix", "register_ceiling",
     "canonical", "wire", "scenarios", "evidence", "identity",
