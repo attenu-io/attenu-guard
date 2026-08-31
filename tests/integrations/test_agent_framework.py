@@ -32,9 +32,11 @@ from agent_framework import (  # noqa: E402
     Content,
     FunctionInvocationLayer,
     FunctionInvocationContext,
+    FunctionMiddleware,
     Message,
     MiddlewareFailure,
 )
+from agent_framework._middleware import FunctionMiddlewarePipeline  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
     AuditLog,
@@ -469,13 +471,15 @@ def test_audit_log_verifies_and_records_the_deny(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _direct(policies, *, agent_name="summarizer", registry=None, on_deny="result"):
+def _direct(policies, *, agent_name="summarizer", registry=None, on_deny="result",
+            strict_single_hook=False):
     """Drive DelegationGuard.process directly, the way the pipeline does."""
     return DelegationGuard(
         agent_name=agent_name,
         registry=registry,
         policies=policies,
         on_deny=on_deny,
+        strict_single_hook=strict_single_hook,
     )
 
 
@@ -615,11 +619,12 @@ def test_guarded_agent_puts_the_guard_first():
 # adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
 # observation with no cross-hook correlation of any kind.
 # ==========================================================================
-def _v2_guard(authority=None, *, agent_name="summarizer"):
+def _v2_guard(authority=None, *, agent_name="summarizer", strict_single_hook=True):
     root = Guard.issue("orchestrator", authority or ORCHESTRATOR_AUTHORITY, schema_version=2)
     registry = GuardRegistry(root, "orchestrator")
     registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
-    guard = _direct(POLICIES, registry=registry, agent_name=agent_name)
+    guard = _direct(POLICIES, registry=registry, agent_name=agent_name,
+                     strict_single_hook=strict_single_hook)
     return root, registry, guard
 
 
@@ -707,7 +712,8 @@ def test_v2_delegation_tool_itself_is_a_priced_call_and_gets_a_real_outcome():
     bound. Only the internal registry.delegate() mint step adds no second, separate one."""
     root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
     registry = GuardRegistry(root, "orchestrator")
-    guard = _direct(ORCHESTRATOR_POLICIES, registry=registry, agent_name="orchestrator")
+    guard = _direct(ORCHESTRATOR_POLICIES, registry=registry, agent_name="orchestrator",
+                     strict_single_hook=True)
     ctx = _context("summarizer", {"objective": "summarize Q3"})
 
     async def call_next() -> None:
@@ -763,3 +769,122 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+# ==========================================================================
+# Round 2 (Codex review, batch 2, finding 1): strict_single_hook mode split.
+#
+# ROUND 2 CORRECTION: the version of this file reviewed by Codex constructed
+# DelegationGuard unconditionally with genuine WRAPPER_ASYNC capture -- true only when this
+# guard is the sole function middleware for the agent's whole lifetime. Pinned 1.15.x's
+# FunctionMiddlewarePipeline.execute composes an ORDERED, MUTABLE list of middleware
+# (Agent.middleware is a plain list attribute, appendable after construction), at BOTH the
+# agent level and, separately, an invisible client level (see adapters/agent_framework.py's
+# own "EXECUTION BINDING" docstring). strict_single_hook (default False) is the fix: genuine
+# capture is now an explicit, scoped attestation, verified below against the framework's OWN
+# FunctionMiddlewarePipeline, not a hand-rolled stand-in.
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and no outcome is ever recorded -- the body still genuinely runs."""
+    root, registry, guard = _v2_guard(strict_single_hook=False)
+    ctx = _context("crm_query", {"rows": 10})
+    body_ran = []
+
+    async def call_next() -> None:
+        body_ran.append(1)
+        ctx.result = "10 rows"
+
+    asyncio.run(guard.process(ctx, call_next))
+    assert ctx.result == "10 rows"
+    assert body_ran == [1]
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert registry.get("summarizer").complete()
+
+
+@pytest.mark.parametrize("order", ["guard_outer", "sibling_outer"])
+def test_v2_strict_mode_never_fabricates_when_a_sibling_short_circuits(order):
+    """Compose this guard with a sibling FunctionMiddleware that never calls its own
+    call_next() (e.g. a cache/mock hook), using the framework's OWN FunctionMiddlewarePipeline
+    -- the exact primitive `Agent.run`'s function-calling loop drives -- in both orders:
+
+    * guard_outer: the sibling is INNER (later in the pipeline) and short-circuits before the
+      real body. This guard's own call_next() still returns genuinely, so `process()` records
+      RETURNED for a body that never ran. The documented, deliberately-opted-into residual of a
+      violated strict_single_hook attestation.
+    * sibling_outer: the sibling is OUTER (earlier -- e.g. registered ahead of the guard, or
+      the guard was not placed first the way `guarded_agent()` does) and short-circuits before
+      this guard is ever reached. Safe by construction: nothing is authorized, nothing is
+      recorded -- but note this is the SAME pre-existing authorization-skip gap the module
+      docstring's "KNOWN GAPS" already documents.
+    """
+    root, registry, guard = _v2_guard(strict_single_hook=True)
+    ctx = _context("crm_query", {"rows": 10})
+    body_ran = []
+
+    async def final_handler(context) -> str:
+        body_ran.append(1)
+        return "10 rows"
+
+    class _ShortCircuitingSibling(FunctionMiddleware):
+        async def process(self, context, call_next) -> None:
+            # Never calls call_next() -- stands in for a cache-hit / mocking middleware.
+            context.result = "mocked, never reached the real body"
+
+    members = [guard, _ShortCircuitingSibling()] if order == "guard_outer" else \
+        [_ShortCircuitingSibling(), guard]
+    pipeline = FunctionMiddlewarePipeline(*members)
+
+    asyncio.run(pipeline.execute(ctx, final_handler))
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+
+    assert ctx.result == "mocked, never reached the real body"
+    assert body_ran == []
+    if order == "guard_outer":
+        assert outcomes and outcomes[0]["body_state"] == BodyState.RETURNED  # the residual
+        assert len([e for e in entries if e["event"] == "allow"]) == 1
+    else:
+        assert outcomes == []  # the guard was never reached -- nothing to record
+        assert [e for e in entries if e["event"] == "allow"] == []
+
+
+def test_v2_strict_mode_when_guard_is_outer_and_a_sibling_retries_the_real_body():
+    """Guard OUTER, a sibling INNER retries its own call_next() (= the real body) twice for
+    what the model sees as one tool call -- e.g. a retry-on-empty-result middleware. Verified
+    empirically against the framework's own FunctionMiddlewarePipeline before writing this
+    assertion (not assumed): the real body runs twice, but this guard's own call_next() -- the
+    sibling's process() -- is awaited exactly once and returns once with the FINAL attempt's
+    ctx.result. One honest record, not corrupted, but silently under-reporting that the real
+    body ran more than once -- the documented "guard outer, sibling retries" residual, distinct
+    from the short-circuit case above."""
+    root, registry, guard = _v2_guard(strict_single_hook=True)
+    ctx = _context("crm_query", {"rows": 10})
+    body_calls = []
+
+    async def final_handler(context) -> str:
+        body_calls.append(1)
+        return f"attempt {len(body_calls)}"
+
+    class _RetryingSibling(FunctionMiddleware):
+        async def process(self, context, call_next) -> None:
+            await call_next()   # first attempt, discarded by the sibling
+            await call_next()   # final attempt, what the model actually sees
+
+    pipeline = FunctionMiddlewarePipeline(guard, _RetryingSibling())  # guard OUTER
+
+    asyncio.run(pipeline.execute(ctx, final_handler))
+    assert len(body_calls) == 2, "the real body ran twice, invisibly to this guard's own record"
+    assert ctx.result == "attempt 2"
+
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert len(outcomes) == 1, "exactly one honest record, not two, not a duplicate error"
+    assert outcomes[0]["body_state"] == BodyState.RETURNED

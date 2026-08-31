@@ -474,6 +474,28 @@ All notable changes to attenu-guard are documented here. The format follows
   SAME path via its own `ToolPolicy(scope=...)`, so a delegation tool call gets exactly the same
   capture/outcome treatment as any other allowed call; only the internal
   `self._registry.delegate(...)` mint step adds no second, separate check/outcome of its own.
+  - **Round 2 correction (Codex review, batch 2, finding 1):** the claim above --
+    `Capture.WRAPPER_ASYNC` as an unconditional, always-genuine observation -- was wrong.
+    Pinned 1.15.x's `FunctionMiddlewarePipeline.execute` (`_middleware.py:1126-1163`) is a
+    genuinely composable chain (verified empirically against the framework's own pipeline:
+    index 0 runs first and is outermost), and `Agent.middleware` (`_agents.py:468`) is a plain
+    MUTABLE list attribute, not a fixed roster resolved once at construction -- a caller can
+    append or insert into it any time after `Agent(...)` returns, and client-level function
+    middleware (`_tools.py:3165`, already flagged in this module's own "KNOWN GAPS") is a
+    separate, even-less-visible composition point this class cannot see at all. Added
+    `strict_single_hook: bool = False` to `DelegationGuard` and `guarded_agent()`. Default:
+    `Capture.PRE_HOOK_ONLY`, no `record_outcome()` ever, safe regardless of what else is on
+    either middleware list, now or later. `strict_single_hook=True`: an explicit, scoped
+    attestation that this guard is the ONLY function middleware that will ever run on this
+    agent, for its entire lifetime -- unlocks `Capture.WRAPPER_ASYNC`. This package cannot
+    verify the attestation itself (no construction-time roster to check the way `pydantic-ai`'s
+    `for_agent()` offers for batch 1's equivalent detect-and-refuse pattern). Tests added,
+    verified against the framework's OWN `FunctionMiddlewarePipeline` (not a hand-rolled
+    stand-in): default-mode-honest; both-order short-circuit (`guard_outer` records a false
+    `RETURNED`, `sibling_outer` is never reached); guard-outer with a sibling retrying the real
+    body underneath it (empirically confirmed first, per this project's own "verify, don't
+    assume" discipline: the real body runs twice, this guard records exactly one honest
+    `RETURNED` for the final attempt, silently under-reporting the retry).
 - Execution binding wired into `adapters.a2a` (the A2A protocol): `Capture.WRAPPER_SYNC`/
   `Capture.WRAPPER_ASYNC` from `guarded_tool()`'s sync/async wrapper, which calls `fn(*args,
   **kwargs)`/awaits it itself, same shape as `adapters.langgraph`'s reference wiring -- despite
