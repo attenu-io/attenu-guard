@@ -67,11 +67,43 @@ Everything is fail-closed: an agent with no Guard, a tool with no policy, a
 coworker with no configured `Authority`, and any internal error in the bridge
 all deny. attenu-guard never invents authority for you — you write the
 `Authority` for each delegation, exactly as the library intends.
+
+Execution binding (0.9.0, on a `schema_version=2` chain — see `Guard.issue`):
+`_before_tool_call` passes `capture=Capture.FRAMEWORK_POST_HOOK` to `guard.check()`
+on every regular tool check (not the delegation-tool check, which never calls
+`check()` — it mints via `parent.delegate()` instead, so there is nothing to bind
+an outcome to). The bridge does not itself invoke the tool body -- CrewAI does,
+via `ToolUsage.use`/`ause` -- so it cannot observe completion the way a wrapper
+that calls the body itself can; it observes it through CrewAI's OWN post hook,
+`_after_tool_call`, which the framework runs for every dispatch path (including
+a hook-blocked call) with the tool's real result attached
+(`ToolCallHookContext.raw_tool_result` -- see `crewai/hooks/tool_hooks.py`).
+`_after_tool_call` calls `guard.record_outcome()` from that.
+
+HONESTY NOTE on `BodyState.RAISED`: CrewAI's own `ToolUsage.use`/`ause`
+(`crewai/tools/tool_usage.py`) catches every exception the tool body raises,
+internally, and turns it into a formatted error STRING before `_after_tool_call`
+ever runs -- by the time this bridge's post hook sees a result, a raised
+exception and an ordinary return are the same shape (a string). So this
+adapter can never honestly report `BodyState.RAISED` -- there is no framework
+signal that distinguishes "the body raised and CrewAI caught it" from "the
+body returned this string" at the one hook point that observes completion.
+Every completed, non-deferred call is therefore recorded `BodyState.RETURNED`,
+whatever it actually did inside CrewAI's own try/except. This is the honest
+capture this framework's public hook surface supports, not a shortcut: the
+alternative -- monkeypatching `ToolUsage._use`/`_ause` to see the tool's raw
+`Exception` before CrewAI swallows it -- is not one of the documented hook
+points this file relies on (see the module docstring's "Hook points used").
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import copy
+import inspect
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
@@ -89,8 +121,9 @@ from attenu_guard import (
     Decision,
     Guard,
     ReasonCode,
+    __version__,
 )
-from attenu_guard.reasons import Disposition
+from attenu_guard.reasons import BodyState, Capture, Disposition
 
 __all__ = ["ToolPolicy", "Denial", "CrewAIGuardBridge", "DELEGATION_TOOLS"]
 
@@ -162,8 +195,59 @@ class Denial:
 
 
 @dataclass
+class _PendingOutcome:
+    """An allowed, v2 tool check waiting on `_after_tool_call` to close it out."""
+
+    guard: Guard
+    call_id: str
+    tool_name: str
+    snapshot: Any
+    started_at: float
+
+
+@dataclass
 class _Pending:
     denial: Optional[Denial] = None
+    outcome: Optional[_PendingOutcome] = None
+
+
+def _is_deferred_result(result: Any) -> bool:
+    """True for a generator/async-generator/future -- a shape `_after_tool_call` sees but does
+    not itself consume. In practice `ctx.raw_tool_result` is CrewAI's own formatted/raw tool
+    return, never a generator, but the check costs nothing and keeps this adapter consistent
+    with the other attenu-guard adapters' `deferred` handling."""
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.CrewAIGuardBridge._authorize",
+}
+
+
+def _snapshot_params(tool_input: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    CrewAI invokes the tool body -- and reused as both `authorized_params` and `invoked_params`,
+    exactly as adapters/langgraph.py does: CrewAI's `ToolCallHookContext.tool_input` is a single
+    mutable dict shared between the before and after hook contexts (`tool_utils.py`), so reading
+    it again after the body ran would not prove anything about what the body actually saw."""
+    try:
+        return copy.deepcopy(dict(tool_input))
+    except Exception:
+        return dict(tool_input)
 
 
 class CrewAIGuardBridge:
@@ -270,7 +354,9 @@ class CrewAIGuardBridge:
         (`crewai/hooks/dispatch.py:264`), so a bug in this bridge — or in a
         user-supplied `context_fn` — would otherwise fail OPEN.
         """
-        self._pending().denial = None
+        pending = self._pending()
+        pending.denial = None
+        pending.outcome = None
         try:
             self._authorize(ctx)
         except HookAborted:
@@ -323,10 +409,25 @@ class CrewAIGuardBridge:
             )
 
         context = dict(policy.context_fn(args)) if policy.context_fn else {}
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(args) if v2 else None
+        extra = (
+            dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(policy.scope, context=context, tool=tool_name,
-                               disposition=policy.disposition)
+                               disposition=policy.disposition, **extra)
         if not decision:
             self._deny(role, tool_name, args, decision.explain(), decision=decision)
+            return
+        if v2:
+            # Nothing calls the tool body here -- CrewAI does, elsewhere, entirely outside this
+            # hook -- so the outcome is closed out later, in `_after_tool_call`, from whatever
+            # CrewAI's OWN post hook hands back (see the module docstring's "Execution binding").
+            self._pending().outcome = _PendingOutcome(
+                guard=guard, call_id=decision.call_id, tool_name=tool_name,
+                snapshot=snapshot, started_at=time.monotonic(),
+            )
 
     # ---- hook point 1: child creation ------------------------------------
 
@@ -426,6 +527,8 @@ class CrewAIGuardBridge:
         pending = self._pending()
         denial = pending.denial
         pending.denial = None
+        outcome = pending.outcome
+        pending.outcome = None
         tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
         if denial is None and tool_name in self._delegation_tools:
             args = getattr(ctx, "tool_input", None) or {}
@@ -433,6 +536,15 @@ class CrewAIGuardBridge:
             child = self.guard_for(coworker) if coworker else None
             if child is not None:
                 child.complete()                  # the coworker returned: lifecycle end on the ledger (informational)
+        if outcome is not None and denial is None and outcome.tool_name == tool_name:
+            # Execution binding (0.9.0): close out the check() this hook's `_authorize` made,
+            # from CrewAI's OWN post-hook result -- see the module docstring's "Execution
+            # binding" and its honesty note on why `BodyState.RAISED` never appears here.
+            raw_result = getattr(ctx, "raw_tool_result", None)
+            outcome.guard.record_outcome(
+                outcome.call_id, _body_state_for(raw_result),
+                invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
+            )
         if denial is None:
             return None
         if _sanitize_tool_name(getattr(ctx, "tool_name", "") or "") != denial.tool_name:

