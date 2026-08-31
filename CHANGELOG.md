@@ -44,7 +44,9 @@ All notable changes to attenu-guard are documented here. The format follows
   `asyncio.CancelledError` (a `BaseException`, so neither the error nor after callback ever fires
   -- there is no hook to record `ABANDONED` from); and `PluginManager`'s stop-at-first-non-None
   dispatch, where an earlier-registered THIRD-PARTY plugin overriding the result prevents this
-  plugin's own callback -- and so its outcome close-out -- from ever running.
+  plugin's own callback -- and so its outcome close-out -- from ever running. Its module
+  docstring now also documents `duration_ms` as an observation window (`check()` to whichever
+  callback fires), not a body-execution timer, matching `Guard.record_outcome`'s own contract.
 - `adapters.haystack`: a delegation `ToolPolicy` that declares BOTH a real `scope` and
   `delegates_to`/`grant` (unusual, but the dataclass allows it) calls `guard.check()` for itself
   first, exactly like any other guarded tool -- but `_ToolGuard.scope()` discarded that

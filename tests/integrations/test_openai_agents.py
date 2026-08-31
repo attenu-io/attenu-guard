@@ -55,6 +55,7 @@ from attenu_guard.adapters.openai_agents import (  # noqa: E402
     guarded_handoff,
     guarded_tool,
 )
+import attenu_guard.adapters.openai_agents as dg_oa  # noqa: E402
 
 ORCHESTRATOR_AUTHORITY = Authority(
     scopes={"crm.*", "mail.send"},
@@ -710,3 +711,21 @@ class ExecutionBindingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SnapshotFreezeTests(unittest.TestCase):
+    """Codex review finding 7: the snapshot fallback must never share a mutable container."""
+
+    def test_never_shares_a_mutable_container_on_deepcopy_failure(self):
+        import threading
+        unclonable = threading.Lock()
+        live = {"rows": 10, "nested": {"unclonable": unclonable, "list": [1, 2, 3]}}
+
+        snapshot = dg_oa._snapshot_params(live)
+
+        self.assertEqual(snapshot["rows"], 10)
+        self.assertIsInstance(snapshot["nested"]["unclonable"], str)
+        live["nested"]["list"].append(999)
+        live["nested"]["new_key"] = "mutated after snapshot"
+        self.assertEqual(snapshot["nested"]["list"], [1, 2, 3])
+        self.assertNotIn("new_key", snapshot["nested"])

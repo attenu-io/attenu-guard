@@ -96,6 +96,12 @@ post-invocation hooks, whichever one actually fires for a given call:
     propagates exactly as it would without this plugin installed — the plugin only
     observes, it never swallows the error.
 
+`duration_ms` is therefore an OBSERVATION window (`_authorize`'s `check()` call to whichever
+callback fires), not a body-execution timer — matching `Guard.record_outcome`'s own documented
+contract ("observation start to observation end") — and it can include time spent in OTHER
+before-callbacks/plugins, cache lookups, and ADK's own dispatch overhead, not solely the tool
+body's own runtime.
+
 The two are mutually exclusive per call (`functions.py`'s `try: ... except Exception
 as tool_error: error_response = await _run_on_tool_error_callbacks(...)` — the error
 callback runs, then EITHER its return value stands in for the result and

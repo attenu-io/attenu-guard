@@ -969,3 +969,21 @@ def test_v2_a_plugin_registered_before_us_that_overrides_leaves_the_outcome_unre
     assert any(e["event"] == "allow" and e.get("tool") == "crm_query" for e in entries)
     # no outcome was fabricated for the call THIS plugin's own after_tool_callback never saw
     assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_snapshot_freeze_never_shares_a_mutable_container_on_deepcopy_failure():
+    """Codex review finding 7: on ANY deepcopy failure deep in a nested structure, the snapshot
+    must never fall back to sharing the live, mutable container -- only reprs the unclonable
+    leaf, and rebuilds every dict/list around it fresh."""
+    import threading
+    unclonable = threading.Lock()
+    live = {"rows": 10, "nested": {"unclonable": unclonable, "list": [1, 2, 3]}}
+
+    snapshot = dg_adk._snapshot_params(live)
+
+    assert snapshot["rows"] == 10
+    assert isinstance(snapshot["nested"]["unclonable"], str)
+    live["nested"]["list"].append(999)
+    live["nested"]["new_key"] = "mutated after snapshot"
+    assert snapshot["nested"]["list"] == [1, 2, 3], "the snapshot shared a mutable list"
+    assert "new_key" not in snapshot["nested"], "the snapshot shared the mutable dict"
