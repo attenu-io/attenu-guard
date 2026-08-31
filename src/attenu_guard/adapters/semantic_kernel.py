@@ -85,38 +85,100 @@ runs, and every allow/deny lands in the chain's hash-chained audit log.
 
 EXECUTION BINDING (`record_outcome`, 0.9.0, OPT-IN via `schema_version=2`)
 ---------------------------------------------------------------------
-`_dg_tool_gate` calls the function body itself — `await next(context)` — so
-this is a genuine `Capture.WRAPPER_ASYNC` (there is no sync entry point;
-`KernelFunction.invoke`/`invoke_stream` are both `async`), exactly like
-`adapters.langgraph`'s reference wiring. Verified directly against pinned
-semantic-kernel 1.44.1: `KernelFunction.invoke`'s own `try`/`except Exception
-as e: ...; raise e` around `await stack(function_context)` re-raises
-unchanged, and `KernelFunctionFromMethod._invoke_internal` does not swallow
-its own exception either — a raise from the tool body reaches this filter's
-`await next(context)` as a real Python exception, so `BodyState.RAISED` (with
-`error_code = type(exc).__name__`) is genuinely observed, not inferred.
+TWO MODES, gated by `strict_single_hook` (an `attach_guard(...)` parameter, default
+`False`) -- see the "Round 2 correction" below for why this is no longer a bare,
+unconditional claim.
 
-The SAME registered filter also gates `invoke_stream` (both call sites share
-one `FilterTypes.FUNCTION_INVOCATION` stack). There,
-`KernelFunctionFromMethod._invoke_internal_stream` sets `context.result.value`
-to the raw generator/async-generator without consuming it — the actual
-iteration happens in `invoke_stream` itself, AFTER `next(context)` has already
-returned to this filter — so `context.result.value` is inspected for
-generator-ness (`_is_deferred_result`) and reported as `BodyState.DEFERRED`
-when it is one, never fabricated as `RETURNED`.
+Pinned `Kernel.add_filter`/`construct_call_stack`
+(`semantic_kernel/filters/kernel_filters_extension.py:36-51`, `:108-117`) fold EVERY
+`FilterTypes.FUNCTION_INVOCATION` filter registered on the SAME kernel into ONE composed
+chain, per kernel, not per filter. `add_filter`'s own docstring: "the first filter added,
+will be the first to be executed, but it will also be the last executed for the part
+after `await next(context)`" -- verified by tracing `construct_call_stack`'s
+`stack.insert(0, ...)` loop by hand: the FIRST-added filter ends up OUTERMOST (the entry
+point), the LAST-added filter ends up INNERMOST, closest to `inner_function` (the real
+tool body). `attach_guard(...)` registers `_dg_tool_gate` via one `add_filter` call
+(`:542` below) -- but `kernel.add_filter` remains a public method on the SAME `kernel`
+object for the rest of its life, so nothing stops a caller from registering another
+`FUNCTION_INVOCATION` filter on it before OR after `attach_guard(...)` returns.
 
-`_freeze()` snapshot of `dict(context.arguments)` — the function's own raw
-invocation arguments, not the derived `policy.context_for(...)` ceiling
-context — taken immediately before `await next(context)` runs.
-`asyncio.CancelledError` on the filter's own `await` is `BodyState.ABANDONED`,
-still re-raised.
+`_dg_tool_gate` genuinely awaits whatever `next` it was handed, so `Capture.WRAPPER_ASYNC`
+(when unlocked, see below) is never a fabricated pre-hook read -- but a sibling filter
+positioned closer to `inner_function` in the SAME kernel's chain can still stand between
+this gate's own `await next(context)` and the real tool body:
 
-The delegation gate (`_dg_delegation_gate`) never calls `guard.check()` at
-all — a handoff mints the target's Guard via `chain.delegate()` ->
-`Guard.delegate()`, not a scope check — so it stays outside execution binding
-entirely, same as every adapter whose delegation is a mint rather than a
-priced call (`adapters.langchain`/`adapters.llama_index`/`adapters.camel`,
-unlike `adapters.ag2`/`adapters.agent_framework`).
+* Sibling added AFTER this gate (so it ends up INNER, closer to the body), short-circuits
+  (sets `context.result` without calling its own `next`): this gate's own `await
+  next(context)` still returns genuinely, so `_body_state_for(context.result.value)` is
+  recorded honestly for whatever the sibling put there -- `RETURNED` for a body that never
+  ran.
+* Sibling added AFTER this gate, calls its own `next` more than once (a retry) for what
+  the model sees as one function call: this gate's `await next(context)` is awaited once
+  and returns once with the final attempt's `context.result` -- one honest record,
+  under-reporting that the body ran more than once.
+* Sibling added BEFORE this gate (so it ends up OUTER, ahead of it), short-circuits before
+  this gate is ever reached: nothing is recorded, nothing false -- safe by construction for
+  THIS gate, though the sibling itself controls whether the check ever runs at all.
+* This gate is the ONLY `FUNCTION_INVOCATION` filter on the kernel, or the last one added
+  (innermost, closest to `inner_function`): safe by construction -- nothing between it and
+  the real tool body can fabricate what it observes.
+
+`strict_single_hook=False` (the default): `capture`/`authorized_params` are never passed
+to `guard.check()`. `Guard.check()` itself stamps `Capture.PRE_HOOK_ONLY` and
+`record_outcome()` is never called -- authorization is enforced exactly as always (this
+gate still denies before `next(context)` runs, still raises/short-circuits on denial), and
+nothing about the tool body's actual completion is claimed, regardless of what other
+`FUNCTION_INVOCATION` filters are on this kernel, now or later.
+
+`strict_single_hook=True`: an explicit caller attestation that `_dg_tool_gate` is the ONLY
+`FilterTypes.FUNCTION_INVOCATION` filter that will ever be registered on this kernel, for
+its whole lifetime -- unlocks `Capture.WRAPPER_ASYNC` and `record_outcome()`. This package
+has no way to verify the attestation from inside `_dg_tool_gate`: `Kernel` exposes no
+construction-time listing of a kernel's full, FINAL filter roster the way `pydantic-ai`'s
+`for_agent()` offers for batch 1's equivalent detect-and-refuse pattern (`add_filter`
+stays callable after `attach_guard` returns), so a wrong attestation reproduces exactly
+the residuals enumerated above. Set it only when you control every
+`FUNCTION_INVOCATION` filter on this kernel, for the kernel's entire lifetime.
+
+`BodyState.RAISED`, genuinely (independent of `strict_single_hook`, once
+`record_outcome()` actually runs under strict mode): verified directly against pinned
+semantic-kernel 1.44.1: `KernelFunction.invoke`'s own `try`/`except Exception as e: ...;
+raise e` around `await stack(function_context)` re-raises unchanged, and
+`KernelFunctionFromMethod._invoke_internal` does not swallow its own exception either --
+a raise from the tool body reaches this filter's `await next(context)` as a real Python
+exception, so `BodyState.RAISED` (with `error_code = type(exc).__name__`) is genuinely
+observed, not inferred.
+
+The SAME registered filter also gates `invoke_stream` (both call sites share one
+`FilterTypes.FUNCTION_INVOCATION` stack, subject to the same composition rules above).
+There, `KernelFunctionFromMethod._invoke_internal_stream` sets `context.result.value` to
+the raw generator/async-generator without consuming it -- the actual iteration happens in
+`invoke_stream` itself, AFTER `next(context)` has already returned to this filter -- so
+`context.result.value` is inspected for generator-ness (`_is_deferred_result`) and
+reported as `BodyState.DEFERRED` when it is one, never fabricated as `RETURNED`.
+
+`_freeze()` snapshot of `dict(context.arguments)` — the function's own raw invocation
+arguments, not the derived `policy.context_for(...)` ceiling context — taken immediately
+before `await next(context)` runs, only under `strict_single_hook=True`.
+`asyncio.CancelledError` on the filter's own `await` is `BodyState.ABANDONED`, still
+re-raised.
+
+ROUND 2 CORRECTION (Codex review, batch 2, finding 1): the previous revision of this
+section claimed `Capture.WRAPPER_ASYNC` was unconditionally "a genuine ... observation"
+for every `_dg_tool_gate` call. That was wrong -- verified against pinned
+`kernel_filters_extension.py` as documented above -- because `construct_call_stack` folds
+EVERY `FUNCTION_INVOCATION` filter registered on the same kernel into ONE composed chain,
+and `kernel.add_filter` stays callable for the kernel's whole lifetime, not only before
+`attach_guard(...)` runs. `strict_single_hook` (default `False`) is the fix: genuine
+capture is now an explicit, scoped opt-in, not a default claim this adapter could not
+actually back.
+
+On `schema_version=1` (the default), nothing in this whole section applies. The
+delegation gate (`_dg_delegation_gate`) never calls `guard.check()` at all — a handoff
+mints the target's Guard via `chain.delegate()` -> `Guard.delegate()`, not a scope check —
+so it stays outside execution binding entirely, in either mode, same as every adapter
+whose delegation is a mint rather than a priced call (`adapters.langchain`/
+`adapters.llama_index`/`adapters.camel`, unlike `adapters.ag2`/`adapters.agent_framework`).
 
 This module imports `semantic_kernel` and `attenu_guard` and nothing else.
 Copy it into your project as-is.
@@ -408,6 +470,7 @@ def attach_guard(
     exempt_plugins: Iterable[str] = (HANDOFF_PLUGIN_NAME,),
     delegation_plugin: str = HANDOFF_PLUGIN_NAME,
     delegation_prefix: str = HANDOFF_FUNCTION_PREFIX,
+    strict_single_hook: bool = False,
 ):
     """Register attenu-guard's two filters on one agent's `Kernel`.
 
@@ -445,6 +508,13 @@ def attach_guard(
         Plugins the tool gate skips. Defaults to Semantic Kernel's synthetic
         `Handoff` plugin, whose functions are control transfer rather than
         tools — the delegation filter governs those instead.
+    strict_single_hook
+        See the module docstring's "EXECUTION BINDING ... TWO MODES" -- `False`
+        (default) never claims genuine execution capture, safe no matter what other
+        `FilterTypes.FUNCTION_INVOCATION` filters are on THIS kernel, now or added
+        later (`kernel.add_filter` is always available after `attach_guard` returns).
+        `True` attests this is the ONLY function-invocation filter that will ever run
+        on this kernel, for its whole lifetime.
 
     Returns the kernel, so it can be used inline.
     """
@@ -491,7 +561,7 @@ def attach_guard(
                                  NO_AUTHORITY, message)
             raise MissingGuardError(message)
 
-        v2 = guard.schema_version == 2
+        v2 = strict_single_hook and guard.schema_version == 2
         snapshot = _freeze(dict(context.arguments)) if v2 else None
         extra = dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO,
                     authorized_params=snapshot) if v2 else {}

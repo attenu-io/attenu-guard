@@ -29,7 +29,9 @@ from semantic_kernel import Kernel  # noqa: E402
 from semantic_kernel.contents import ChatHistory  # noqa: E402
 from semantic_kernel.contents.function_call_content import FunctionCallContent  # noqa: E402
 from semantic_kernel.exceptions.kernel_exceptions import KernelInvokeException  # noqa: E402
+from semantic_kernel.filters.filter_types import FilterTypes  # noqa: E402
 from semantic_kernel.functions import KernelArguments, kernel_function  # noqa: E402
+from semantic_kernel.functions.function_result import FunctionResult  # noqa: E402
 
 from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
@@ -503,7 +505,7 @@ def test_guard_state_survives_kernel_clone():
 # adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
 # observation with no cross-hook correlation of any kind.
 # ==========================================================================
-def _v2_kernel(agent_name="Summarizer", authority=None):
+def _v2_kernel(agent_name="Summarizer", authority=None, strict_single_hook=True):
     tools = demo.CrmTools()
     root = Guard.issue("orchestrator", Authority(
         scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
@@ -516,7 +518,8 @@ def _v2_kernel(agent_name="Summarizer", authority=None):
 
     kernel = Kernel()
     kernel.add_plugin(tools, plugin_name="Crm")
-    dg_sk.attach_guard(kernel, agent_name=agent_name, chain=chain, policies=demo.POLICIES)
+    dg_sk.attach_guard(kernel, agent_name=agent_name, chain=chain, policies=demo.POLICIES,
+                       strict_single_hook=strict_single_hook)
     return kernel, tools, root, child
 
 
@@ -560,7 +563,8 @@ def test_v2_a_tool_that_raises_records_a_raised_outcome():
 
     kernel = Kernel()
     kernel.add_plugin(tools, plugin_name="Crm")
-    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES)
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES,
+                       strict_single_hook=True)
 
     with pytest.raises(KernelInvokeException):
         asyncio.run(kernel.invoke(
@@ -631,7 +635,8 @@ def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
 
     kernel = Kernel()
     kernel.add_plugin(tools, plugin_name="Crm")
-    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES)
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES,
+                       strict_single_hook=True)
 
     async def scenario():
         task = asyncio.ensure_future(kernel.invoke(
@@ -677,3 +682,139 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+# ==========================================================================
+# Round 2 (Codex review, batch 2, finding 1): strict_single_hook mode split.
+#
+# ROUND 2 CORRECTION: the version of this file reviewed by Codex constructed
+# `attach_guard` unconditionally with genuine WRAPPER_ASYNC capture -- true only when
+# `_dg_tool_gate` is the sole `FilterTypes.FUNCTION_INVOCATION` filter on the kernel for
+# its whole lifetime. Pinned `Kernel.add_filter`/`construct_call_stack`
+# (`kernel_filters_extension.py`) fold EVERY function-invocation filter registered on the
+# SAME kernel into ONE composed chain, and `kernel.add_filter` stays callable after
+# `attach_guard` returns -- see adapters/semantic_kernel.py's own "EXECUTION BINDING"
+# docstring. strict_single_hook (default False) is the fix: genuine capture is now an
+# explicit, scoped attestation, verified below against the framework's OWN
+# `Kernel.add_filter`/`construct_call_stack`, not a hand-rolled stand-in.
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and no outcome is ever recorded -- the body still genuinely runs."""
+    kernel, tools, root, child = _v2_kernel(strict_single_hook=False)
+
+    result = asyncio.run(kernel.invoke(
+        plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+    assert tools.crm_query_calls == [100]
+    assert result is not None
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "Crm-crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert child.complete()
+
+
+@pytest.mark.parametrize("order", ["guard_outer", "sibling_outer"])
+def test_v2_strict_mode_never_fabricates_when_a_sibling_short_circuits(order):
+    """Compose the guard's own filter with a sibling `FilterTypes.FUNCTION_INVOCATION` filter
+    that never calls its own `next` (e.g. a cache/mock hook), using the framework's OWN
+    `Kernel.add_filter`/`construct_call_stack` -- the exact primitive `KernelFunction.invoke`
+    drives -- in both orders. Pinned `add_filter`'s own docstring: "the first filter added,
+    will be the first to be executed" (verified empirically, not assumed):
+
+    * guard_outer: `attach_guard(...)` runs FIRST, so its filter is added first and ends up
+      OUTERMOST; the sibling, added after, ends up INNER, closer to the real body, and
+      short-circuits before it. This guard's own `await next(context)` still returns
+      genuinely, so `_dg_tool_gate` records RETURNED for a body that never ran. The
+      documented, deliberately-opted-into residual of a violated attestation.
+    * sibling_outer: the sibling is added FIRST (before `attach_guard(...)` runs), so it ends
+      up OUTERMOST and short-circuits before this guard's filter is ever reached at all. Safe
+      by construction: nothing is authorized, nothing is recorded.
+    """
+    tools = demo.CrmTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate("summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind("Summarizer", child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+
+    async def short_circuiting_sibling(context, next) -> None:
+        # Never calls next() -- stands in for a cache-hit / mocking filter.
+        context.result = FunctionResult(
+            function=context.function.metadata,
+            value="mocked, never reached the real body",
+        )
+
+    if order == "guard_outer":
+        dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES,
+                           strict_single_hook=True)
+        kernel.add_filter(FilterTypes.FUNCTION_INVOCATION, short_circuiting_sibling)
+    else:
+        kernel.add_filter(FilterTypes.FUNCTION_INVOCATION, short_circuiting_sibling)
+        dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES,
+                           strict_single_hook=True)
+
+    result = asyncio.run(kernel.invoke(
+        plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+    assert result.value == "mocked, never reached the real body"
+    assert tools.crm_query_calls == []
+
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    if order == "guard_outer":
+        assert outcomes and outcomes[0]["body_state"] == BodyState.RETURNED  # the residual
+        assert len([e for e in entries if e["event"] == "allow"]) == 1
+    else:
+        assert outcomes == []  # the guard's own filter was never reached
+        assert [e for e in entries if e["event"] == "allow"] == []
+
+
+def test_v2_strict_mode_when_guard_is_outer_and_a_sibling_retries_the_real_body():
+    """Guard OUTER (added first), a sibling INNER (added after) retries its own `next` twice
+    for what the model sees as one function call -- e.g. a retry-on-empty-result filter.
+    Verified empirically against the framework's own `Kernel.add_filter`/`construct_call_stack`
+    before writing this assertion (not assumed): the real body runs twice, but this guard's own
+    `await next(context)` is awaited exactly once and returns once with the FINAL attempt's
+    `context.result`. One honest record, not corrupted, but silently under-reporting that the
+    real body ran more than once -- the documented "guard outer, sibling retries" residual,
+    distinct from the short-circuit case above."""
+    tools = demo.CrmTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate("summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind("Summarizer", child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+
+    async def retrying_sibling(context, next) -> None:
+        await next(context)   # first attempt, discarded by the sibling
+        await next(context)   # final attempt, what the model actually sees
+
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES,
+                       strict_single_hook=True)  # guard OUTER: added first
+    kernel.add_filter(FilterTypes.FUNCTION_INVOCATION, retrying_sibling)
+
+    result = asyncio.run(kernel.invoke(
+        plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+    assert tools.crm_query_calls == [100, 100], "the real body ran twice"
+    assert result is not None
+
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert len(outcomes) == 1, "exactly one honest record, not two, not a duplicate error"
+    assert outcomes[0]["body_state"] == BodyState.RETURNED

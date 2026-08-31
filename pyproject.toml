@@ -47,7 +47,7 @@ claude-agent-sdk = ["claude-agent-sdk>=0.2"]
 smolagents = ["smolagents>=1.26"]
 strands = ["strands-agents>=1.52"]
 llama-index = ["llama-index-core>=0.14"]
-semantic-kernel = ["semantic-kernel>=1.36", "protobuf"]  # semantic_kernel.agents.runtime.core.serialization imports google.protobuf, not itself declared as a semantic-kernel dependency
+semantic-kernel = ["semantic-kernel>=1.36", "protobuf"]  # semantic_kernel/agents/runtime/core/serialization.py hard-imports google.protobuf (lazily reached via HandoffOrchestration); semantic-kernel==1.36.0 DOES declare Requires-Dist: protobuf, but >=1.36 resolves to 1.44.1 today, whose METADATA does not -- version-dependent, not a fixed framework property (Codex batch-2 finding 7)
 agno = ["agno>=2.9"]
 haystack = ["haystack-ai>=3.1"]
 camel = ["camel-ai>=0.2.90", "mcp<2"]      # adapters.camel; camel-ai 0.2.90 imports mcp.server.FastMCP, renamed to MCPServer in mcp 2.x (mcp's own migration guide: pin mcp<2 to keep v1 code running)

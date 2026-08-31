@@ -560,11 +560,62 @@ All notable changes to attenu-guard are documented here. The format follows
   a handoff mints the target's Guard via `chain.delegate()` -> `Guard.delegate()`, not a scope
   check -- so it stays outside execution binding entirely, same as `adapters.langchain`/
   `llama_index`/`camel`, unlike `adapters.ag2`/`agent_framework` (whose delegation IS a priced
-  call). **Also fixed**, unrelated to execution binding: the `semantic-kernel` extra was missing
-  `protobuf` -- `semantic_kernel.agents.runtime.core.serialization` imports `google.protobuf`,
-  which semantic-kernel itself does not declare as a dependency, so `pip install
-  'attenu-guard[semantic-kernel]'` broke on a clean install as soon as any test imported
-  `semantic_kernel.agents`; added `protobuf` to the extra.
+  call).
+  - **Round 2 correction (Codex review, batch 2, finding 1):** the claim above --
+    `Capture.WRAPPER_ASYNC` as an unconditional, always-genuine observation -- was wrong.
+    Pinned `Kernel.add_filter`/`construct_call_stack`
+    (`semantic_kernel/filters/kernel_filters_extension.py:36-51`, `:108-117`) fold EVERY
+    `FilterTypes.FUNCTION_INVOCATION` filter registered on the SAME kernel into ONE composed
+    chain, per kernel, not per filter -- verified by tracing `construct_call_stack`'s
+    `stack.insert(0, ...)` loop by hand (matching `add_filter`'s own docstring: "the first
+    filter added, will be the first to be executed"): the FIRST-added filter ends up
+    OUTERMOST, the LAST-added ends up innermost, closest to the real tool body. `attach_guard`
+    registers `_dg_tool_gate` via one `add_filter` call, but `kernel.add_filter` stays callable
+    on the same kernel for its whole lifetime -- nothing stops a caller from registering
+    another `FUNCTION_INVOCATION` filter on it before OR after `attach_guard` returns. Added
+    `strict_single_hook: bool = False` to `attach_guard(...)`. Default: `Capture.PRE_HOOK_ONLY`,
+    no `record_outcome()` ever, safe regardless of what other function-invocation filters are
+    on this kernel, now or later. `strict_single_hook=True`: an explicit, scoped attestation
+    that `_dg_tool_gate` is the ONLY such filter for the kernel's entire lifetime -- unlocks
+    `Capture.WRAPPER_ASYNC`. This package cannot verify the attestation itself (no
+    construction-time roster to check the way `pydantic-ai`'s `for_agent()` offers for batch
+    1's equivalent detect-and-refuse pattern). Tests added, verified against the framework's
+    OWN `Kernel.add_filter`/`construct_call_stack` (not a hand-rolled stand-in):
+    default-mode-honest; both-order short-circuit (`guard_outer` records a false `RETURNED`,
+    `sibling_outer` is never reached); guard-outer with a sibling retrying the real body
+    underneath it (empirically confirmed first, per this project's own "verify, don't assume"
+    discipline: the real body runs twice, this guard records exactly one honest `RETURNED` for
+    the final attempt, silently under-reporting the retry).
+  **Also fixed**, unrelated to execution binding: the `semantic-kernel` extra was missing
+  `protobuf` -- `semantic_kernel/agents/runtime/core/serialization.py` does an unconditional
+  `from google.protobuf import any_pb2`, reached lazily the moment `HandoffOrchestration` (or
+  anything else under `semantic_kernel.agents.runtime`) is actually accessed -- a bare `import
+  semantic_kernel.agents` alone does not trigger it, PEP 562 `__getattr__` lazy-loads the
+  submodule. So `pip install 'attenu-guard[semantic-kernel]'` broke on a clean install the
+  moment this adapter's own shipped demo/tests exercised `HandoffOrchestration`; added
+  `protobuf` to the extra.
+  - **Round 2 correction (Codex review, batch 2, finding 7):** the claim above -- "which
+    semantic-kernel itself does not declare as a dependency" -- was stated as an unqualified,
+    version-independent fact. It is wrong for `semantic-kernel==1.36.0` specifically: Codex
+    checked that wheel's own `METADATA` and it DOES carry `Requires-Dist: protobuf` (re-verified
+    here directly against the same wheel: `pip download semantic-kernel==1.36.0 --no-deps`, then
+    `Requires-Dist: protobuf` is present, unconditioned, in its `METADATA`). What is actually
+    true, checked directly rather than assumed: `semantic-kernel==1.44.1` -- what `>=1.36`
+    resolves to today, and the version this test suite actually runs against -- does NOT declare
+    `protobuf` in its `METADATA` (`pip show semantic-kernel` lists no `protobuf` under
+    `Requires:`), yet still hard-imports `google.protobuf` in the module path above. Reproduced
+    directly in the project's own `semantic-kernel` venv: `pip uninstall -y protobuf` makes
+    `tests/integrations/test_semantic_kernel.py` fail collection with `ModuleNotFoundError: No
+    module named 'google.protobuf'` (traced through
+    `semantic_kernel/agents/orchestration/handoffs.py` ->
+    `.../agent_actor_base.py` -> `.../orchestration_base.py` ->
+    `.../runtime/core/base_agent.py` -> `.../runtime/core/core_runtime.py` ->
+    `.../runtime/core/serialization.py`); `pip install protobuf` (no version pin needed) fixes it
+    and the suite is 28/28 again. **The `protobuf` extra addition itself was correct and stays --
+    only the stated REASON for it was wrong.** semantic-kernel's own declared dependency on
+    protobuf is version-dependent (present in 1.36.0's metadata, absent in 1.44.1's), not a
+    fixed framework property; this extra covers the gap for whatever version `>=1.36` actually
+    resolves to.
 
 ## [0.9.0] — 2026-08-31
 
