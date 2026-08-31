@@ -51,6 +51,21 @@ All notable changes to attenu-guard are documented here. The format follows
   already-registered pending outcome when building the delegation's child scope, leaving the
   call_id pending forever and wedging `complete()`. Now carried through unchanged; the existing
   test only exercised `UNGUARDED` (`scope=None`) delegation, which never hit this branch.
+- `adapters.pydantic_ai`: `DelegationGuard.before_tool_execute`/`wrap_tool_execute` correlation
+  was ordering-dependent when other capabilities are also registered on the same agent --
+  `CombinedCapability` composes `before_tool_execute` sequentially in the capabilities' LISTED
+  order and `wrap_tool_execute` as nested middleware in that same order, so a capability
+  positioned "after" `DelegationGuard` could raise once this one had already stashed a pending
+  outcome (leaking it), or wrap the raw tool body such that DelegationGuard's own `wrap_tool_
+  execute` was catching an INNER capability's failure and misreporting it as `BodyState.RAISED`
+  for a body that never ran. `DelegationGuard.get_ordering()` now declares `position="innermost"`
+  (pydantic-ai's own `CapabilityOrdering`, topologically sorted regardless of listed order):
+  every OTHER capability's `before_tool_execute` now runs first (so if one raises, this one's own
+  before_tool_execute -- and its pending-outcome stash -- never runs either, and nothing leaks),
+  and the `handler` this capability's `wrap_tool_execute` receives is always the raw tool
+  invocation, never another capability's own wrapping. The docstring also now explicitly warns
+  against using both `DelegationGuard` and `GuardedToolset` on the same tool (two independent,
+  complete authorization paths -- two `allow`/`outcome` pairs on the ledger for one body).
 
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a

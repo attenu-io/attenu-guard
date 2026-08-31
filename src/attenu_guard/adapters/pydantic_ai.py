@@ -80,7 +80,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Literal, Mapping, TypeVar
 
-from pydantic_ai.capabilities.abstract import AbstractCapability
+from pydantic_ai.capabilities.abstract import AbstractCapability, CapabilityOrdering
 from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -109,13 +109,35 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
+    container with the live object graph, so a later in-place mutation (by the tool body, or by
+    pydantic-ai itself) cannot change what was already committed. `copy.deepcopy` alone is not
+    enough: on ANY failure deep in a nested structure, a naive `except: return dict(...)`
+    fallback keeps sharing whatever nested dicts/lists deepcopy did not reach. This never falls
+    back to a shared reference: dicts/lists are always rebuilt fresh (recursively), and a leaf
+    that cannot itself be deep-copied is replaced by its `repr()` -- a brand-new, immutable
+    string -- rather than shared as-is."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _snapshot_params(args: Mapping[str, Any]) -> Any:
     """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
     the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
-    try:
-        return copy.deepcopy(dict(args))
-    except Exception:
-        return dict(args)
+    return _freeze(dict(args))
 
 __all__ = [
     "ToolPolicy",
@@ -387,6 +409,27 @@ class DelegationGuard(AbstractCapability[Any]):
     Output tools are exempt by design — Pydantic AI does not fire tool hooks for
     them (`pydantic_ai/tool_manager.py:454`); they produce the run's result and
     reach no external system.
+
+    ORDERING (0.9.0 execution binding): `get_ordering()` declares `position="innermost"`
+    -- REQUIRED for `before_tool_execute`/`wrap_tool_execute` correlation to be safe when
+    OTHER capabilities are also registered on the same agent. `CombinedCapability` composes
+    `before_tool_execute` sequentially in chain order (outermost first) and `wrap_tool_execute`
+    as nested middleware (outermost wraps innermost) -- declaring innermost means: (a) every
+    OTHER capability's `before_tool_execute` runs BEFORE this one, so if any of them raises,
+    THIS capability's own `before_tool_execute` (where the pending outcome is stashed) never
+    runs either, and nothing leaks; (b) the `handler` this capability's `wrap_tool_execute`
+    receives is the raw tool invocation itself, not another capability's own wrapping --
+    otherwise an inner capability's own failure (e.g. its own retry/validation logic) could be
+    caught by this capability's `except Exception` and misreported as `BodyState.RAISED` for a
+    body that never actually ran. Without `position="innermost"`, correlation would depend on
+    the ORDER capabilities happen to be listed in -- see Codex review finding 5.
+
+    DO NOT also wrap the SAME tool with `GuardedToolset` (below): each is an independent,
+    complete authorization path, and using both on one tool means `guard.check()` runs TWICE
+    for the same call -- two `allow`/`outcome` pairs on the ledger for one body, and (with
+    `metered=True`) the call counted twice against any `CallLimit`. Pick exactly one hook point
+    per tool: `DelegationGuard` for "every tool on this agent", `GuardedToolset` for "just this
+    one toolset, leave the rest alone".
     """
 
     def __init__(
@@ -407,6 +450,12 @@ class DelegationGuard(AbstractCapability[Any]):
         # close it out -- keyed by id(call), the SAME ToolCallPart before_tool_execute and
         # wrap_tool_execute both see for one call within ToolManager._run_execute_hooks.
         self._pending: dict[int, tuple[Guard, str, Any]] = {}
+
+    def get_ordering(self) -> CapabilityOrdering:
+        """Fixed `innermost` position -- see the class docstring's "ORDERING". Required for
+        `before_tool_execute`/`wrap_tool_execute` correlation to be safe when other capabilities
+        are also registered; `CombinedCapability` topologically sorts on this at construction."""
+        return CapabilityOrdering(position="innermost")
 
     async def before_tool_execute(
         self,

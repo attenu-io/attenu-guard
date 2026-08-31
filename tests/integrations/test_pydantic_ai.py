@@ -23,6 +23,8 @@ import pytest
 pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent  # noqa: E402
+from pydantic_ai.capabilities.abstract import AbstractCapability, CapabilityOrdering  # noqa: E402
+from pydantic_ai.exceptions import ModelRetry  # noqa: E402
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
 from pydantic_ai.toolsets import FunctionToolset  # noqa: E402
@@ -538,3 +540,58 @@ def test_guarded_toolset_v2_allowed_call_records_a_returned_outcome():
     outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
     assert allow["capture"] == Capture.WRAPPER_ASYNC
     assert outcome["body_state"] == BodyState.RETURNED
+
+
+# ==========================================================================
+# Codex review (DO NOT MERGE, finding 5, high): DelegationGuard's before_tool_
+# execute/wrap_tool_execute correlation was ordering-dependent when other
+# capabilities are also registered on the same agent.
+# ==========================================================================
+def test_delegation_guard_declares_innermost_ordering():
+    cap = dg_pai.DelegationGuard(policies={})
+    ordering = cap.get_ordering()
+    assert isinstance(ordering, CapabilityOrdering)
+    assert ordering.position == "innermost"
+
+
+class _RaisingBeforeCapability(AbstractCapability):
+    """A second, ordinary-positioned capability whose before_tool_execute always raises."""
+
+    async def before_tool_execute(self, ctx, *, call, tool_def, args):
+        raise ModelRetry("nope")
+
+
+def test_a_capability_positioned_outer_that_raises_leaves_no_pending_leak():
+    """With DelegationGuard forced innermost (get_ordering), CombinedCapability.
+    before_tool_execute runs every OTHER capability's before_tool_execute first --
+    so if one of them raises, DelegationGuard's own before_tool_execute (where the
+    pending outcome would be stashed) never runs either, and nothing leaks, no
+    matter where _RaisingBeforeCapability is listed relative to DelegationGuard."""
+    sink: dict = {}
+    toolset = _single_read_toolset(sink)
+    guard_cap = dg_pai.DelegationGuard(
+        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+    )
+    agent = Agent(
+        FunctionModel(
+            lambda m, i: ModelResponse(parts=[ToolCallPart("crm_query", {"rows": 10})])
+            if _step(m) == 0 else ModelResponse(parts=[TextPart("done")])
+        ),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[toolset],
+        # listed BEFORE guard_cap -- if ordering were user-list-order (the pre-fix
+        # default), guard_cap would run first and stash a pending outcome that this
+        # capability's raise would then leak.
+        capabilities=[_RaisingBeforeCapability(), guard_cap],
+    )
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+
+    # ModelRetry is the framework's OWN "ask the model to redo the call" signal, not an
+    # exception that escapes agent.run() -- it just means DelegationGuard's before_tool_execute
+    # (and hence its pending-outcome stash) never runs for the aborted dispatch, which is
+    # exactly what this test is checking.
+    _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    assert guard_cap._pending == {}, "a pending outcome leaked despite innermost ordering"
+    assert sink == {}
+    assert [e for e in root.audit_log().entries if e["event"] == "outcome"] == []
