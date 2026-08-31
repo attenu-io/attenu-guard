@@ -624,6 +624,96 @@ class TestSnapshotHardening(unittest.TestCase):
         self.assertNotIn("invoked_params_hash", outcome)
         self.assertEqual(outcome["params_hash_reason"], "unsupported")
 
+    def test_freeze_does_not_alias_a_str_subclass_carrying_a_mutable_attribute(self):
+        # Final-check correction: `isinstance(value, (str, int, float, bool))` admits a
+        # SUBCLASS too, and a subclass instance can carry its own mutable attributes (or
+        # override __str__/__repr__/other protocols) -- the old fast path passed it through
+        # completely unchanged, aliasing the live object. Reproduced directly before this fix:
+        # freeze(boxed) is boxed was True for a str subclass with a mutable list attribute.
+        # commit()'s disposition was never wrong (canonical.dumps already gates on EXACT type,
+        # not isinstance, so a subclass already fell through to "unsupported" downstream) -- but
+        # the raw snapshot itself retained a live, mutable reference, violating the never-alias
+        # invariant every leaf here is supposed to hold.
+        from attenu_guard.adapters._snapshot import UNSUPPORTED, freeze
+
+        calls = 0
+
+        class BoxedStr(str):
+            def __str__(self):
+                nonlocal calls
+                calls += 1
+                return super().__str__()
+
+        boxed = BoxedStr("hello")
+        boxed.mutable_attr = ["still", "live"]  # a live, mutable attribute the old fast path aliased
+
+        frozen = freeze({"arg": boxed})
+
+        self.assertIs(frozen["arg"], UNSUPPORTED)
+        self.assertIsNot(frozen["arg"], boxed)  # no alias
+        self.assertEqual(calls, 0)  # __str__ never invoked
+
+    def test_freeze_does_not_alias_an_int_or_float_subclass(self):
+        # Same class of defect as the str-subclass test above, for the other two admitted
+        # primitive types.
+        from attenu_guard.adapters._snapshot import UNSUPPORTED, freeze
+
+        calls = 0
+
+        class BoxedInt(int):
+            def __repr__(self):
+                nonlocal calls
+                calls += 1
+                return super().__repr__()
+
+        class BoxedFloat(float):
+            def __repr__(self):
+                nonlocal calls
+                calls += 1
+                return super().__repr__()
+
+        boxed_int = BoxedInt(5)
+        boxed_float = BoxedFloat(1.5)
+        frozen = freeze({"i": boxed_int, "f": boxed_float})
+
+        self.assertIs(frozen["i"], UNSUPPORTED)
+        self.assertIsNot(frozen["i"], boxed_int)
+        self.assertIs(frozen["f"], UNSUPPORTED)
+        self.assertIsNot(frozen["f"], boxed_float)
+        self.assertEqual(calls, 0)
+
+    def test_freeze_still_passes_through_real_primitives_unchanged(self):
+        # The exact-type gate must not become OVER-strict: a genuine str/int/float/bool/None
+        # still passes through verbatim (this is the "already-immutable leaf types are kept
+        # as-is" invariant the module docstring describes, and it must survive this fix).
+        from attenu_guard.adapters._snapshot import freeze
+
+        frozen = freeze({"a": "x", "b": 1, "c": 1.5, "d": True, "e": None})
+        self.assertEqual(frozen, {"a": "x", "b": 1, "c": 1.5, "d": True, "e": None})
+
+    def test_a_guarded_node_with_a_str_subclass_argument_still_authorizes_and_runs_but_commits_no_hash(self):
+        # End-to-end through the real guard_node wrapper, same shape as the hostile-repr wrapper
+        # test above.
+        guard = _make_v2_tool_guard()
+
+        class BoxedStr(str):
+            pass
+
+        @guard_node(guard, "crm.read", context_fn=lambda payload: {"rows": 1})
+        def summarize(payload):
+            return {"ok": True}
+
+        result = summarize(BoxedStr("hello"))
+
+        self.assertEqual(result, {"ok": True})
+        entries = guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        self.assertNotIn("authorized_params_hash", allow)
+        self.assertEqual(allow["params_hash_reason"], "unsupported")
+        self.assertNotIn("invoked_params_hash", outcome)
+        self.assertEqual(outcome["params_hash_reason"], "unsupported")
+
 
 async def _await_it(coro):
     return await coro

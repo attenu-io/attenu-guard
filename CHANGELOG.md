@@ -184,8 +184,8 @@ All notable changes to attenu-guard are documented here. The format follows
   `__repr__` raises) and `freeze({"arg": "<unrepresentable Explodes>"})` (an ordinary string
   argument) produced the exact same output. Audited `"<circular>"` (the genuine-cycle sentinel
   above) for the identical collision class rather than leaving it unexamined -- it has the same
-  problem. Fixed the same way the TS adapter's own `freeze()` was: anything not
-  `None`/`str`/`int`/`float`/`bool` and not a `Mapping`/list-family container becomes
+  problem. Fixed the same way the TS adapter's own `freeze()` was: anything whose EXACT type is
+  not `None`/`str`/`int`/`float`/`bool` and not a `Mapping`/list-family container becomes
   `UNSUPPORTED`, a module-private sentinel OBJECT (never a string, so it cannot collide with any
   real call argument by construction) -- without calling `repr()`, `str()`, or any other
   protocol. `bytes` now routes to `UNSUPPORTED` too, deliberately: it was already outside the
@@ -205,6 +205,22 @@ All notable changes to attenu-guard are documented here. The format follows
   UNSUPPORTED` instead, the representation having deliberately changed; every adapter's own
   never-aliases-a-custom-`__deepcopy__` test (a DIFFERENT invariant, unaffected by this fix)
   still passes unchanged.
+  **Final-check correction:** the "EXACT type" gate above originally read
+  `isinstance(value, (str, int, float, bool))`, which -- despite the CHANGELOG text above already
+  saying "EXACT type" -- was not actually one: `isinstance` admits a SUBCLASS of any of those
+  too, and a subclass instance can carry its own mutable attributes. Reproduced directly:
+  `freeze(boxed) is boxed` was `True` for a `str` subclass with a mutable list attribute --
+  the fast path passed it through completely unchanged, aliasing the live object.
+  `params.commit()`'s own disposition was never wrong either way (`canonical.dumps` already
+  gates on EXACT type there, so a subclass already fell through to `UnsupportedTypeError`/
+  `"unsupported"` downstream regardless), but the raw snapshot itself retained a live, mutable
+  reference, violating the never-alias invariant every leaf here is supposed to hold. Fixed by
+  actually matching `canonical.dumps`'s own domain: `type(value) in (str, int, float, bool)`.
+  Tests added: a `str` subclass and `int`/`float` subclasses each become `UNSUPPORTED` (asserted
+  by identity), never the live reference, with zero protocol calls (`__str__`/`__repr__`
+  overrides on the subclass asserted uncalled); a plain-primitives-still-pass-through test
+  pinning the fix did not become over-strict; and a wrapper-level test through the real
+  `guard_node` asserting `params_hash_reason: "unsupported"` end to end.
 - `adapters.google_adk`: `after_tool_callback` now checks `tool.is_long_running`/
   `tool._defers_response` -- the SAME flags ADK's own `functions.py` checks -- before deciding
   `RETURNED` vs `BodyState.DEFERRED`; a long-running/deferring tool's placeholder response was

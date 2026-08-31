@@ -43,11 +43,21 @@ property TS's `"<accessor>"` had. Reproduced directly, both ways, before this fi
      raises) and `freeze({"arg": "<unrepresentable Explodes>"})` (an ordinary string argument)
      produced the exact same output.
 
-Fixed the same way the TS adapter's `freeze()` was: anything not `None`/`str`/`int`/`float`/`bool`
-and not a `Mapping`/`list`/`tuple`/`set`/`frozenset` becomes `UNSUPPORTED` -- a module-private
-sentinel object, never a string -- without calling `repr()`, `str()`, or any other protocol on
-it. `bytes` is deliberately included in that "everything else": it is outside the
-`params_c14n_v1` JSON domain regardless (`canonical.dumps` already rejects it via
+Fixed the same way the TS adapter's `freeze()` was: anything whose EXACT type is not
+`str`/`int`/`float`/`bool` (not `None`, checked separately) and is not a `Mapping`/`list`/
+`tuple`/`set`/`frozenset` becomes `UNSUPPORTED` -- a module-private sentinel object, never a
+string -- without calling `repr()`, `str()`, or any other protocol on it. FINAL-CHECK
+CORRECTION: this originally read `isinstance(value, (str, int, float, bool))`, which admits a
+SUBCLASS of any of those too -- and a subclass instance can carry its own mutable attributes,
+aliased straight through by that fast path (reproduced directly: `freeze(boxed) is boxed` was
+`True` for a `str` subclass with a mutable list attribute). `params.commit()`'s own disposition
+was never wrong either way -- `canonical.dumps` already gates on EXACT type, not `isinstance`,
+so a subclass already fell through to `UnsupportedTypeError`/`"unsupported"` downstream -- but
+the raw snapshot itself retained a live, mutable reference, violating the never-alias invariant
+every leaf here is supposed to hold. Fixed by matching `canonical.dumps`'s own domain exactly:
+`type(value) in (str, int, float, bool)`. `bytes` is deliberately included in that "everything
+else": it is outside the `params_c14n_v1` JSON domain regardless (`canonical.dumps` already
+rejects it via
 `UnsupportedTypeError` -- `_text()`'s type dispatch has no `bytes` case -- so this changes nothing
 about the final commit outcome, only stops the raw snapshot from retaining a live `bytes`
 reference for no purpose; checked directly that no shipped adapter inspects the raw snapshot for
@@ -86,8 +96,10 @@ class _Unsupported:
 
 
 #: `freeze()`'s sentinel for "could not be represented as an immutable JSON-shaped leaf" -- an
-#: exotic value (anything not `None`/`str`/`int`/`float`/`bool`/a plain `Mapping`/list-family
-#: container), a genuine cycle, `bytes` (outside the `params_c14n_v1` domain regardless), or an
+#: exotic value (anything whose EXACT type -- not merely an `isinstance` match, see `freeze()`'s
+#: own FINAL-CHECK CORRECTION -- is not `None`/`str`/`int`/`float`/`bool` and not a plain
+#: `Mapping`/list-family container), a genuine cycle, `bytes` (outside the `params_c14n_v1`
+#: domain regardless), or an
 #: unanticipated reflection/iteration failure. NEVER a string: see the RE-GATE CORRECTION above
 #: for why a JSON-representable sentinel (`"<circular>"`, `"<unrepresentable ...>"`) is itself a
 #: commitment-collision defect, not a fix. Exported alongside `freeze` for the same reason: not
@@ -97,7 +109,19 @@ UNSUPPORTED = _Unsupported()
 
 
 def freeze(value: Any, _active: Optional[FrozenSet[int]] = None) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    # Final-check correction: `isinstance(value, (str, int, float, bool))` admits a SUBCLASS of
+    # any of those too -- and a subclass instance can carry its own mutable attributes (or
+    # override __eq__/__hash__/anything else) that this fast path would otherwise pass through
+    # completely unchanged, aliasing the live object. Reproduced directly: a `str` subclass with
+    # a mutable list attribute passed `freeze(boxed) is boxed` (True) before this fix.
+    # `params.commit()`'s disposition was never wrong (`canonical.dumps` already gates on EXACT
+    # type -- `type(value) is str`, not `isinstance` -- so a subclass already fell through to
+    # `UnsupportedTypeError`/"unsupported" downstream), but the raw snapshot itself retained a
+    # live, mutable reference, violating the never-alias invariant every leaf here is supposed
+    # to hold. Fixed by gating on `type(value) in (...)` -- exact type only, matching
+    # `canonical.dumps`'s own domain exactly -- so a subclass instance now falls through to
+    # `UNSUPPORTED` below like any other exotic value, never aliased.
+    if value is None or type(value) in (str, int, float, bool):
         return value
     active = _active or frozenset()
     try:
