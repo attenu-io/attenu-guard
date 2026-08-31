@@ -79,6 +79,21 @@ All notable changes to attenu-guard are documented here. The format follows
   itself produce a blocked-looking result, `_after_tool_call` now trusts a `collided` entry's
   completion when it does NOT look blocked (that shape can only be the first call's own real
   result) and leaves it unrecorded, rather than guessing, when it does.
+  **Round 4 correction (Codex review, finding 1, critical):** the round-3 fix above still
+  popped the slot from `self._pending` UNCONDITIONALLY, before ever classifying whether the
+  completion was ambiguous. Exact repro Codex found: A authorized; B, sharing A's object,
+  denied via `HookAborted`; B's OWN blocked after-hook (CrewAI still runs POST_TOOL_CALL for a
+  call this bridge itself blocked) fires FIRST and pops A's still-live slot, recording nothing;
+  A then returns normally, finds no slot, and its promised outcome is silently lost -- one
+  `allow`, zero outcomes, `complete()` wedged, A permanently pending in the core Guard. Fixed:
+  `_after_tool_call` now PEEKS the slot and classifies BEFORE ever touching `self._pending` --
+  a blocked-looking completion on a `collided` entry is left exactly where it is (never popped)
+  for a later, trustworthy (non-blocked) completion to consume; only a non-ambiguous completion
+  is popped and recorded. The one gap this cannot close: if the surviving call's OWN completion
+  is genuinely a third-party veto (a legitimate `ABANDONED`) AND its entry was ever collided,
+  that specific combination now permanently leaves the call unrecorded rather than ever
+  recording it wrong -- documented in the module docstring's "CORRELATION" as the least-bad
+  failure mode available.
 - `adapters.openai_agents`: rebuilt on genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`, wrapping
   the tool's own `on_invoke_tool` directly) instead of a second, unreliable `ToolOutputGuardrail`
   that a later `tool_input_guardrails` entry could cause to never run at all (leaving an `allow`

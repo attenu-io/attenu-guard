@@ -1121,8 +1121,10 @@ def test_a_collided_entrys_blocked_looking_completion_is_left_unrecorded_not_gue
     (this bridge cannot tell, from id(tool_input) alone, that it does not own that entry), a
     BLOCKED-looking completion on an entry a collision ever touched is ambiguous -- it could be
     that entry's own genuine third-party veto, or the collision-denied call's phantom
-    completion bleeding through. This bridge must never guess: it leaves the call unrecorded
-    (an honest gap) rather than write a value that might be wrong either way."""
+    completion bleeding through. This bridge must never guess: it PEEKS rather than pops,
+    leaving the slot resident for a later, trustworthy completion, rather than consuming it and
+    either writing a wrong value or dropping it (Codex review round 4, finding 1 -- an earlier
+    version of this fix popped BEFORE classifying, which discarded the slot here regardless)."""
     root = _root_guard(schema_version=2)
     bridge = _bridge(root, strict_single_hook=True)
     bridge.install()
@@ -1152,5 +1154,61 @@ def test_a_collided_entrys_blocked_looking_completion_is_left_unrecorded_not_gue
         assert [e for e in entries if e["event"] == "outcome"] == [], (
             "an ambiguous, collided, blocked-looking completion must never be recorded either way"
         )
+        # PEEKED, not popped: the slot is still resident, exactly as it was.
+        assert id(shared_tool_input) in bridge._pending
+        assert bridge._pending[id(shared_tool_input)].outcome is not None
+    finally:
+        bridge.uninstall()
+
+
+def test_b_blocked_first_then_a_returned_second_still_binds_a_correctly(tools):
+    """Codex review round 4, finding 1, critical -- the EXACT repro: A authorized; B, sharing
+    A's object, denied via HookAborted; B's own blocked after-hook fires FIRST (CrewAI still
+    runs POST_TOOL_CALL for a call this bridge itself blocked); only THEN does A return
+    normally. A popped-before-classifying implementation would let B's blocked after-hook
+    consume and discard A's still-live entry, silently losing A's later, genuine outcome (one
+    allow, zero outcomes, complete() wedged forever). Peeking during the ambiguous (blocked)
+    invocation and only popping on the trustworthy (non-blocked) one closes this: A must still
+    get exactly one outcome, and its Guard must still be able to complete()."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root, strict_single_hook=True)
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        shared_tool_input = {"rows": 10}
+        ctx_a = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+        bridge._before_tool_call(ctx_a)   # A: authorized, occupies the slot
+
+        ctx_b = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+        with pytest.raises(HookAborted):
+            bridge._before_tool_call(ctx_b)   # B: fails closed, marks A's entry .collided = True
+
+        # B's OWN blocked after-hook fires FIRST -- must NOT consume A's slot.
+        after_b_blocked = ToolCallHookContext(
+            tool_name="crm_query", tool_input=shared_tool_input, tool=tools[0], agent=agent,
+            tool_result="blocked", raw_tool_result="Tool execution blocked by hook. Tool: crm_query",
+        )
+        bridge._after_tool_call(after_b_blocked)
+        assert [e for e in root.audit_log().entries if e["event"] == "outcome"] == []
+        assert id(shared_tool_input) in bridge._pending, "A's slot must survive B's blocked after-hook"
+
+        # A's OWN real completion arrives SECOND -- must still bind correctly.
+        after_a_returned = ToolCallHookContext(
+            tool_name="crm_query", tool_input=shared_tool_input, tool=tools[0], agent=agent,
+            tool_result="10 rows", raw_tool_result="10 rows",
+        )
+        bridge._after_tool_call(after_a_returned)
+
+        entries = root.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        assert len(outcomes) == 1, "A's genuine completion must not have been lost"
+        assert outcomes[0]["call_id"] == allow["call_id"]
+        assert outcomes[0]["body_state"] == BodyState.RETURNED
+        assert id(shared_tool_input) not in bridge._pending  # consumed now, not before
+        assert bridge.guard_for(SUMMARIZER).complete()
     finally:
         bridge.uninstall()

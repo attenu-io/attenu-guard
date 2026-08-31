@@ -139,21 +139,30 @@ via `HookAborted`, same as any other denial), and this bridge has no way to tell
 `id(tool_input)` alone, whether a given `_after_tool_call` invocation is that collision-denied
 call's OWN completion or the FIRST call's genuine one -- so if the collision-denied call's
 after-hook fires before the first call's real completion, it WOULD find the first call's entry
-still resident and could consume it. `_before_tool_call` marks the occupying entry
-`collided=True` the instant a collision is detected specifically to close the ONE consequence
-of that ambiguity this file can still control: a collision-denied call, having been blocked
-via `HookAborted`, can ONLY ever produce a blocked-looking `raw_tool_result`
-(`_BLOCKED_BY_HOOK_PREFIX`) -- it can never look like a genuine `RETURNED`/deferred completion.
-So `_after_tool_call` trusts a `collided` entry's completion when it does NOT look blocked
-(that shape can only be the first call's own real result) and leaves it unrecorded -- an
-honest gap, never a fabricated value -- when it DOES look blocked, since that could genuinely
-be the first call's own third-party veto (the existing, legitimate `ABANDONED` case) OR the
-collision-denied call's phantom completion bleeding through, and this file cannot tell which.
-That is strictly narrower than the round-2 defect: it can still lose a legitimate `ABANDONED`
-record to this ambiguity, but it can no longer WRITE A WRONG one -- the offline verifier's
-`unaccounted` classification for the lost case is the least-bad failure mode CrewAI's own hook
-surface leaves available here; there is no framework signal this file could use to close it
-entirely.
+still resident. `_before_tool_call` marks the occupying entry `collided=True` the instant a
+collision is detected specifically to close the ONE consequence of that ambiguity this file
+can still control: a collision-denied call, having been blocked via `HookAborted`, can ONLY
+ever produce a blocked-looking `raw_tool_result` (`_BLOCKED_BY_HOOK_PREFIX`) -- it can never
+look like a genuine `RETURNED`/deferred completion. So `_after_tool_call` classifies a
+`collided` entry's completion BEFORE ever touching `self._pending` for it: when the completion
+does NOT look blocked (that shape can only be the first call's own real result), it is popped
+and recorded normally; when it DOES look blocked, the entry is left exactly where it is --
+PEEKED, never popped -- for a later, trustworthy invocation to consume, rather than removed and
+either recorded wrong or silently dropped by whichever invocation happened to arrive first.
+(Codex review round 4, finding 1: an earlier version of this classification popped
+UNCONDITIONALLY before checking `blocked`/`collided` at all -- so if the collision-denied
+call's own blocked after-hook fired FIRST, it silently consumed and discarded the first call's
+still-live entry, and the first call's later, genuine completion then found nothing to record
+against: one allow, zero outcomes, `complete()` wedged. Peeking first, and only ever popping a
+non-ambiguous completion, closes that.) The one gap that remains, and cannot be closed with
+`id(tool_input)` alone: if the FIRST call's own completion is GENUINELY a third-party veto (a
+legitimate `ABANDONED`), its blocked-looking `_after_tool_call` invocation is ALSO ambiguous
+under a `collided` entry and is ALSO left unconsumed -- that specific, already-adversarial
+combination (an in-flight identity collision AND a genuine third-party veto of the surviving
+call) permanently loses a legitimate `ABANDONED` record rather than ever writing a wrong one.
+The offline verifier's `unaccounted`/`incomplete` classification for that lost case is the
+least-bad failure mode CrewAI's own hook surface leaves available here; there is no framework
+signal this file could use to close it entirely.
 
 HONESTY NOTE on `BodyState.RAISED` (strict mode): CrewAI's own `ToolUsage.use`/`ause`
 (`crewai/tools/tool_usage.py`) catches every exception the tool body raises, internally, and
@@ -306,9 +315,10 @@ class _Pending:
     closed rather than queueing it -- see the module docstring's "CORRELATION"). It marks this
     entry's own eventual `_after_tool_call` completion as no longer fully trustworthy: CrewAI
     still runs POST_TOOL_CALL for the collision-denied call too, and if THAT fires first, it
-    would find this entry still resident and could consume it. A blocked-looking completion on
-    a `collided` entry is therefore left unrecorded rather than assumed genuine (see
-    `_after_tool_call`) -- but a genuinely RETURNED/deferred-looking one is still recorded: the
+    would find this entry still resident. A blocked-looking completion on a `collided` entry is
+    therefore PEEKED, never popped -- left resident for a later, trustworthy invocation, rather
+    than consumed and either mis-recorded or silently dropped (see `_after_tool_call`) -- but a
+    genuinely RETURNED/deferred-looking one is still popped and recorded immediately: the
     collision-denied call can only ever produce a blocked-looking completion (that is how it was
     denied), never that shape, so a non-blocked completion on a `collided` entry can only be
     this entry's own real one.
@@ -714,13 +724,39 @@ class CrewAIGuardBridge:
         replaced with the real attenu-guard reason."""
         tool_input = getattr(ctx, "tool_input", {})
         key = id(tool_input)
-        # Single slot, not a queue (Codex review round 3, finding 2 -- see the module
-        # docstring's "CORRELATION"): AT MOST one entry can ever be live for this key.
-        with self._lock:
-            entry = self._pending.pop(key, None)
-        denial = entry.denial if entry is not None else None
-        outcome = entry.outcome if entry is not None else None
         tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
+        raw_result = getattr(ctx, "raw_tool_result", None)
+        blocked = isinstance(raw_result, str) and raw_result.startswith(_BLOCKED_BY_HOOK_PREFIX)
+
+        # Single slot, not a queue (Codex review round 3, finding 2 -- see the module
+        # docstring's "CORRELATION"): AT MOST one entry can ever be live for this key. PEEK,
+        # don't pop, when the completion looks blocked AND the slot was ever collided -- Codex
+        # review round 4, finding 1: popping unconditionally, THEN classifying, let a collision-
+        # denied dispatch's OWN blocked after-hook (which CrewAI still runs -- see below) consume
+        # and discard the FIRST call's still-live entry if IT fires first, silently losing that
+        # first call's later, genuine completion (one allow, zero outcomes, complete() wedged).
+        # Classify BEFORE ever removing the entry from the dict, so an ambiguous invocation
+        # leaves it exactly as it was for a later, trustworthy one to consume.
+        with self._lock:
+            entry = self._pending.get(key)
+            ambiguous = entry is not None and blocked and entry.collided
+            if entry is not None and not ambiguous:
+                del self._pending[key]
+        if entry is None:
+            return None
+        if ambiguous:
+            # AMBIGUOUS (see the module docstring's "CORRELATION"): a blocked-looking completion
+            # on an entry a collision ever touched could be THIS entry's own genuine third-party
+            # veto, or a collision-denied dispatch's phantom completion bleeding through via the
+            # shared key -- this bridge cannot tell which, and this invocation might not even
+            # belong to this entry's own dispatch at all. Do nothing: leave the slot resident,
+            # render no denial message, complete no coworker lifecycle marker, record no
+            # outcome. A later, trustworthy (non-blocked, or no-longer-collided) invocation for
+            # this key still consumes it normally.
+            return None
+
+        denial = entry.denial
+        outcome = entry.outcome
         if denial is None and tool_name in self._delegation_tools:
             args = tool_input
             coworker = _normalize_role(args.get("coworker") or args.get("co_worker") or args.get("agent") or "")
@@ -731,31 +767,22 @@ class CrewAIGuardBridge:
             # Execution binding (0.9.0, strict mode only): close out the check() this dispatch's
             # `_authorize` made, from CrewAI's OWN post-hook result -- see the module docstring's
             # "Execution binding" and its honesty notes on RAISED and "the body never ran at all".
-            raw_result = getattr(ctx, "raw_tool_result", None)
-            blocked = isinstance(raw_result, str) and raw_result.startswith(_BLOCKED_BY_HOOK_PREFIX)
-            if blocked and entry.collided:
-                # AMBIGUOUS (Codex review round 3, finding 2's residual -- see the module
-                # docstring's "CORRELATION"): a blocked-looking completion on an entry a
-                # collision ever touched could be this entry's OWN genuine third-party veto, or
-                # a collision-denied dispatch's phantom completion bleeding through via the
-                # shared key. This bridge cannot tell which, so it leaves the call unrecorded --
-                # an honest gap the offline verifier flags -- rather than guess.
-                pass
-            elif blocked:
-                # Some OTHER before_tool_call hook vetoed it after we authorized. `ABANDONED`,
-                # not dropped and not a fabricated `RETURNED`: this bridge's own observation was
-                # cut short by something outside its control, the same way a caller-cancelled
-                # wrapper reports `ABANDONED` elsewhere in this package. `error_code` is NOT
-                # attached -- `Guard.record_outcome` only permits it together with `RAISED`.
+            if blocked:
+                # Not ambiguous (handled above): entry.collided is False here, so this is a
+                # genuine third-party veto. `ABANDONED`, not dropped and not a fabricated
+                # `RETURNED`: this bridge's own observation was cut short by something outside
+                # its control, the same way a caller-cancelled wrapper reports `ABANDONED`
+                # elsewhere in this package. `error_code` is NOT attached -- `Guard.record_
+                # outcome` only permits it together with `RAISED`.
                 outcome.guard.record_outcome(
                     outcome.call_id, BodyState.ABANDONED,
                     invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
                 )
             else:
                 # A collision-denied dispatch can ONLY ever produce a blocked-looking result
-                # (that is how it was denied) -- so a non-blocked, genuine-looking completion on
-                # a `collided` entry can only be this entry's own real one, safe to record here
-                # regardless of `entry.collided`.
+                # (that is how it was denied) -- so a non-blocked, genuine-looking completion
+                # can only be this entry's own real one, safe to record here regardless of
+                # whether this key was ever collided.
                 outcome.guard.record_outcome(
                     outcome.call_id, _body_state_for(raw_result),
                     invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
