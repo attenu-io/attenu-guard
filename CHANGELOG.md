@@ -6,6 +6,26 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a
+  `schema_version=2` chain (unchanged, byte-and-type identical to before, on `schema_version=1`),
+  each choosing the most honest capture its framework's real hook surface supports:
+  - `adapters.crewai`: `Capture.FRAMEWORK_POST_HOOK` -- the bridge never calls the tool body
+    itself; the outcome is closed out from CrewAI's own `after_tool_call` post hook, which fires
+    for every dispatch path including a blocked call. `BodyState.RAISED` is never reported: CrewAI's
+    `ToolUsage.use`/`ause` catches every tool exception internally and turns it into a formatted
+    string before the post hook ever runs, so a raise and an ordinary return are indistinguishable
+    at the one hook point this adapter has.
+  - `adapters.openai_agents`: `Capture.FRAMEWORK_POST_HOOK` via a second guardrail,
+    `ToolOutputGuardrail`, added alongside the existing `ToolInputGuardrail`; the two correlate
+    through the SDK's own `tool_call_id`. Same honesty limit as CrewAI: the SDK's default
+    `failure_error_function` catches a tool's exception inside `on_invoke_tool`, before the output
+    guardrail runs, so `BodyState.RAISED` is unreachable under default configuration; with
+    `failure_error_function=None` the exception propagates past the output guardrail entirely and
+    that call's outcome is simply never recorded (the hook structurally never fires for it).
+    `guarded_agent_tool()`'s delegation-scope check and `guarded_handoff()`/`DelegationGuardHooks`
+    mint via `Guard.delegate()`, not a tool body, so they stay the library's default `pre_hook_only`.
+
 ## [0.9.0] — 2026-08-31
 
 ### Fixed

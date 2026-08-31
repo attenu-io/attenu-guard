@@ -58,11 +58,39 @@ parent's.
 This adapter deliberately does not decide *what* authority a task needs. You
 write the `Authority` for each sub-agent; attenu-guard only guarantees the
 child can never exceed the parent, and proves it in the audit ledger.
+
+Execution binding (0.9.0, on a `schema_version=2` chain — see `Guard.issue`):
+`guarded_tool()` passes `capture=Capture.FRAMEWORK_POST_HOOK` to `guard.check()`
+and attaches a second guardrail, a `ToolOutputGuardrail`, alongside the input
+one. Neither this adapter nor the input guardrail calls the tool body itself —
+the SDK's own `_invoke_tool_and_run_post_invoke` does, entirely outside this
+file — so the outcome is closed out from the SDK's OWN post-invocation hook,
+observationally, not by a wrapper this adapter controls. The two guardrails
+correlate their state through `tool_context.tool_call_id`, the SDK's own
+identifier for a single tool call.
+
+HONESTY NOTE on `BodyState.RAISED`: with the SDK's *default* `failure_error_function`
+(what `@function_tool` uses unless a caller opts out with `failure_error_function=None`),
+a raised exception is caught INSIDE `on_invoke_tool` before this adapter's output
+guardrail ever runs, and turned into an error string — so the output guardrail sees
+an ordinary return, not a raise, and this adapter reports `BodyState.RETURNED`. If a
+tool is built with `failure_error_function=None`, an uncaught exception propagates
+straight out of `_invoke_function_tool_with_metadata` and the output guardrail never
+runs at all -- that call's `check()` stays allowed with no outcome ever recorded, which
+is the honest reflection of "this adapter's hook point structurally cannot observe what
+happened downstream of it", not a bug to route around.
+
+Not used for execution binding: `guarded_agent_tool()`'s optional `scope=` check and
+`guarded_handoff()`/`DelegationGuardHooks` mint a child `Guard` via `Guard.delegate()`
+rather than authorizing a tool body, so there is no call to bind an outcome to; those
+`guard.check()` calls stay the library's own default `pre_hook_only` observation.
 """
 from __future__ import annotations
 
 import copy
+import inspect
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
@@ -75,10 +103,13 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrail,
     ToolInputGuardrailData,
+    ToolOutputGuardrail,
+    ToolOutputGuardrailData,
     handoff,
 )
 
-from attenu_guard import Authority, AuthorityError, Decision, Guard, Reason
+from attenu_guard import Authority, AuthorityError, Decision, Guard, Reason, __version__
+from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
     "GuardRegistry",
@@ -90,6 +121,37 @@ __all__ = [
     "guarded_handoff",
     "NO_AUTHORITY",
 ]
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.guarded_tool",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    """True for a generator/async-generator -- a shape the output guardrail sees but does not
+    itself consume. Function tools in this SDK return a string/structured output, never a
+    generator, but the check keeps this adapter consistent with the others' `deferred` handling."""
+    return inspect.isgenerator(result) or inspect.isasyncgen(result)
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the parsed tool arguments, taken at authorization time and
+    reused for both `authorized_params` and `invoked_params` -- this adapter never re-reads
+    `tool_context.tool_arguments` after the body may have run."""
+    try:
+        return copy.deepcopy(dict(arguments))
+    except Exception:
+        return dict(arguments)
 
 # Reason code for the adapter's own fail-closed paths — the running agent holds
 # no Authority object at all, which is upstream of any scope/ceiling question.
@@ -238,8 +300,12 @@ def _parse_arguments(raw: str) -> Optional[dict]:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _with_guardrail(tool: FunctionTool, guardrail: ToolInputGuardrail) -> FunctionTool:
-    """Return a copy of `tool` with our guardrail running first.
+def _with_guardrail(
+    tool: FunctionTool,
+    guardrail: ToolInputGuardrail,
+    output_guardrail: Optional[ToolOutputGuardrail] = None,
+) -> FunctionTool:
+    """Return a copy of `tool` with our guardrail(s) running first/last.
 
     A shallow copy, not `dataclasses.replace`: `Agent.as_tool()` sets private
     instance attributes (`_agent_instance`, `_is_agent_tool`) that `replace()`
@@ -249,6 +315,8 @@ def _with_guardrail(tool: FunctionTool, guardrail: ToolInputGuardrail) -> Functi
     """
     guarded = copy.copy(tool)
     guarded.tool_input_guardrails = [guardrail, *(tool.tool_input_guardrails or [])]
+    if output_guardrail is not None:
+        guarded.tool_output_guardrails = [output_guardrail, *(tool.tool_output_guardrails or [])]
     return guarded
 
 
@@ -281,6 +349,12 @@ def guarded_tool(
 
     The tool body NEVER runs on a denial, under either setting.
     """
+    # Execution binding (0.9.0): correlates an allowed, v2 `check()` (from `_authorize`, the
+    # input guardrail) with the outcome the output guardrail later observes -- keyed by the
+    # SDK's own `tool_context.tool_call_id`, which both guardrails see for the SAME call. Never
+    # holds more than the calls currently in flight: `_observe` always pops what it consumes,
+    # win or lose.
+    _pending: dict[str, tuple[Guard, str, Any, float]] = {}
 
     async def _authorize(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
         tool_context = data.context
@@ -309,18 +383,40 @@ def guarded_tool(
             registry.record_denial(agent_name, tool_name, scope, decision)
             return _outcome(decision, on_denied)
 
-        check_context = dict(context_fn(arguments)) if context_fn else {}
-        decision = guard.check(scope, context=check_context, metered=metered, tool=tool_name,
-                               disposition=disposition)
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(arguments) if v2 else None
+        extra = (
+            dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
+        decision = guard.check(scope, context=dict(context_fn(arguments)) if context_fn else {},
+                               metered=metered, tool=tool_name, disposition=disposition, **extra)
         if decision:
+            if v2:
+                # Nothing here calls the tool body -- the SDK does, elsewhere -- so the outcome
+                # is closed out by `_observe` (the output guardrail) from what the SDK hands
+                # back. See the module docstring's "Execution binding" and its honesty note.
+                _pending[tool_context.tool_call_id] = (guard, decision.call_id, snapshot, time.monotonic())
             return ToolGuardrailFunctionOutput.allow(output_info=decision.to_dict())
 
         registry.record_denial(agent_name, tool_name, scope, decision)
         return _outcome(decision, on_denied)
 
+    async def _observe(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        """Never rejects -- purely observational. Pops and closes out the pending call_id
+        `_authorize` stashed for this `tool_call_id`, if any (there is none on v1, and none if
+        `_authorize` never got to record one -- e.g. the call was denied)."""
+        pending = _pending.pop(data.context.tool_call_id, None)
+        if pending is not None:
+            guard, call_id, snapshot, started_at = pending
+            guard.record_outcome(call_id, _body_state_for(data.output),
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+        return ToolGuardrailFunctionOutput.allow(output_info=None)
+
     return _with_guardrail(
         tool,
         ToolInputGuardrail(guardrail_function=_authorize, name=f"attenu_guard[{scope}]"),
+        ToolOutputGuardrail(guardrail_function=_observe, name=f"attenu_guard_outcome[{scope}]"),
     )
 
 

