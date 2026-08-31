@@ -50,8 +50,27 @@ where the agents' tools were built with
 
 attenu-guard deliberately does not decide *what* authority a task needs —
 `grants` is written by the integrator.
+
+Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `guarded_tool()`'s
+`_guarded()` wrapper `await`s `target(**kwargs)` itself -- exactly like `adapters.langgraph`'s
+reference wiring -- so `Capture.WRAPPER_ASYNC` is a genuine observation, with no cross-hook
+correlation of any kind. `authorized_params`/`invoked_params` are one immutable snapshot
+(`_freeze()`, never a copy protocol -- see its own docstring) of the ORIGINAL model-supplied
+`kwargs`, taken BEFORE `ctx` is injected and before `target` runs, and reused unchanged for
+both. `BodyState.RAISED` (with `error_code`) and `BodyState.ABANDONED` (on
+`asyncio.CancelledError`, still re-raised) are both genuinely observed -- LlamaIndex does not
+swallow a tool's exception before this wrapper's own `await` returns/raises. The handoff tool
+(`_guarded_handoff`) mints the child via `parent.delegate(...)`, which never calls
+`guard.check()` at all -- there is no `Decision`/`call_id` to bind an outcome to, so it is
+unaffected by any of this, on any schema version. On `schema_version=1` (the default), nothing
+here changes at all: `capture`/`adapter`/`authorized_params` are never passed to `check()`, and
+`record_outcome()` is never called.
 """
 
+import asyncio
+import concurrent.futures
+import inspect
+import time
 import uuid
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
@@ -76,7 +95,9 @@ from attenu_guard import (
     Decision,
     Guard,
     Reason,
+    __version__,
 )
+from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
     "GUARDS_KEY",
@@ -169,6 +190,52 @@ def _denied(code: str, message: str) -> AuthorityDenied:
     return AuthorityDenied(Decision.deny(Reason(code, message=message)))
 
 
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or LlamaIndex itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(kwargs: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's kwargs, taken at authorization time -- BEFORE
+    `ctx` is injected and before the target runs -- reused for both `authorized_params` and
+    `invoked_params`."""
+    return _freeze(dict(kwargs))
+
+
 # --------------------------------------------------------------------------
 # Hook point 2 — tool invocation
 # --------------------------------------------------------------------------
@@ -219,6 +286,8 @@ def guarded_tool(
         return_direct=base_meta.return_direct if return_direct is None else return_direct,
     )
     tool_name = meta.get_name()
+    adapter_info = {"module": __name__, "version": __version__,
+                    "hook_path": f"{__name__}.guarded_tool"}
 
     def _context_for(kwargs: Dict[str, Any]) -> Mapping[str, Any]:
         if context is None:
@@ -236,9 +305,15 @@ def guarded_tool(
                 f"agent {agent!r} holds no delegated authority; "
                 f"refusing tool {tool_name!r}",
             )
+        v2 = guard.schema_version == 2
+        # Snapshot taken from the ORIGINAL, model-supplied kwargs -- before `ctx` is injected
+        # below, so the commitment never includes the framework's own plumbing.
+        snapshot = _snapshot_params(kwargs) if v2 else None
+        extra = dict(capture=Capture.WRAPPER_ASYNC, adapter=adapter_info,
+                    authorized_params=snapshot) if v2 else {}
         decision = guard.check(
             scope, context=_context_for(kwargs), metered=metered, tool=tool_name,
-            disposition=disposition,
+            disposition=disposition, **extra,
         )
         if not decision:
             # Raised, not returned: AgentWorkflow._call_tool converts it into
@@ -247,7 +322,25 @@ def guarded_tool(
             raise AuthorityDenied(decision)
         if inner_ctx_param:
             kwargs = dict(kwargs, **{inner_ctx_param: ctx})
-        return await target(**kwargs)
+        if not v2:
+            return await target(**kwargs)
+        start = time.monotonic()
+        try:
+            result = await target(**kwargs)
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            guard.record_outcome(decision.call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        except Exception as exc:
+            guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                 error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(decision.call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     return FunctionTool.from_defaults(async_fn=_guarded, tool_metadata=meta)
 

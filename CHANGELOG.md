@@ -340,6 +340,14 @@ All notable changes to attenu-guard are documented here. The format follows
   inapplicable here, not merely tested-and-passing. A delegation tool call (`task`) mints the
   child via `guard.delegate()`, which never calls `guard.check()` at all -- no `Decision`/
   `call_id` exists to bind an outcome to, so it is unaffected by any of this.
+- Execution binding wired into `adapters.llama_index` (LlamaIndex `AgentWorkflow`/
+  `FunctionAgent`), same terms: `Capture.WRAPPER_ASYNC` from `guarded_tool()`'s `_guarded()`
+  wrapper, which `await`s the target itself. `authorized_params`/`invoked_params` are one
+  `_freeze()` snapshot of the ORIGINAL model-supplied kwargs, taken before the framework's own
+  `ctx` argument is injected and before the target runs. `BodyState.RAISED`/`ABANDONED` (on
+  `asyncio.CancelledError`, re-raised) are both genuinely observed. The handoff tool
+  (`_guarded_handoff`) mints the child via `parent.delegate(...)`, which never calls
+  `guard.check()` -- unaffected, on any schema version, same as the delegation tool above.
 
 ## [0.9.0] — 2026-08-31
 
