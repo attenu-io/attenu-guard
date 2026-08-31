@@ -65,11 +65,15 @@ class AuditLog:
     path: Path | None = None
     sinks: tuple = ()                 # local-file sinks (see sinks.py); each gets every entry after the file write
     overwrite: bool = False           # False: refuse to silently erase a pre-existing non-empty ledger at `path`
+    schema_version: int = SCHEMA_VERSION   # 0.9.0: per-chain, stated on `v` of every entry (see guard.py's
+                                            # `schema_version=` on Guard.issue — chains never mix versions)
     _prev: str = GENESIS
     _seq: int = 0
     _entries: list[dict] = None  # in-memory mirror
 
     def __post_init__(self):
+        if self.schema_version not in (1, 2):
+            raise ValueError(f"unsupported schema_version {self.schema_version!r}; expected 1 or 2")
         self._entries = []
         # One lock per log: `append` reads prev_hash/seq, hashes, then writes
         # both — an unsynchronised interleaving from two threads (frameworks
@@ -90,7 +94,7 @@ class AuditLog:
     def append(self, event: str, ts: str | int, **fields) -> dict:
         with self._lock:
             payload = {
-                "v": SCHEMA_VERSION,
+                "v": self.schema_version,
                 "c14n": "JCS",
                 "seq": self._seq,
                 "ts": ts,
@@ -139,7 +143,7 @@ class AuditLog:
         because a consistent rewrite reproduces its own hashes. The signed head hash is the fixed point."""
         seq, head = self.head()
         body = {
-            "v": SCHEMA_VERSION,
+            "v": self.schema_version,
             "c14n": "JCS",
             "chain_id": self._chain_id_hint(),
             "seq": seq,

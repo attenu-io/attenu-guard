@@ -2,18 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://attenu.io/schemas/agent-audit/v1.json",
   "title": "Agent Delegation Audit Event",
-  "description": "One decision in an agent delegation chain. Hash-chained, tamper-evident, offline-verifiable. Published as an open standard so SIEMs and observability tools can ingest agent-authority decisions in a common format.",
+  "description": "One decision in an agent delegation chain. Hash-chained, tamper-evident, offline-verifiable. Published as an open standard so SIEMs and observability tools can ingest agent-authority decisions in a common format. Covers schema versions 1 and 2: a chain is created at ONE version and never mixes (stated once, on its `root` entry); version 2 (0.9.0) adds execution binding — `call_id` on every allow/deny, the `outcome` event, and the params_c14n_v1 argument commitments. A version-1 entry never carries any version-2-only field.",
   "type": "object",
   "required": ["v", "seq", "ts", "event", "prev_hash", "hash"],
   "properties": {
-    "v": { "const": 1, "description": "Schema version." },
+    "v": { "enum": [1, 2], "description": "Schema version, stated on the `root` entry and inherited by every entry in the chain." },
     "c14n": { "type": "string", "description": "Informational canonicalization label; verifiers enforce RFC 8785 by recomputing the event hash over JCS bytes." },
     "seq": { "type": "integer", "minimum": 0, "description": "Monotonic sequence number; gaps are provable evidence of deletion." },
     "ts": { "description": "Trusted timestamp (RFC 3339 string) or monotonic integer in tests." },
     "event": {
       "type": "string",
-      "enum": ["root", "spawn", "spawn_denied", "allow", "deny", "kill", "done"],
-      "description": "root=chain start; spawn=delegation minted; allow/deny=action authorization; kill=cascade revocation; done=node lifecycle end (holder finished; informational)."
+      "enum": ["root", "spawn", "spawn_denied", "allow", "deny", "kill", "done", "outcome"],
+      "description": "root=chain start; spawn=delegation minted; allow/deny=action authorization; kill=cascade revocation; done=node lifecycle end (holder finished; informational); outcome=(v2 only) what happened after an allowed call — see call_id/body_state below."
     },
     "chain_id": { "type": "string" },
     "node": { "type": "string", "description": "The node this event concerns." },
@@ -36,7 +36,80 @@
     "disposition": { "type": "string", "enum": ["held_pending_grant", "withheld_tier2", "unresolved", "out_of_authority"],
                      "description": "deny only: WHY the scope was not in the node's authority — held pending an operator grant (waiting on a human) | withheld tier-2 (resolvable only to a heuristic never granted) | unresolved (no authority known for the tool) | out_of_authority (resolved and grantable, but not held by this node: over-reach)." },
     "prev_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || RFC8785-JCS(event-without-hash))." }
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256(prev_hash || RFC8785-JCS(event-without-hash))." },
+
+    "call_id": { "type": "string", "pattern": "^[0-9a-f]{32}$",
+                 "description": "v2 only. On allow/deny/outcome: 16 CSPRNG bytes, lowercase hex, allocated inside check()'s locked transition. Unique per allow/deny in a chain (duplicate_call_id at verification); an outcome's call_id must match exactly one allow, never a deny." },
+    "capture": { "type": "string", "enum": ["wrapper_sync", "wrapper_async", "framework_post_hook", "pre_hook_only"],
+                 "description": "v2 allow only, REQUIRED on every v2 allow (Guard.check() supplies pre_hook_only + a guard-attributed adapter when the caller passes none — a bare check() IS itself pre_hook_only observation, and there is no honest reason for it to be absent). Forbidden on deny. What the adapter's code path will observe for this call — observation CAPABILITY, not a claim of quality. pre_hook_only means no outcome is promised." },
+    "adapter": { "type": "object", "required": ["module", "version", "hook_path"],
+                 "properties": { "module": { "type": "string", "minLength": 1 }, "version": { "type": "string", "minLength": 1 }, "hook_path": { "type": "string", "minLength": 1 } },
+                 "description": "v2 allow only, REQUIRED alongside capture (see capture) — never absent, never present without capture. Forbidden on deny. The adapter code path that produced this record." },
+    "authorized_params_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$",
+                 "description": "v2 allow only. params_c14n_v1: SHA-256(raw_salt || UTF8(JCS(authorized_params))), lowercase hex. Absent (with params_hash_reason) when authorized_params is outside the params_c14n_v1 domain; absent with no reason when the deployment never attempted a commitment." },
+    "params_salt": { "type": "string", "pattern": "^[0-9a-f]{32}$",
+                 "description": "v2 root entry only: 16 raw bytes, hex-encoded, fixed for the chain's lifetime — the salt every authorized_params_hash/invoked_params_hash in this chain is computed against." },
+    "params_hash_reason": { "type": "string", "enum": ["unsupported"],
+                 "description": "v2 allow/outcome only: present exactly when the corresponding hash field (authorized_params_hash / invoked_params_hash) is absent because the value was outside the params_c14n_v1 domain. Illegal alongside the hash field it names." },
+    "body_state": { "type": "string", "enum": ["returned", "raised", "abandoned", "deferred"],
+                 "description": "v2 outcome only: an OBSERVATION of how the body-owning wrapper's call ended, not a judgment about the world." },
+    "error_code": { "type": "string", "minLength": 1,
+                 "description": "v2 outcome only, required exactly when body_state == raised (a normalized exception class name, never a message); illegal for every other body_state." },
+    "invoked_params_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$",
+                 "description": "v2 outcome only: same params_c14n_v1 commitment as authorized_params_hash, over the arguments the wrapper observed immediately before the actual invocation." },
+    "duration_ms": { "type": "integer", "minimum": 0,
+                 "description": "v2 outcome only, required: observation start to observation end, milliseconds." },
+    "receipt": { "type": "object", "required": ["type", "ref", "digest"],
+                 "properties": { "type": { "type": "string", "minLength": 1 }, "ref": { "type": "string", "minLength": 1 },
+                                 "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+                 "description": "v2 outcome only, optional: unverified carriage from an external observer — the library verifies nothing about it. digest is a lowercase-hex SHA-256 (spec section 7)." },
+    "pending_at_kill": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+                 "description": "v2 kill only: call_ids, across every node this kill revoked, that had not yet received an outcome at the moment of revocation. A snapshot, not a clearing — a later outcome for one of these call_ids is still accepted." }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "event": { "const": "outcome" } }, "required": ["event"] },
+      "then": {
+        "required": ["call_id", "body_state", "duration_ms"],
+        "if": { "properties": { "body_state": { "const": "raised" } }, "required": ["body_state"] },
+        "then": { "required": ["error_code"] },
+        "else": { "not": { "required": ["error_code"] } }
+      }
+    },
+    {
+      "$comment": "v2 allow: capture and adapter are BOTH required — Guard.check() always supplies them (pre_hook_only + a guard-attributed adapter when the caller passes neither); absence can only mean tampered or hand-crafted data.",
+      "if": { "properties": { "v": { "const": 2 }, "event": { "const": "allow" } }, "required": ["v", "event"] },
+      "then": { "required": ["call_id", "capture", "adapter"] }
+    },
+    {
+      "$comment": "deny forbids every allow-only field, on any schema version.",
+      "if": { "properties": { "event": { "const": "deny" } }, "required": ["event"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["capture"] },
+            { "required": ["adapter"] },
+            { "required": ["authorized_params_hash"] },
+            { "required": ["params_hash_reason"] }
+          ]
+        }
+      }
+    },
+    {
+      "$comment": "v1 carries NONE of the v2-only fields — including call_id: v1 never allocates one. A v1 entry with any of these is mixed-version data, not a v1 entry.",
+      "if": { "properties": { "v": { "const": 1 } }, "required": ["v"] },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["call_id"] }, { "required": ["capture"] }, { "required": ["adapter"] },
+            { "required": ["authorized_params_hash"] }, { "required": ["params_hash_reason"] },
+            { "required": ["params_salt"] }, { "required": ["body_state"] }, { "required": ["error_code"] },
+            { "required": ["invoked_params_hash"] }, { "required": ["duration_ms"] },
+            { "required": ["receipt"] }, { "required": ["pending_at_kill"] }
+          ]
+        }
+      }
+    }
+  ],
   "additionalProperties": true
 }

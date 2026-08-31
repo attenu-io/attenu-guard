@@ -1168,6 +1168,8 @@ def test_complete_records_a_done_event_once_and_leaves_authority_intact():
     root = Guard.issue("orchestrator", Authority({"fs.*", "agent.delegate.*"}, [], ttl=None), task="t")
     child = root.delegate("researcher", Authority({"fs.read"}, [], ttl=None), task="explore")
     assert child.check("fs.read").allowed
+    # v1 chain (the default): complete() returns a plain bool, byte-and-type identical to every
+    # release before 0.9.0 -- CompletionResult only appears on a schema_version=2 chain.
     assert child.complete() is True and child.is_complete
     assert child.complete() is False                                    # idempotent: one lifecycle end per node
     dones = [e for e in root.audit_log().entries if e["event"] == "done"]
@@ -1302,6 +1304,8 @@ def test_evidence_bundle_verifies_offline():
         "anchor": "verified",
         "version": True,
         "chain_id": True,
+        "root": True,                        # 0.9.0: exactly-one-root check
+        "expected_anchor": "not checked",     # 0.9.0: no expected_anchor/expected_head was given
     }
     assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
 
