@@ -76,7 +76,6 @@ yielding again, is a `RuntimeError` per Python's own generator protocol).
 from __future__ import annotations
 
 import asyncio
-import copy
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, List, Mapping, Optional
@@ -109,24 +108,22 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 def _freeze(value: Any) -> Any:
-    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
-    container with the live object graph, so a later in-place mutation (by the tool body, or by
-    AutoGen itself) cannot change what was already committed. `copy.deepcopy` alone is not
-    enough: on ANY failure deep in a nested structure, a naive `except: return dict(...)`
-    fallback keeps sharing whatever nested dicts/lists deepcopy did not reach. This never falls
-    back to a shared reference: dicts/lists are always rebuilt fresh (recursively), and a leaf
-    that cannot itself be deep-copied is replaced by its `repr()` -- a brand-new, immutable
-    string -- rather than shared as-is."""
-    try:
-        return copy.deepcopy(value)
-    except Exception:
-        pass
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or AutoGen itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
     if isinstance(value, Mapping):
         return {k: _freeze(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set, frozenset)):
         return [_freeze(v) for v in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
     try:
         return repr(value)
     except Exception:

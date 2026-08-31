@@ -729,3 +729,18 @@ class SnapshotFreezeTests(unittest.TestCase):
         live["nested"]["new_key"] = "mutated after snapshot"
         self.assertEqual(snapshot["nested"]["list"], [1, 2, 3])
         self.assertNotIn("new_key", snapshot["nested"])
+
+    def test_never_aliases_a_custom_deepcopy_that_returns_itself(self):
+        """Codex review round 2, finding 4: a mutable class implementing __deepcopy__ to
+        return itself made the old _freeze() (copy.deepcopy(value) unconditionally first)
+        return the SAME live, mutable object -- deepcopy succeeding is not proof of
+        independence. _freeze() must never call any copy protocol on a container at all."""
+        class _AliasingList(list):
+            def __deepcopy__(self, memo):
+                return self
+
+        live = {"x": _AliasingList([1])}
+        snapshot = dg_oa._snapshot_params(live)
+        self.assertIsNot(snapshot["x"], live["x"])
+        live["x"].append(2)
+        self.assertEqual(snapshot["x"], [1])

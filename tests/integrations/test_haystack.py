@@ -715,3 +715,25 @@ def test_snapshot_freeze_never_shares_a_mutable_container_on_deepcopy_failure():
     live["nested"]["new_key"] = "mutated after snapshot"
     assert snapshot["nested"]["list"] == [1, 2, 3], "the snapshot shared a mutable list"
     assert "new_key" not in snapshot["nested"], "the snapshot shared the mutable dict"
+
+
+class _AliasingList(list):
+    """A mutable container whose `__deepcopy__` hands back itself -- reproduces the exact
+    aliasing bug Codex found in round 2: `copy.deepcopy` SUCCEEDING is not proof of
+    independence, since a class is free to implement `__deepcopy__` to return `self`."""
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review round 2, finding 4: the fix must never call ANY copy protocol
+    (copy.deepcopy included) on a container -- rebuilding it from scratch as a fresh
+    builtin is the only way to guarantee independence from the live object graph."""
+    live = {"x": _AliasingList([1])}
+
+    snapshot = dg_hs._snapshot_params(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"

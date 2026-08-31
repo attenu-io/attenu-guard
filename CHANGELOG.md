@@ -32,6 +32,13 @@ All notable changes to attenu-guard are documented here. The format follows
   rule out. Replaced with `_freeze()`/`_snapshot_params()`: dicts and lists are always rebuilt
   fresh, recursively; a leaf that cannot itself be deep-copied is replaced by its `repr()` (a new,
   immutable string) rather than shared as-is. Never raises, never shares a mutable container.
+  **Round 2 correction (Codex review, finding 4):** that first fix still tried `copy.deepcopy(value)`
+  wholesale before falling back to the rebuild -- but a mutable class can implement `__deepcopy__`
+  to hand back `self` (or another object it still owns), so `deepcopy` *succeeding* was never proof
+  the result was independent of the live object graph. `_freeze()` now never calls `copy.deepcopy`,
+  or any copy protocol, on anything: containers (`dict`/`list`/`tuple`/`set`/`frozenset`) are
+  always rebuilt from scratch as fresh builtins; only already-immutable leaf types
+  (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is; everything else becomes its `repr()`.
 - `adapters.google_adk`: `after_tool_callback` now checks `tool.is_long_running`/
   `tool._defers_response` -- the SAME flags ADK's own `functions.py` checks -- before deciding
   `RETURNED` vs `BodyState.DEFERRED`; a long-running/deferring tool's placeholder response was
