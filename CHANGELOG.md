@@ -412,6 +412,23 @@ All notable changes to attenu-guard are documented here. The format follows
   tool call gets exactly the same capture/outcome treatment as any other allowed call; only the
   internal `registry.delegate(...)` mint step (inside the same `authorize()` call, after the
   scope check passes) adds no second, separate check/outcome of its own.
+- Execution binding wired into `adapters.agent_framework` (Microsoft Agent Framework):
+  `Capture.WRAPPER_ASYNC` from `DelegationGuard.process`, which awaits `call_next()` itself.
+  `_freeze()` snapshot of the tool call's arguments, taken at authorization time before
+  `call_next()` runs. `BodyState.RAISED` is genuinely observed via a real raised Python
+  exception -- verified directly against pinned 1.15.x source (`_tools.py`/`_middleware.py`)
+  that a tool-body exception propagates all the way through `FunctionMiddlewarePipeline.
+  execute`'s `final_wrapper` and every enclosing `middleware.process`'s own `call_next()`,
+  including this one; the conversion into a tool-error result (cited in the module docstring's
+  "DENIAL SHAPE") happens in an `except Exception` ABOVE the whole middleware pipeline, not
+  inside it, so this adapter's own `try`/`except` around `await call_next()` sees the raise
+  first, same shape as `adapters.langgraph`'s reference wiring (unlike `adapters.ag2`'s typed-
+  event signal, or CrewAI/AutoGen's swallowed-into-a-string one). `asyncio.CancelledError` is
+  `BodyState.ABANDONED`, still re-raised. Same as `adapters.ag2`: Agent Framework has no
+  separate delegation callback -- every hand-off is a regular tool call authorized through this
+  SAME path via its own `ToolPolicy(scope=...)`, so a delegation tool call gets exactly the same
+  capture/outcome treatment as any other allowed call; only the internal
+  `self._registry.delegate(...)` mint step adds no second, separate check/outcome of its own.
 
 ## [0.9.0] — 2026-08-31
 

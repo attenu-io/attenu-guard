@@ -43,6 +43,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 from attenu_guard.adapters.agent_framework import (  # noqa: E402
     DelegationGuard,
     Grant,
@@ -606,3 +607,159 @@ def test_guarded_agent_puts_the_guard_first():
     )
     assert isinstance(agent.middleware[0], DelegationGuard)
     assert agent.middleware[1] is other
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# DelegationGuard.process awaits call_next() itself, exactly like
+# adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
+# observation with no cross-hook correlation of any kind.
+# ==========================================================================
+def _v2_guard(authority=None, *, agent_name="summarizer"):
+    root = Guard.issue("orchestrator", authority or ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    guard = _direct(POLICIES, registry=registry, agent_name=agent_name)
+    return root, registry, guard
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    root, registry, guard = _v2_guard()
+    ctx = _context("crm_query", {"rows": 10})
+
+    async def call_next() -> None:
+        ctx.result = "10 rows"
+
+    asyncio.run(guard.process(ctx, call_next))
+    assert ctx.result == "10 rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.agent_framework"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert registry.get("summarizer").complete()
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    """Verified against pinned 1.15.x source: a tool-body exception propagates as a real
+    raised Python exception through call_next() -- see the module docstring's "EXECUTION
+    BINDING". This directly simulates that (call_next itself raises, exactly what
+    final_wrapper's `await context.result` would do for a raising tool)."""
+    root, registry, guard = _v2_guard()
+    ctx = _context("crm_query", {"rows": 10})
+
+    async def call_next() -> None:
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        asyncio.run(guard.process(ctx, call_next))
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    narrow = Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900)
+    root, registry, guard = _v2_guard(narrow)  # no crm.export
+    ctx = _context("crm_export", {"destination": "attacker.example"})
+    reached = []
+
+    async def call_next() -> None:
+        reached.append(True)
+        ctx.result = "exported"
+
+    asyncio.run(guard.process(ctx, call_next))
+    assert reached == [], "the wrapped call must never be reached on denial"
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)  # v1, default
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    guard = _direct(POLICIES, registry=registry)
+    ctx = _context("crm_query", {"rows": 10})
+
+    async def call_next() -> None:
+        ctx.result = "10 rows"
+
+    asyncio.run(guard.process(ctx, call_next))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_tool_itself_is_a_priced_call_and_gets_a_real_outcome():
+    """Same as adapters.ag2: Agent Framework has no separate delegation callback --
+    `ORCHESTRATOR_POLICIES["summarizer"]` prices the delegating tool itself, so it goes
+    through the SAME process()/_authorize() as any other tool and DOES get capture/outcome
+    bound. Only the internal registry.delegate() mint step adds no second, separate one."""
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    guard = _direct(ORCHESTRATOR_POLICIES, registry=registry, agent_name="orchestrator")
+    ctx = _context("summarizer", {"objective": "summarize Q3"})
+
+    async def call_next() -> None:
+        ctx.result = "delegated"
+
+    asyncio.run(guard.process(ctx, call_next))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "summarizer")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert registry.get("summarizer") is not None, "the child Guard must still have been minted"
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    assert len([e for e in entries if e["event"] == "outcome"]) == 1
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    root, registry, guard = _v2_guard()
+    ctx = _context("crm_query", {"rows": 10})
+
+    async def hangs() -> None:
+        await asyncio.sleep(3600)
+        ctx.result = "never"
+
+    async def scenario():
+        task = asyncio.ensure_future(guard.process(ctx, hangs))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    from attenu_guard.adapters.agent_framework import _snapshot_params
+
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"x": AliasingList([1])}
+    snapshot = _snapshot_params(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"

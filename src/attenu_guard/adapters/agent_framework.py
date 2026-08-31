@@ -96,9 +96,41 @@ KNOWN GAPS (things this seam cannot see)
 * **Middleware ordering is trust ordering**: client-level function middleware runs
   outside agent-level (`_tools.py:3165`), so anything registered ahead of this guard
   can substitute a result before the check runs.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`)
+------------------------------------------------------------------------------
+`DelegationGuard.process` awaits `call_next()` itself, exactly like `adapters.langgraph`'s
+reference wiring, so `Capture.WRAPPER_ASYNC` is a genuine observation with no cross-hook
+correlation of any kind. `authorized_params`/`invoked_params` are one immutable snapshot
+(`_freeze()`, never a copy protocol -- see its own docstring) of the tool call's arguments,
+taken at authorization time -- BEFORE `call_next()` runs -- and reused unchanged for both.
+
+`BodyState.RAISED`, genuinely: verified directly against pinned 1.15.x source
+(`_tools.py`/`_middleware.py`) that a tool-body exception propagates as a REAL raised Python
+exception all the way through `FunctionMiddlewarePipeline.execute`'s `final_wrapper`
+(`context.result = await context.result`) and every enclosing `middleware.process`'s own
+`await call_next()`, including this one -- the `except Exception` that finally converts it into
+a tool-error result (`_tools.py:1642-1643`, cited in the module docstring's "DENIAL SHAPE") sits
+ABOVE the whole middleware pipeline, not inside `final_function_handler`, so this wrapper's own
+`try`/`except` around `await call_next()` genuinely observes the raise before that outer catch
+ever runs. `asyncio.CancelledError` (a `BaseException`) is `BodyState.ABANDONED`, still
+re-raised. On a clean return, `context.result` holds the tool's own return value directly (no
+wrapping), so `_body_state_for(context.result)` reads it honestly.
+
+On `schema_version=1` (the default), nothing here changes at all. Delegation is not a separate
+path here, same as `adapters.ag2`: Agent Framework has no distinct delegation callback -- every
+hand-off (`Agent.as_tool()`, a `handoff_to_<target>` tool) is a regular tool call authorized
+through this SAME `process()`/`_authorize()` via its own `ToolPolicy(scope=...)`, so a
+delegation tool call gets exactly the same capture/outcome treatment as any other allowed call.
+Only the internal `self._registry.delegate(...)` mint step (inside `_authorize`, after the
+scope check passes) adds no second, separate check/outcome of its own.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import inspect
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
@@ -109,8 +141,8 @@ from agent_framework import (
     MiddlewareFailure,
 )
 
-from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 __all__ = [
     "Grant",
@@ -220,6 +252,58 @@ class GuardRegistry:
 # ---------------------------------------------------------------------------
 
 
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.DelegationGuard.process",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or Agent Framework itself) later mutates the original in
+    place. Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively);
+    only already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is
+    -- sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    `call_next()` runs -- and reused as both `authorized_params` and `invoked_params`."""
+    return _freeze(dict(arguments))
+
+
 def _as_mapping(arguments: Any) -> Mapping[str, Any]:
     """Normalise `FunctionInvocationContext.arguments`.
 
@@ -269,7 +353,9 @@ class DelegationGuard(FunctionMiddleware):
         call_next: Callable[[], Awaitable[None]],
     ) -> None:
         try:
-            denial = self._authorize(context.function.name, _as_mapping(context.arguments))
+            denial, guard, call_id, snapshot = self._authorize(
+                context.function.name, _as_mapping(context.arguments)
+            )
         except MiddlewareFailure:
             raise
         except Exception as exc:                             # pragma: no cover
@@ -286,12 +372,39 @@ class DelegationGuard(FunctionMiddleware):
             # reached, so the tool body provably does not run.
             context.result = denial
             return
-        await call_next()
+        if call_id is None:
+            await call_next()
+            return
 
-    def _authorize(self, name: str, arguments: Mapping[str, Any]) -> Optional[str]:
-        """Return the denial message, or None when the call may proceed.
+        start = time.monotonic()
+        try:
+            await call_next()
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            guard.record_outcome(call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        except Exception as exc:
+            # Genuinely observed: verified against pinned 1.15.x source that a tool-body
+            # exception propagates as a real raised exception all the way through
+            # final_wrapper and every enclosing process()'s own call_next() -- see the
+            # module docstring's "EXECUTION BINDING". The outer conversion into a tool-
+            # error result happens ABOVE the whole middleware pipeline, not here.
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(context.result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
 
-        Raises `MiddlewareFailure` instead of returning when ``on_deny="failure"``.
+    def _authorize(
+        self, name: str, arguments: Mapping[str, Any]
+    ) -> "tuple[Optional[str], Optional[Guard], Any, Any]":
+        """Return `(denial_message_or_None, guard, call_id_or_None, snapshot_or_None)`.
+
+        Raises `MiddlewareFailure` instead of returning when ``on_deny="failure"``. The
+        last two fields are set only for an ALLOWED, v2 `check()` -- what `process()`
+        needs to close the outcome out afterward.
         """
         policy = self._policies.get(name)
         if policy is None:
@@ -307,7 +420,7 @@ class DelegationGuard(FunctionMiddleware):
                 if g is not None
                 else None
             )
-            return self._deny(msg, decision=decision)
+            return self._deny(msg, decision=decision), None, None, None
 
         guard = self._registry.get(self._agent_name)
         if guard is None:
@@ -315,19 +428,25 @@ class DelegationGuard(FunctionMiddleware):
                 f"attenu-guard: agent {self._agent_name!r} holds no delegated "
                 f"authority (fail-closed).",
                 decision=None,
-            )
+            ), None, None, None
 
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(arguments) if v2 else None
+        extra = (
+            dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         ctx = policy.context(arguments) if policy.context else {}
         decision = guard.check(
             policy.scope, context=ctx, tool=name, metered=policy.metered,
-            disposition=policy.disposition,
+            disposition=policy.disposition, **extra,
         )
         if not decision:
             return self._deny(
                 f"attenu-guard: {decision.explain()} "
                 f"(agent={self._agent_name}, tool={name}, scope={policy.scope})",
                 decision=decision,
-            )
+            ), None, None, None
 
         # Allowed — and if this tool is itself a delegation point, mint the child now,
         # before the body starts the sub-agent (`_agents.py:694`).
@@ -340,8 +459,8 @@ class DelegationGuard(FunctionMiddleware):
                 return self._deny(
                     f"attenu-guard: cannot delegate to {policy.delegates_to!r}: {exc}",
                     decision=None,
-                )
-        return None
+                ), None, None, None
+        return None, guard, (decision.call_id if v2 else None), snapshot
 
     def _deny(self, message: str, *, decision) -> str:
         if self._on_deny == "failure":
