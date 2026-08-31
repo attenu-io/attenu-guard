@@ -365,6 +365,25 @@ All notable changes to attenu-guard are documented here. The format follows
   `BodyState.RAISED` (with `error_code`) is genuinely observed -- smolagents does not swallow a
   tool's exception before `forward`'s own caller sees it. `DelegatedAgent.mint()` mints the
   child via `parent_guard.delegate(...)`, which never calls `guard.check()` -- unaffected.
+  - **Round 2 correction (Codex review, batch 2, finding 5):** on a clean return, this adapter
+    recorded `BodyState.RETURNED` unconditionally, without checking what the inner tool's own
+    return value actually was. Wrong when the inner tool's own `forward()` implementation is a
+    generator function (uses `yield`): pinned smolagents 1.26.0's `Tool.__call__` returns
+    unknown result types unchanged, so calling a generator function returns a generator OBJECT
+    immediately, with none of its body executed yet -- ordinary Python generator semantics,
+    nothing smolagents-specific, and this wrapper has no way to know whether or when it will
+    ever be iterated. Added the shared `_is_deferred_result`/`_body_state_for` pattern every
+    other adapter in this package already uses for its own generator/streaming case (`return
+    inspect.isgenerator(result) or inspect.isasyncgen(result)`, matching `adapters.haystack`/
+    `pydantic_ai`'s simpler sync-appropriate form rather than the fuller async-Future-checking
+    one, since smolagents genuinely has no async entry point here). `GuardedTool.forward()`'s
+    final `record_outcome()` now reads `_body_state_for(result)` instead of a hardcoded
+    `BodyState.RETURNED`. Test added: `test_v2_a_tool_returning_a_generator_records_a_deferred_
+    outcome` -- a `StreamingCrmQuery` tool whose `forward()` is a generator function, driven
+    directly through `GuardedTool` (the same direct-construction pattern
+    `test_metered_passthrough_under_strict_metering` already uses); asserts the returned value
+    is a live, unconsumed generator, the tool's own side effect has NOT happened yet, and the
+    recorded `body_state` is `DEFERRED`, not `RETURNED`.
 - Execution binding wired into `adapters.strands` (AWS Strands Agents), OPT-IN via
   `DelegationGuard(..., strict_single_hook=True)`: this adapter never calls the tool body
   itself, but pinned strands-agents 1.52.x's `AfterToolCallEvent` is an unusually good hook

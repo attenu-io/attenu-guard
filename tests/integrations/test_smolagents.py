@@ -12,6 +12,7 @@ flags (`Ledger`), not internal call counts, are what the assertions read.
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -691,3 +692,42 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["kwargs"]["x"] is not live_kwargs["x"], "the snapshot aliased the live container"
     live_kwargs["x"].append(2)
     assert snapshot["kwargs"]["x"] == [1], "mutating the live container changed the snapshot"
+
+
+def test_v2_a_tool_returning_a_generator_records_a_deferred_outcome():
+    """Codex batch-2 review, finding 5: pinned smolagents 1.26.0's `Tool.__call__` returns
+    whatever a tool's own `forward()` implementation produces UNCHANGED. If that implementation
+    is a generator function (uses `yield`), calling it returns a generator OBJECT immediately,
+    with none of its body executed yet -- ordinary Python generator semantics, nothing
+    smolagents-specific. `GuardedTool.forward()` used to record `BodyState.RETURNED`
+    unconditionally on a clean return, which would be a lie here: the real body (the code after
+    `yield`) has not run, and this wrapper has no way to know it ever will. `DEFERRED` is the
+    honest read -- the same shared `_is_deferred_result`/`_body_state_for` pattern every other
+    async adapter in this package already uses for its own generator/streaming case."""
+    ledger = Ledger()
+
+    class StreamingCrmQuery(Tool):
+        name = "crm_query"
+        description = "Streams rows instead of returning them directly."
+        inputs = {"rows": {"type": "integer", "description": "n"}}
+        output_type = "string"
+
+        def forward(self, rows: int):
+            # A generator function: calling it returns a generator object with NONE of this
+            # body executed yet -- the ledger append below only happens once (if ever) iterated.
+            ledger.effects.append(("crm_query", rows))
+            yield f"read {rows} CRM rows"
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3", schema_version=2)
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarise")
+
+    guarded = GuardedTool(StreamingCrmQuery(), GuardRef(child), "crm.read",
+                          context_fn=lambda rows: {"rows": rows})
+    result = guarded(rows=10)
+
+    assert inspect.isgenerator(result), "the tool body must not have run yet"
+    assert ledger.effects == [], "the generator's body must not have executed on this call"
+
+    entries = child.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.DEFERRED

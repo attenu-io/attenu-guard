@@ -73,18 +73,27 @@ Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `
 forward()` calls the inner tool itself (`self.inner(*args, **kwargs)`), exactly like
 `adapters.langgraph`'s reference wiring, so `Capture.WRAPPER_SYNC` is a genuine observation --
 smolagents only ever calls `forward` synchronously (`Tool.__call__`), so there is no async
-variant to wire. `authorized_params`/`invoked_params` are one immutable snapshot
-(`_freeze()`, never a copy protocol -- see its own docstring) of `{"args": [...], "kwargs":
-{...}}`, taken BEFORE the inner tool runs and reused unchanged for both. `BodyState.RAISED`
-(with `error_code`) is genuinely observed -- smolagents does not swallow a tool's exception
-before `forward`'s own caller sees it; `execute_tool_call` re-raises it as
-`AgentToolExecutionError`, which propagates straight through this wrapper. `DelegatedAgent.
+variant to wire, and there is no composable middleware chain here for a sibling to hide in
+(unlike `adapters.langchain`/`agno`/`ag2`/`agent_framework`/`semantic_kernel`'s
+`strict_single_hook`): `GuardedTool` calls `self.inner` directly, one wrapper, one body.
+`authorized_params`/`invoked_params` are one immutable snapshot (`_freeze()`, never a copy
+protocol -- see its own docstring) of `{"args": [...], "kwargs": {...}}`, taken BEFORE the
+inner tool runs and reused unchanged for both. `BodyState.RAISED` (with `error_code`) is
+genuinely observed -- smolagents does not swallow a tool's exception before `forward`'s own
+caller sees it; `execute_tool_call` re-raises it as `AgentToolExecutionError`, which
+propagates straight through this wrapper. On a clean return, pinned smolagents 1.26.0
+returns whatever the inner tool's own implementation produced UNCHANGED -- if that
+implementation is a generator function, `self.inner(*args, **kwargs)` returns a generator
+OBJECT with none of its body executed yet (ordinary Python generator semantics, nothing
+smolagents-specific); `result` is inspected for generator-ness (`_is_deferred_result`) and
+reported `BodyState.DEFERRED` in that case, never fabricated as `RETURNED`. `DelegatedAgent.
 mint()` mints the child via `parent_guard.delegate(...)`, which never calls `guard.check()` at
 all -- there is no `Decision`/`call_id` to bind an outcome to, so delegation is unaffected by
 any of this. On `schema_version=1` (the default), nothing here changes at all.
 """
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
@@ -107,6 +116,21 @@ _ADAPTER_INFO = {
     "version": __version__,
     "hook_path": f"{__name__}.GuardedTool.forward",
 }
+
+
+def _is_deferred_result(result: Any) -> bool:
+    """`GuardedTool.forward()` calls `self.inner(*args, **kwargs)` plainly and reads back
+    whatever it returns -- if the inner tool's own implementation is a generator function
+    (uses `yield`), calling it returns a generator OBJECT immediately, before any of the
+    generator's body has run at all (ordinary Python generator semantics -- smolagents
+    itself does nothing special with the return value here, pinned 1.26.0 `Tool.__call__`
+    returns unknown result types unchanged). `BodyState.RETURNED` would be a lie in that
+    case: `DEFERRED` is the honest read."""
+    return inspect.isgenerator(result) or inspect.isasyncgen(result)
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -300,7 +324,7 @@ class GuardedTool(Tool):
                                  error_code=type(exc).__name__,
                                  invoked_params=snapshot, duration_ms=_elapsed_ms(start))
             raise
-        guard.record_outcome(decision.call_id, BodyState.RETURNED,
+        guard.record_outcome(decision.call_id, _body_state_for(result),
                              invoked_params=snapshot, duration_ms=_elapsed_ms(start))
         return result
 
