@@ -26,6 +26,21 @@ All notable changes to attenu-guard are documented here. The format follows
   unaffected -- a real regression against every adapter's "`schema_version=1` stays byte-and-
   type identical" guarantee. Omitting `registry=` (the default) now never touches the tool at
   all, on any chain.
+  **Round 2 correction (Codex review, finding 2):** wrapping `on_invoke_tool` for CAPTURE was not
+  enough -- authorization still ran in a SEPARATE `ToolInputGuardrail`, correlated with the
+  wrapper via a `tool_call_id`-keyed map. Pinned openai-agents 0.22.0 runs ALL
+  `tool_input_guardrails` before invoking anything and returns immediately if a LATER guardrail
+  (not this adapter's own) rejects, so `on_invoke_tool` -- and this adapter's wrapper -- was
+  never called at all for that dispatch, leaking the map entry (an `allow` with no outcome ever
+  recorded). `guard.check()` now runs INSIDE `on_invoke_tool` itself, immediately before invoking
+  the original body, in the v2 (`registry=`) path -- no separate guardrail, no correlation map of
+  any kind. A denial there raises `AuthorityDenied(decision)` directly (`on_denied="raise"`) or
+  returns the denial text as the tool's own output (`on_denied="reject"`, the default) --
+  `on_invoke_tool`'s own documented return contract, not `ToolGuardrailFunctionOutput`. If
+  authorization never runs at all (a third-party guardrail rejects first, or the SDK never
+  invokes `on_invoke_tool` for some other reason), there is now no ledger entry whatsoever for
+  that call, not an `allow` with a missing outcome. The v1 (no `registry=`) path is UNCHANGED --
+  still the original `ToolInputGuardrail`-based `_authorize_v1`.
 - All six new adapters (below): the "immutable snapshot" helper fell back to a shallow `dict(...)`
   copy whenever `copy.deepcopy` failed on any nested value, silently keeping shared references to
   the live, mutable call arguments -- exactly the false-substitution risk the snapshot exists to

