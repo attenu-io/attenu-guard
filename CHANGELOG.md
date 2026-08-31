@@ -355,6 +355,22 @@ All notable changes to attenu-guard are documented here. The format follows
   `BodyState.RAISED` (with `error_code`) is genuinely observed -- smolagents does not swallow a
   tool's exception before `forward`'s own caller sees it. `DelegatedAgent.mint()` mints the
   child via `parent_guard.delegate(...)`, which never calls `guard.check()` -- unaffected.
+- Execution binding wired into `adapters.strands` (AWS Strands Agents), OPT-IN via
+  `DelegationGuard(..., strict_single_hook=True)`: this adapter never calls the tool body
+  itself, but pinned strands-agents 1.52.x's `AfterToolCallEvent` is an unusually good hook
+  surface -- `HookRegistry.invoke_callbacks`/`_async` runs every registered callback
+  unconditionally (unlike Google ADK's plugin manager, no other hook can prevent this one's
+  own `after_tool_call` from running), and `tool_use["toolUseId"]` is a genuinely UNIQUE
+  identifier per dispatch (not an object-identity collision risk CrewAI-style). `Capture.
+  FRAMEWORK_POST_HOOK` closes out from `AfterToolCallEvent.exception`/`cancel_message` --
+  `BodyState.ABANDONED` (no `error_code`) for a third-party veto after this adapter's own
+  allow (this adapter's own denial never stashes a pending entry, so a later `cancel_message`
+  can only mean that), `BodyState.RAISED` (with `error_code`) otherwise. The default
+  (`strict_single_hook=False`) is `Capture.PRE_HOOK_ONLY` with no outcome ever recorded --
+  despite the strong hook surface, still opt-in, because pinned 1.52.x's retry mechanism
+  (`AfterToolCallEvent.retry`) genuinely can discard an already-recorded outcome, and a
+  tool-originated interrupt skips `AfterToolCallEvent` entirely; both are documented as strict-
+  mode residuals in the module docstring rather than silently promised away.
 
 ## [0.9.0] — 2026-08-31
 
