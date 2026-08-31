@@ -348,6 +348,13 @@ All notable changes to attenu-guard are documented here. The format follows
   `asyncio.CancelledError`, re-raised) are both genuinely observed. The handoff tool
   (`_guarded_handoff`) mints the child via `parent.delegate(...)`, which never calls
   `guard.check()` -- unaffected, on any schema version, same as the delegation tool above.
+- Execution binding wired into `adapters.smolagents`, same terms: `Capture.WRAPPER_SYNC` from
+  `GuardedTool.forward()`, which calls the inner tool (`self.inner(*args, **kwargs)`) itself --
+  smolagents only ever calls `forward` synchronously, so there is no async variant to wire.
+  `_freeze()` snapshot of `{"args": [...], "kwargs": {...}}`, taken before the inner tool runs.
+  `BodyState.RAISED` (with `error_code`) is genuinely observed -- smolagents does not swallow a
+  tool's exception before `forward`'s own caller sees it. `DelegatedAgent.mint()` mints the
+  child via `parent_guard.delegate(...)`, which never calls `guard.check()` -- unaffected.
 
 ## [0.9.0] — 2026-08-31
 

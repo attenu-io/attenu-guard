@@ -39,6 +39,7 @@ from attenu_guard import (  # noqa: E402
     ReasonCode,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # The adapter lives under examples/, which is not an installed package.
 
@@ -567,3 +568,126 @@ def test_on_denied_return_mode_hands_the_reason_back_as_tool_output():
     assert isinstance(out, str)
     assert ReasonCode.SCOPE_NOT_GRANTED in out
     assert ledger.effects == []
+
+
+# ===========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# GuardedTool.forward() calls the inner tool itself, exactly like
+# adapters/langgraph.py's reference wiring, so WRAPPER_SYNC is a genuine
+# observation with no cross-hook correlation of any kind.
+# ===========================================================================
+SINGLE_READ_SCRIPT = [
+    ("crm_query", {"rows": 10}),
+    ("final_answer", {"answer": "done"}),
+]
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    ledger = Ledger()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    root, manager, delegated, _ref = build_stack(ledger, sub_script=SINGLE_READ_SCRIPT, root=root)
+    manager.run("Prepare the Q3 pipeline report.")
+
+    child = delegated.child_guards[-1]
+    entries = child.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.smolagents"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert child.complete()
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    ledger = Ledger()
+
+    class BoomTool(Tool):
+        name = "crm_query"
+        description = "Raises instead of returning."
+        inputs = {"rows": {"type": "integer", "description": "n"}}
+        output_type = "string"
+
+        def forward(self, rows: int) -> str:
+            raise ValueError("boom")
+
+    ref = GuardRef()
+    tools = guard_tools(ref, {BoomTool(): "crm.read"},
+                        context_fns={"crm_query": lambda rows: {"rows": rows}})
+    summarizer = ToolCallingAgent(tools=tools, model=ScriptedModel(SINGLE_READ_SCRIPT),
+                                  name="summarizer", description="d", max_steps=6, verbosity_level=QUIET)
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    delegated = DelegatedAgent(summarizer, parent_guard=root, authority=SUMMARIZER_AUTHORITY, guard_ref=ref)
+    manager = ToolCallingAgent(
+        tools=[],
+        model=ScriptedModel([
+            ("summarizer", {"task": "go"}),
+            ("final_answer", {"answer": "done"}),
+        ]),
+        managed_agents=[delegated], max_steps=6, verbosity_level=QUIET,
+    )
+    manager.run("go")
+
+    child = delegated.child_guards[-1]
+    entries = child.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    ledger = Ledger()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    root, manager, delegated, _ref = build_stack(ledger, root=root)  # POISONED_SCRIPT (default)
+    manager.run("Prepare the Q3 pipeline report.")
+
+    assert "crm_export" not in ledger.names()
+    child = delegated.child_guards[-1]
+    entries = child.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_export"] == []
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    allow_call_ids = {e["call_id"] for e in entries if e["event"] == "allow"}
+    assert outcomes and all(o["call_id"] in allow_call_ids for o in outcomes)
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    ledger = Ledger()
+    root, manager, delegated, _ref = build_stack(ledger, sub_script=SINGLE_READ_SCRIPT)  # v1, default
+    manager.run("Prepare the Q3 pipeline report.")
+
+    child = delegated.child_guards[-1]
+    entries = child.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_never_gets_capture_or_an_outcome():
+    """`parent_guard.delegate(...)` never calls guard.check() -- no Decision/call_id exists to
+    bind an outcome to, regardless of schema version."""
+    ledger = Ledger()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    root, manager, delegated, _ref = build_stack(ledger, sub_script=SINGLE_READ_SCRIPT, root=root)
+    manager.run("Prepare the Q3 pipeline report.")
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow" and e.get("tool") == "summarizer"] == []
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    from attenu_guard.adapters.smolagents import _snapshot_params
+
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live_kwargs = {"x": AliasingList([1])}
+    snapshot = _snapshot_params((), live_kwargs)
+
+    assert snapshot["kwargs"]["x"] is not live_kwargs["x"], "the snapshot aliased the live container"
+    live_kwargs["x"].append(2)
+    assert snapshot["kwargs"]["x"] == [1], "mutating the live container changed the snapshot"

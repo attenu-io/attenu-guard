@@ -68,14 +68,30 @@ rather hand the model the denial as ordinary tool output.
 
 This module imports `smolagents` (it subclasses `Tool`), but nothing from
 `attenu_guard` beyond the public API — no library changes are needed.
+
+Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `GuardedTool.
+forward()` calls the inner tool itself (`self.inner(*args, **kwargs)`), exactly like
+`adapters.langgraph`'s reference wiring, so `Capture.WRAPPER_SYNC` is a genuine observation --
+smolagents only ever calls `forward` synchronously (`Tool.__call__`), so there is no async
+variant to wire. `authorized_params`/`invoked_params` are one immutable snapshot
+(`_freeze()`, never a copy protocol -- see its own docstring) of `{"args": [...], "kwargs":
+{...}}`, taken BEFORE the inner tool runs and reused unchanged for both. `BodyState.RAISED`
+(with `error_code`) is genuinely observed -- smolagents does not swallow a tool's exception
+before `forward`'s own caller sees it; `execute_tool_call` re-raises it as
+`AgentToolExecutionError`, which propagates straight through this wrapper. `DelegatedAgent.
+mint()` mints the child via `parent_guard.delegate(...)`, which never calls `guard.check()` at
+all -- there is no `Decision`/`call_id` to bind an outcome to, so delegation is unaffected by
+any of this. On `schema_version=1` (the default), nothing here changes at all.
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
 from smolagents import Tool
 
-from attenu_guard import AuthorityDenied, Guard
+from attenu_guard import AuthorityDenied, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
     "GuardRef",
@@ -84,6 +100,46 @@ __all__ = [
     "guard_tools",
     "DelegatedAgent",
 ]
+
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.GuardedTool.forward",
+}
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or smolagents itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(args, kwargs) -> Any:
+    """An immutable snapshot of the call's arguments, taken BEFORE the inner tool runs and
+    reused for both `authorized_params` and `invoked_params`."""
+    return _freeze({"args": list(args), "kwargs": dict(kwargs)})
 
 
 class UnboundGuard(RuntimeError):
@@ -219,16 +275,34 @@ class GuardedTool(Tool):
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         guard = _resolve(self.guard)
         context: Mapping = self.context_fn(*args, **kwargs) if self.context_fn else {}
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(args, kwargs) if v2 else None
+        extra = (
+            dict(capture=Capture.WRAPPER_SYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(self.scope, context=context,
                                metered=self.metered, tool=self.name,
-                               disposition=self.disposition)
+                               disposition=self.disposition, **extra)
         if not decision:
             if self.on_denied == "return":
                 return f"AUTHORITY DENIED: {decision.explain()}"
             raise AuthorityDenied(decision)
         # Sanitization/coercion already happened in our own `Tool.__call__`;
         # call the inner tool plainly so it is not applied twice.
-        return self.inner(*args, **kwargs)
+        if not v2:
+            return self.inner(*args, **kwargs)
+        start = time.monotonic()
+        try:
+            result = self.inner(*args, **kwargs)
+        except Exception as exc:
+            guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                 error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(decision.call_id, BodyState.RETURNED,
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"GuardedTool(name={self.name!r}, scope={self.scope!r})"
