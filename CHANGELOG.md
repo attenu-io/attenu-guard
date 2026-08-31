@@ -429,6 +429,22 @@ All notable changes to attenu-guard are documented here. The format follows
   SAME path via its own `ToolPolicy(scope=...)`, so a delegation tool call gets exactly the same
   capture/outcome treatment as any other allowed call; only the internal
   `self._registry.delegate(...)` mint step adds no second, separate check/outcome of its own.
+- Execution binding wired into `adapters.a2a` (the A2A protocol): `Capture.WRAPPER_SYNC`/
+  `Capture.WRAPPER_ASYNC` from `guarded_tool()`'s sync/async wrapper, which calls `fn(*args,
+  **kwargs)`/awaits it itself, same shape as `adapters.langgraph`'s reference wiring -- despite
+  being grouped with the other hook-surface adapters up front, pinned-source inspection showed
+  this is a genuine wrapper, not a hook, so no mode split was needed. `_freeze()` snapshot of
+  `{"args": ..., "kwargs": ...}`, taken at authorization time before the call. `BodyState.RAISED`
+  is a real raised Python exception (`fn` is called directly, nothing in this module's own path
+  catches it first). `asyncio.CancelledError` on the async wrapper's own `await` is
+  `BodyState.ABANDONED`, still re-raised. The separate delegation/hop machinery
+  (`DelegationInterceptor`/`delegating_guard_for` client-side, `GuardedAgentExecutor` server-side)
+  is a cross-process protocol boundary that never calls `guard.check()` and stays unaffected --
+  verified directly, not assumed, after the ag2/agent_framework rounds' reminder that "delegation
+  is unaffected" needs checking per framework, not inherited. `guarded_tool()`'s internal
+  `_check()` now calls `guard.check()` directly (raising `AuthorityDenied(decision)` itself on a
+  deny) instead of the old `guard.enforce()`, which discarded the `Decision` and its `call_id`;
+  behaviourally identical on `schema_version=1`.
 
 ## [0.9.0] — 2026-08-31
 

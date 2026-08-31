@@ -128,9 +128,31 @@ Status List (draft {{verify}} step 7 is out of scope for the wire format), so a 
 in the caller's process after it was minted still verifies until it expires. What IS enforced
 server-side: an EXPIRED token is refused, and `revocation_check=` is the seam where a
 deployment plugs its own status list or revocation feed. Keep TTLs short.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`)
+------------------------------------------------------------------------------
+`guarded_tool()` calls the wrapped tool itself (`fn(*args, **kwargs)`/`await fn(*args,
+**kwargs)`), exactly like `adapters.langgraph`'s reference wiring, so `Capture.WRAPPER_SYNC`/
+`WRAPPER_ASYNC` is a genuine observation -- unlike the delegation/hop machinery above, which is
+a cross-PROCESS protocol boundary this file has no visibility into a "body" for at all.
+`authorized_params`/`invoked_params` are one immutable snapshot (`_freeze()`, never a copy
+protocol -- see its own docstring) of `{"args": [...], "kwargs": {...}}`, taken BEFORE `fn` runs
+and reused unchanged for both. `BodyState.RAISED` (with `error_code`) is genuinely observed on
+both paths -- this wrapper calls `fn` directly, so an exception it raises propagates straight
+through. `asyncio.CancelledError` on the async path is `BodyState.ABANDONED`, still re-raised.
+
+Neither half of the protocol boundary itself is affected: the CLIENT's `DelegationInterceptor`
+mints the remote agent's Guard via `parent.delegate(...)`, and the SERVER's
+`GuardedAgentExecutor` mints its own served Guard via `leaf.meet(requested)` -- neither calls
+`guard.check()` at all, so there is no `Decision`/`call_id` on either side of the hop to bind an
+outcome to. On `schema_version=1` (the default), nothing in `guarded_tool()` changes at all --
+`capture`/`adapter`/`authorized_params` are never passed to `check()`, and `record_outcome()` is
+never called; it keeps calling `guard.enforce()`, byte-and-type identical to before this release.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextvars
 import functools
 import hashlib
@@ -143,8 +165,8 @@ from a2a.client.interceptors import ClientCallInterceptor
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.types.a2a_pb2 import AgentExtension, Message, Role, SendMessageRequest
 
-from attenu_guard import Authority, AuthorityError, Guard, evidence, wire
-from attenu_guard.reasons import Disposition
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard, evidence, wire, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition
 
 __all__ = [
     "EXTENSION_URI",
@@ -444,35 +466,127 @@ def require_guard() -> Guard:
     return guard
 
 
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.guarded_tool",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body later mutates the original in place. Containers are always
+    rebuilt from scratch as fresh builtins (dict/list, recursively); only already-immutable leaf
+    types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is -- sharing an immutable value
+    carries no aliasing risk regardless of what protocol it does or does not implement. Everything
+    else becomes its `repr()` -- a brand-new, independent string -- rather than being handed
+    through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(args, kwargs) -> Any:
+    """An immutable snapshot of the call's arguments, taken BEFORE the wrapped tool runs and
+    reused for both `authorized_params` and `invoked_params`."""
+    return _freeze({"args": list(args), "kwargs": dict(kwargs)})
+
+
 def guarded_tool(fn: Callable, *, scope: str,
                  context_for: "Callable[..., Mapping[str, Any]] | None" = None,
-                 metered: bool = False, disposition: "str | None" = None,
-                 tool: "str | None" = None) -> Callable:
+                 metered: bool = False, disposition: str | None = None,
+                 tool: str | None = None) -> Callable:
     """Wrap a remote agent's tool so the request's permissions are checked BEFORE the body.
 
-    Works on sync and async callables. On a denial it raises `AuthorityDenied` (from
-    `Guard.enforce`) — the remote agent's own framework decides whether that becomes a tool
-    error the model can react to or an aborted run; both keep the body unrun.
+    Works on sync and async callables. On a denial it raises `AuthorityDenied` — the remote
+    agent's own framework decides whether that becomes a tool error the model can react to or
+    an aborted run; both keep the body unrun.
     """
     name = tool or getattr(fn, "__name__", "tool")
 
-    def _check(args, kwargs) -> None:
+    def _check(args, kwargs, *, capture: str) -> "tuple[Guard, Any, Any]":
+        """Raise `AuthorityDenied` on denial; else return `(guard, call_id_or_None,
+        snapshot_or_None)` -- the last two set only for an ALLOWED, v2 check()."""
         guard = require_guard()
         ctx = dict(context_for(*args, **kwargs)) if context_for else {}
-        guard.enforce(scope, context=ctx, metered=metered, tool=name, disposition=disposition)
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(args, kwargs) if v2 else None
+        extra = (
+            dict(capture=capture, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
+        decision = guard.check(scope, context=ctx, metered=metered, tool=name,
+                               disposition=disposition, **extra)
+        if not decision:
+            raise AuthorityDenied(decision)
+        return guard, (decision.call_id if v2 else None), snapshot
 
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def async_wrapper(*args, **kwargs):
-            _check(args, kwargs)
-            return await fn(*args, **kwargs)
+            guard, call_id, snapshot = _check(args, kwargs, capture=Capture.WRAPPER_ASYNC)
+            if call_id is None:
+                return await fn(*args, **kwargs)
+            start = time.monotonic()
+            try:
+                result = await fn(*args, **kwargs)
+            except asyncio.CancelledError:
+                # The wrapper stopped observing while the body may still run -- `abandoned`,
+                # not `raised`; still re-raised so cancellation propagates normally.
+                guard.record_outcome(call_id, BodyState.ABANDONED,
+                                     invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+                raise
+            except Exception as exc:
+                guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                     invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+                raise
+            guard.record_outcome(call_id, _body_state_for(result),
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            return result
 
         return async_wrapper
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        _check(args, kwargs)
-        return fn(*args, **kwargs)
+        guard, call_id, snapshot = _check(args, kwargs, capture=Capture.WRAPPER_SYNC)
+        if call_id is None:
+            return fn(*args, **kwargs)
+        start = time.monotonic()
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     return wrapper
 
@@ -481,7 +595,7 @@ def guarded_tool(fn: Callable, *, scope: str,
 class _Denial:
     error: str
     detail: str
-    disposition: "str | None" = None
+    disposition: str | None = None
 
     def to_dict(self, agent_id: str) -> dict:
         out = {"error": self.error, "agent": agent_id, "detail": self.detail,

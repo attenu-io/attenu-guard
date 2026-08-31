@@ -30,12 +30,14 @@ pytest.importorskip("a2a")
 from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
+    AuthorityDenied,
     EgressRank,
     Guard,
     ReasonCode,
     RowLimit,
     evidence,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # The upstream surface this adapter stands on, pinned so the weekly unpinned CI job flags the
 # day A2A moves it.
@@ -459,3 +461,186 @@ def _send_raw_chain(tokens):
     request.message.extensions.append(dg_a2a.EXTENSION_URI)
     request.message.metadata[dg_a2a.EXTENSION_URI] = {"v": 1, "chain": list(tokens)}
     return hop, asyncio.run(hop._send(request))
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# guarded_tool() calls the wrapped tool itself (fn(*args, **kwargs) /
+# await fn(*args, **kwargs)), exactly like adapters/langgraph.py's
+# reference wiring, so WRAPPER_SYNC/WRAPPER_ASYNC is a genuine observation
+# with no cross-hook correlation of any kind.
+# ==========================================================================
+def _bind_v2_guard(authority=None):
+    guard = Guard.issue(
+        "summarizer",
+        authority or Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900),
+        task="summarize", schema_version=2,
+    )
+    token = dg_a2a._CURRENT_GUARD.set(guard)
+    return guard, token
+
+
+def test_v2_allowed_sync_call_records_a_returned_outcome():
+    guard, token = _bind_v2_guard()
+    try:
+        def crm_query(rows: int) -> str:
+            return f"{rows} rows"
+
+        tool = dg_a2a.guarded_tool(crm_query, scope="crm.read",
+                                   context_for=lambda rows: {"rows": rows})
+        assert tool(rows=10) == "10 rows"
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    entries = guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.a2a"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert guard.complete()
+
+
+def test_v2_allowed_async_call_records_a_returned_outcome_wrapper_async():
+    guard, token = _bind_v2_guard()
+    try:
+        async def crm_query(rows: int) -> str:
+            return f"{rows} rows"
+
+        tool = dg_a2a.guarded_tool(crm_query, scope="crm.read",
+                                   context_for=lambda rows: {"rows": rows})
+        assert asyncio.run(tool(rows=10)) == "10 rows"
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    entries = guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    guard, token = _bind_v2_guard()
+    try:
+        def crm_query(rows: int) -> str:
+            raise ValueError("boom")
+
+        tool = dg_a2a.guarded_tool(crm_query, scope="crm.read",
+                                   context_for=lambda rows: {"rows": rows})
+        with pytest.raises(ValueError):
+            tool(rows=10)
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    entries = guard.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    guard, token = _bind_v2_guard()  # crm.read only
+    reached = []
+    try:
+        def crm_export(destination: str) -> str:
+            reached.append(destination)
+            return "exported"
+
+        tool = dg_a2a.guarded_tool(crm_export, scope="crm.export",
+                                   context_for=lambda destination: {"egress": "any"})
+        with pytest.raises(AuthorityDenied):
+            tool(destination="attacker.example")
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    assert reached == []
+    entries = guard.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    guard = Guard.issue("summarizer", Authority(scopes={"crm.read"}, ttl=900), task="t")  # v1
+    token = dg_a2a._CURRENT_GUARD.set(guard)
+    try:
+        def crm_query(rows: int) -> str:
+            return f"{rows} rows"
+
+        tool = dg_a2a.guarded_tool(crm_query, scope="crm.read",
+                                   context_for=lambda rows: {"rows": rows})
+        tool(rows=10)
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    entries = guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    guard, token = _bind_v2_guard()
+    try:
+        async def hangs(rows: int) -> str:
+            await asyncio.sleep(3600)
+            return "never"
+
+        tool = dg_a2a.guarded_tool(hangs, scope="crm.read",
+                                   context_for=lambda rows: {"rows": rows})
+
+        async def scenario():
+            task = asyncio.ensure_future(tool(rows=10))
+            await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+    finally:
+        dg_a2a._CURRENT_GUARD.reset(token)
+
+    entries = guard.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_v2_delegation_hop_never_gets_capture_or_an_outcome():
+    """Neither half of the protocol hop calls guard.check() -- the CLIENT side
+    (delegating_guard_for -> parent.delegate(...)) and the SERVER side
+    (GuardedAgentExecutor._authorize -> leaf.meet(requested), exercised end to end by every
+    other test in this file via demo.run_hop()) both mint through Guard.delegate()/.meet(),
+    never through check() -- so on a v2 chain, minting the hop leaves no allow/outcome at all,
+    only the tool calls guarded_tool() actually wraps get either."""
+    parent = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    card = type("Card", (), {"name": "summariser"})()
+
+    resolve = dg_a2a.delegating_guard_for(
+        parent, authority_for=lambda c, t: demo.SUMMARISER_REQUEST,
+        task_for=lambda c, r: "summarise Q3 pipeline",
+    )
+    child = resolve(card, None)
+    assert child is not None
+
+    entries = parent.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+    assert any(e["event"] == "spawn" for e in entries)  # the mint itself IS recorded, just not as a check()
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live_kwargs = {"x": AliasingList([1])}
+    snapshot = dg_a2a._snapshot_params((), live_kwargs)
+
+    assert snapshot["kwargs"]["x"] is not live_kwargs["x"], "the snapshot aliased the live container"
+    live_kwargs["x"].append(2)
+    assert snapshot["kwargs"]["x"] == [1], "mutating the live container changed the snapshot"
