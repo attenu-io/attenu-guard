@@ -1003,16 +1003,20 @@ def test_zero_argument_tool_call_still_correlates_and_records_an_outcome(tools):
 
 def test_snapshot_freeze_never_shares_a_mutable_container_on_deepcopy_failure():
     """Codex review finding 7: on ANY deepcopy failure deep in a nested structure, the snapshot
-    must never fall back to sharing the live, mutable container -- only reprs the unclonable
-    leaf, and rebuilds every dict/list around it fresh."""
+    must never fall back to sharing the live, mutable container -- the unclonable leaf becomes
+    the shared sanitizer's UNSUPPORTED marker (re-gate correction: it used to become a repr()
+    string, which both executed the leaf's own __repr__ and risked colliding with a real
+    string value -- see attenu_guard.adapters._snapshot's own module docstring), and every
+    dict/list around it is rebuilt fresh regardless."""
     import threading
+    from attenu_guard.adapters._snapshot import UNSUPPORTED
     unclonable = threading.Lock()
     live = {"rows": 10, "nested": {"unclonable": unclonable, "list": [1, 2, 3]}}
 
     snapshot = dg_crewai._snapshot_params(live)
 
     assert snapshot["rows"] == 10
-    assert isinstance(snapshot["nested"]["unclonable"], str)  # repr'd, not the live lock object
+    assert snapshot["nested"]["unclonable"] is UNSUPPORTED  # repr'd, not the live lock object
     live["nested"]["list"].append(999)
     live["nested"]["new_key"] = "mutated after snapshot"
     assert snapshot["nested"]["list"] == [1, 2, 3], "the snapshot shared a mutable list"

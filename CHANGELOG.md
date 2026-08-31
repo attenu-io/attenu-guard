@@ -46,8 +46,8 @@ All notable changes to attenu-guard are documented here. The format follows
   that genuinely imports `attenu_guard.adapters.langgraph` itself) gained a
   `TestSnapshotHardening` class: the never-aliases-a-custom-`__deepcopy__` regression test every
   other adapter's own test suite already has, a mutation-does-not-cause-a-params-mismatch test
-  through the real `guard_node` wrapper, and a circular-container test pinning the new
-  `"<circular>"` behaviour (see the consolidation entry's own correction of "never raises").
+  through the real `guard_node` wrapper, and a circular-container test pinning the shared
+  sanitizer's `UNSUPPORTED` marker (see the consolidation entry's own corrections below).
 - `adapters.crewai`: outcome correlation was keyed by a thread-local slot (one per OS thread,
   not per dispatch); two async tool calls interleaved on one thread (CrewAI's own async
   executor can do this) could let a later call's `before` hook overwrite an earlier call's still-
@@ -171,6 +171,40 @@ All notable changes to attenu-guard are documented here. The format follows
   or any copy protocol, on anything: containers (`dict`/`list`/`tuple`/`set`/`frozenset`) are
   always rebuilt from scratch as fresh builtins; only already-immutable leaf types
   (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is; everything else becomes its `repr()`.
+  **Re-gate correction (HIGH, symmetry with the TS adapter's own re-gate fix):** "everything else
+  becomes its `repr()`" (the line above, as it read before this correction) was itself an
+  attacker-controlled-code-execution defect, not a fix -- `repr(value)` invokes the value's own
+  `__repr__`, unconditionally, BEFORE authorization is ever decided; reproduced directly: a
+  hostile class's `__repr__` override genuinely executed during `freeze()`. Its own
+  `except Exception:` fallback was no better: `f"<unrepresentable {type(value).__name__}>"` is a
+  JSON-representable STRING, and a real dict value that happens to equal that exact literal
+  freezes to itself unchanged (strings pass through verbatim) -- producing the IDENTICAL frozen
+  shape, and therefore the identical `params_c14n_v1` commitment, as the exotic value it was
+  meant to stand in for. Reproduced directly: `freeze({"arg": Explodes()})` (a class whose
+  `__repr__` raises) and `freeze({"arg": "<unrepresentable Explodes>"})` (an ordinary string
+  argument) produced the exact same output. Audited `"<circular>"` (the genuine-cycle sentinel
+  above) for the identical collision class rather than leaving it unexamined -- it has the same
+  problem. Fixed the same way the TS adapter's own `freeze()` was: anything not
+  `None`/`str`/`int`/`float`/`bool` and not a `Mapping`/list-family container becomes
+  `UNSUPPORTED`, a module-private sentinel OBJECT (never a string, so it cannot collide with any
+  real call argument by construction) -- without calling `repr()`, `str()`, or any other
+  protocol. `bytes` now routes to `UNSUPPORTED` too, deliberately: it was already outside the
+  `params_c14n_v1` domain regardless (`canonical.dumps` has no `bytes` case, so it already raised
+  `UnsupportedTypeError` for it), so this changes nothing about the final commit outcome, only
+  stops the raw snapshot from retaining a live `bytes` reference for no purpose -- checked
+  directly that no shipped adapter inspects the raw snapshot for anything besides handing it to
+  `params.commit()`. The whole container walk now runs inside one `try`/`except`, degrading any
+  reflection/iteration failure to `UNSUPPORTED` too, rather than letting an exception propagate
+  out of a snapshot taken before authorization. A genuine cycle's own leaf value is `UNSUPPORTED`
+  now as well, not `"<circular>"` -- the same collision class, the same fix. `UNSUPPORTED`
+  anywhere in the frozen tree already degrades the whole `params_c14n_v1` commitment to
+  `params_hash_reason: "unsupported"` via `canonical.dumps`'s own exact-type dispatch (no case
+  for `UNSUPPORTED`'s type) -- no separate wiring needed; verified directly. Six adapter test
+  suites (`autogen`, `crewai`, `google_adk`, `haystack`, `openai_agents`, `pydantic_ai`) had a
+  test asserting the unclonable-leaf fallback was a `str` -- updated to assert it `is
+  UNSUPPORTED` instead, the representation having deliberately changed; every adapter's own
+  never-aliases-a-custom-`__deepcopy__` test (a DIFFERENT invariant, unaffected by this fix)
+  still passes unchanged.
 - `adapters.google_adk`: `after_tool_callback` now checks `tool.is_long_running`/
   `tool._defers_response` -- the SAME flags ADK's own `functions.py` checks -- before deciding
   `RETURNED` vs `BodyState.DEFERRED`; a long-running/deferring tool's placeholder response was

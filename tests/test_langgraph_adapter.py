@@ -522,21 +522,107 @@ class TestSnapshotHardening(unittest.TestCase):
 
     def test_snapshot_params_does_not_raise_on_a_circular_container(self):
         # Finding 2's own correction: the shared sanitizer's PATH-ACTIVE cycle tracking means a
-        # self-referential argument is reported "<circular>" (a genuinely JSON-hashable string)
-        # instead of raising RecursionError or silently producing an unserializable self-
-        # referential dict. Verified directly (not assumed): stdlib copy.deepcopy has its own
-        # memo-based cycle handling, so raw deepcopy(circular) succeeds and even produces a
-        # correctly self-referential COPY -- meaning the OLD raw-deepcopy code in this exact
-        # file would NOT have raised on this input, but every OTHER adapter's pre-consolidation
-        # hand-rolled `_freeze()` (never routed through deepcopy at all) genuinely DID raise
-        # RecursionError on it -- what the CHANGELOG's old "never raises" claim was wrong about.
-        # This test pins the shared sanitizer's now-correct, now-consistent behaviour here too.
+        # self-referential argument is reported as the sanitizer's UNSUPPORTED sentinel instead
+        # of raising RecursionError or silently producing an unserializable self-referential
+        # dict. Verified directly (not assumed): stdlib copy.deepcopy has its own memo-based
+        # cycle handling, so raw deepcopy(circular) succeeds and even produces a correctly
+        # self-referential COPY -- meaning the OLD raw-deepcopy code in this exact file would
+        # NOT have raised on this input, but every OTHER adapter's pre-consolidation hand-rolled
+        # `_freeze()` (never routed through deepcopy at all) genuinely DID raise RecursionError
+        # on it -- what the CHANGELOG's old "never raises" claim was wrong about. This test pins
+        # the shared sanitizer's now-correct, now-consistent behaviour here too.
+        #
+        # Re-gate correction: this used to assert the literal string "<circular>" -- itself a
+        # commitment-collision defect (a plain dict holding that exact string would freeze
+        # identically to a genuine cycle). The sanitizer's UNSUPPORTED sentinel replaced it; see
+        # attenu_guard.adapters._snapshot's own module docstring.
+        from attenu_guard.adapters._snapshot import UNSUPPORTED
         from attenu_guard.adapters.langgraph import _snapshot_params
 
         circular = {"note": "before"}
         circular["self"] = circular
         snapshot = _snapshot_params((circular,), {})
-        self.assertEqual(snapshot["args"][0]["self"], "<circular>")
+        self.assertIs(snapshot["args"][0]["self"], UNSUPPORTED)
+
+    def test_freeze_never_invokes_a_hostile_repr(self):
+        # Re-gate finding (HIGH, symmetry with the TS adapter's own re-gate fix): the shared
+        # sanitizer used to call repr(value) on anything it could not rebuild as a container --
+        # a hostile class's own __repr__ override ran unconditionally, BEFORE authorization was
+        # ever decided. Reproduced directly before this fix: a class whose __repr__ incremented
+        # a counter and returned a plausible string had that __repr__ genuinely execute.
+        from attenu_guard.adapters._snapshot import UNSUPPORTED, freeze
+
+        calls = 0
+
+        class Hostile:
+            def __repr__(self):
+                nonlocal calls
+                calls += 1
+                return "leaked"
+
+        frozen = freeze({"arg": Hostile()})
+
+        self.assertEqual(calls, 0)
+        self.assertIs(frozen["arg"], UNSUPPORTED)
+
+    def test_freeze_does_not_let_a_hostile_object_collide_with_the_old_sentinel_string(self):
+        # Re-gate finding (HIGH): the pre-fix except-fallback was the literal string
+        # f"<unrepresentable {type(value).__name__}>" -- a real dict value that happened to
+        # equal that exact string froze to itself unchanged, producing the IDENTICAL frozen
+        # shape (and therefore commitment) as the exotic value it was meant to stand in for.
+        # Reproduced directly before this fix: freeze({"arg": Explodes()}) and
+        # freeze({"arg": "<unrepresentable Explodes>"}) produced the exact same output. Both are
+        # frozen here and asserted NOT to collide any more.
+        from attenu_guard.adapters._snapshot import freeze
+
+        class Explodes:
+            def __repr__(self):
+                raise RuntimeError("boom")
+
+        frozen_hostile = freeze({"arg": Explodes()})
+        frozen_literal = freeze({"arg": "<unrepresentable Explodes>"})
+        self.assertNotEqual(frozen_hostile["arg"], frozen_literal["arg"])
+        self.assertEqual(frozen_literal["arg"], "<unrepresentable Explodes>")  # a real string stays a real string
+
+    def test_freeze_routes_bytes_to_the_same_marker(self):
+        # bytes is outside the params_c14n_v1 JSON domain regardless -- canonical.dumps already
+        # rejects it (no `bytes` case in its exact-type dispatch) -- so this is a no-op for the
+        # final commit outcome; it only stops the raw snapshot from retaining a live bytes
+        # reference for no purpose. No shipped adapter inspects the raw snapshot for anything
+        # besides handing it to params.commit() (checked directly across every adapter module).
+        from attenu_guard.adapters._snapshot import UNSUPPORTED, freeze
+
+        frozen = freeze({"arg": b"raw bytes"})
+        self.assertIs(frozen["arg"], UNSUPPORTED)
+
+    def test_a_guarded_node_with_a_hostile_argument_still_authorizes_and_runs_but_commits_no_hash(self):
+        # End-to-end through the real guard_node wrapper -- the same shape as the TS adapter's
+        # own wrapper-level regression tests for this exact finding. Policy evaluation still
+        # fully controls whether the body runs; only the commitment is absent.
+        guard = _make_v2_tool_guard()
+        calls = 0
+
+        class Hostile:
+            def __repr__(self):
+                nonlocal calls
+                calls += 1
+                return "leaked"
+
+        @guard_node(guard, "crm.read", context_fn=lambda payload: {"rows": 1})
+        def summarize(payload):
+            return {"ok": True}
+
+        result = summarize(Hostile())
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(calls, 0)
+        entries = guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        self.assertNotIn("authorized_params_hash", allow)
+        self.assertEqual(allow["params_hash_reason"], "unsupported")
+        self.assertNotIn("invoked_params_hash", outcome)
+        self.assertEqual(outcome["params_hash_reason"], "unsupported")
 
 
 async def _await_it(coro):

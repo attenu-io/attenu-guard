@@ -752,13 +752,19 @@ class SnapshotFreezeTests(unittest.TestCase):
 
     def test_never_shares_a_mutable_container_on_deepcopy_failure(self):
         import threading
+
+        from attenu_guard.adapters._snapshot import UNSUPPORTED
         unclonable = threading.Lock()
         live = {"rows": 10, "nested": {"unclonable": unclonable, "list": [1, 2, 3]}}
 
         snapshot = dg_oa._snapshot_params(live)
 
         self.assertEqual(snapshot["rows"], 10)
-        self.assertIsInstance(snapshot["nested"]["unclonable"], str)
+        # Re-gate correction: the unclonable leaf used to become a repr() string -- that both
+        # executed the leaf's own __repr__ and risked colliding with a real string value (see
+        # attenu_guard.adapters._snapshot's own module docstring). It is now the shared
+        # sanitizer's UNSUPPORTED marker.
+        self.assertIs(snapshot["nested"]["unclonable"], UNSUPPORTED)
         live["nested"]["list"].append(999)
         live["nested"]["new_key"] = "mutated after snapshot"
         self.assertEqual(snapshot["nested"]["list"], [1, 2, 3])
