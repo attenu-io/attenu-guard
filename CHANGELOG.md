@@ -45,6 +45,12 @@ All notable changes to attenu-guard are documented here. The format follows
   -- there is no hook to record `ABANDONED` from); and `PluginManager`'s stop-at-first-non-None
   dispatch, where an earlier-registered THIRD-PARTY plugin overriding the result prevents this
   plugin's own callback -- and so its outcome close-out -- from ever running.
+- `adapters.haystack`: a delegation `ToolPolicy` that declares BOTH a real `scope` and
+  `delegates_to`/`grant` (unusual, but the dataclass allows it) calls `guard.check()` for itself
+  first, exactly like any other guarded tool -- but `_ToolGuard.scope()` discarded that
+  already-registered pending outcome when building the delegation's child scope, leaving the
+  call_id pending forever and wedging `complete()`. Now carried through unchanged; the existing
+  test only exercised `UNGUARDED` (`scope=None`) delegation, which never hit this branch.
 
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a

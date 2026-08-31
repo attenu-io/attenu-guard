@@ -655,3 +655,45 @@ def test_v2_delegation_tool_never_records_an_outcome():
     # and there are exactly as many outcomes as non-delegation allows (crm_query only)
     non_delegation_allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query"]
     assert len(outcomes) == len(non_delegation_allows)
+
+
+def test_v2_scoped_delegation_tool_still_records_its_own_outcome():
+    """Codex review (DO NOT MERGE, finding 4, critical): a delegation policy that ALSO declares a
+    real `scope` (unusual, but the dataclass allows `delegates_to`+`grant` together with a
+    non-None `scope`) DOES call guard.check() for itself first -- unlike the UNGUARDED case above
+    -- and a prior version of this file discarded that already-registered pending outcome when
+    building the delegation's own `with` scope, wedging complete() forever. The delegation tool's
+    own call_id must get an outcome, exactly like any other guarded tool."""
+    ops = demo.Ops()
+    researcher = Agent(
+        chat_generator=demo.ScriptedChatGenerator(demo.SMALL_READ),
+        tools=dg_hs.guard_tools(demo.build_tools(ops), demo.RESEARCHER_POLICIES),
+        system_prompt="Research.",
+    )
+    ask_tool = dg_hs.guard_tool(
+        AgentTool(agent=researcher, name="ask_researcher", description="Delegate research."),
+        # "crm.delegate" -- covered by COORDINATOR_AUTHORITY's "crm.*" -- stands in for a real
+        # app declaring that delegating to the researcher is itself a privileged act.
+        dg_hs.ToolPolicy(
+            "crm.delegate", delegates_to="researcher",
+            grant=dg_hs.Grant(demo.RESEARCHER_AUTHORITY),
+        ),
+    )
+    root = Guard.issue("coordinator", demo.COORDINATOR_AUTHORITY, task="root", schema_version=2)
+
+    with dg_hs.authority(root):
+        ask_tool.invoke(messages=[{"role": "user", "content": "Research Q3"}])
+
+    entries = root.audit_log().entries
+    delegate_allow = next(
+        e for e in entries if e["event"] == "allow" and e.get("tool") == "ask_researcher"
+    )
+    outcome = next(
+        (e for e in entries if e["event"] == "outcome" and e.get("call_id") == delegate_allow["call_id"]),
+        None,
+    )
+    assert outcome is not None, "the delegation tool's own call_id was left pending forever"
+    assert outcome["body_state"] == BodyState.RETURNED
+    # complete() must not be wedged by a dropped pending outcome
+    result = root.complete()
+    assert bool(result) is True

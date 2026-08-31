@@ -182,13 +182,35 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
+    container with the live object graph, so a later in-place mutation (by the tool body, or by
+    Haystack itself) cannot change what was already committed. `copy.deepcopy` alone is not
+    enough: on ANY failure deep in a nested structure, a naive `except: return dict(...)`
+    fallback keeps sharing whatever nested dicts/lists deepcopy did not reach. This never falls
+    back to a shared reference: dicts/lists are always rebuilt fresh (recursively), and a leaf
+    that cannot itself be deep-copied is replaced by its `repr()` -- a brand-new, immutable
+    string -- rather than shared as-is."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _snapshot_params(args: Mapping[str, Any]) -> Any:
     """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
     the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
-    try:
-        return copy.deepcopy(dict(args))
-    except Exception:
-        return dict(args)
+    return _freeze(dict(args))
 
 __all__ = [
     "Grant",
@@ -480,8 +502,13 @@ class _ToolGuard:
 
         if policy is not None and policy.delegates_to and policy.grant is not None:
             # Mint the child now: after the check passed, before the sub-agent starts. A
-            # delegation tool's own check (if any -- UNGUARDED delegation tools have none) is
-            # never bound to an outcome, so `pending` is dropped here.
+            # delegation tool with an UNGUARDED policy (scope=None -- the usual case; see
+            # `UNGUARDED`'s docstring) never called guard.check() above, so `pending` is already
+            # None here and there is nothing to bind. A delegation tool that ALSO declares a real
+            # `scope` (unusual, but the dataclass allows it) DID call guard.check() above and
+            # allocate a real call_id on the ledger -- `pending` must be carried through, not
+            # dropped, or that call_id is left pending forever (Codex review finding 4: a
+            # dropped, already-registered outcome wedges complete()).
             try:
                 child = guard.delegate(
                     policy.delegates_to,
@@ -495,7 +522,7 @@ class _ToolGuard:
                     ReasonCode.NO_AUTHORITY, message, tool=self.tool_name, disposition=Disposition.UNRESOLVED
                 )
                 self._refuse(_Refusal(message, self.tool_name, decision))
-            return authority(child), None
+            return authority(child), pending
         return _NullScope(), pending
 
     def _refuse(self, refusal: _Refusal) -> None:
