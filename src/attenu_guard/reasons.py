@@ -170,12 +170,17 @@ class Decision:
         return "denied: " + "; ".join(str(r) for r in self.reasons)
 
     def to_dict(self) -> dict:
-        return {
+        # call_id is included only when set (a schema_version=2 chain's check()/record_denial())
+        # — a v1 Decision's to_dict() shape stays byte-and-key IDENTICAL to every release before
+        # 0.9.0, never gaining a "call_id": None key it never had.
+        d = {
             "allowed": self.allowed,
             "reasons": [r.to_dict() for r in self.reasons],
             "determining_node": self.determining_node,
-            "call_id": self.call_id,
         }
+        if self.call_id is not None:
+            d["call_id"] = self.call_id
+        return d
 
     @classmethod
     def allow(cls, node: str | None = None) -> "Decision":

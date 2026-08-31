@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import threading
 import warnings
 from contextlib import contextmanager
@@ -150,9 +151,21 @@ class Guard:
         WHOLE chain into execution binding (call_id, capture/adapter, params commitments,
         `record_outcome()` — see the module docstring). A chain never mixes schema versions
         (docs/execution-binding spec section 9); the version is stated once, here, on the `root`
-        entry, and every Guard delegated from this one inherits it."""
+        entry, and every Guard delegated from this one inherits it.
+
+        `audit_overwrite=True` (silently replace an existing non-empty ledger at `audit_path`) is
+        REFUSED on a `schema_version=2` chain: the restart rule has no escape hatch on v2 — a v2
+        process restart must always open a NEW audit path, never overwrite an old one, so that a
+        pending call from before the restart stays truthfully unaccounted rather than vanishing
+        under a fresh chain at the same path. v1 keeps the flag exactly as before."""
         if schema_version not in (1, 2):
             raise ValueError(f"unsupported schema_version {schema_version!r}; expected 1 or 2")
+        if schema_version == 2 and audit_overwrite:
+            raise ValueError(
+                "audit_overwrite=True is not permitted on a schema_version=2 chain — the restart "
+                "rule has no escape hatch on v2 (docs/execution-binding spec section 1). Open a "
+                "new audit path for the new chain instead; v1 chains may still set "
+                "audit_overwrite=True.")
         chain = Chain(chain_id, max_depth=max_depth, max_fanout=max_fanout,
                       clock=clock or MonotonicClock())
         audit = AuditLog(audit_path, sinks=tuple(audit_sinks or ()), overwrite=audit_overwrite,
@@ -234,23 +247,35 @@ class Guard:
     def _is_v2(self) -> bool:
         return self.schema_version == 2
 
-    def complete(self) -> "CompletionResult":
-        """Mark this node's work FINISHED — one `done` audit event. Returns a `CompletionResult`
-        (bool-coercible, so `if guard.complete():` still reads naturally). On a `schema_version=2`
-        chain, refuses (returns a falsy `CompletionResult` carrying `.pending_call_ids`) while
-        this node has `allow`ed calls that have not yet reported an outcome — completing while a
-        call is still open would be a false claim that the node's work is finished. On a v1
-        chain, or once no calls are pending, marks complete and returns
-        `CompletionResult(True, ())`. Idempotent: `CompletionResult(False, ())` if already marked.
-        Purely a lifecycle marker — it does NOT change authority; revocation is the hard stop."""
-        if getattr(self._node, "complete", False):
-            return CompletionResult(False, ())
-        pending = self._chain.pending_for(self._node.node_id) if self._is_v2 else ()
-        if pending:
-            return CompletionResult(False, pending)
-        self._node.complete = True
-        self._append("done", chain_id=self.chain_id, node=self._node.node_id, agent=self._node.agent_id)
-        return CompletionResult(True, ())
+    def complete(self):
+        """Mark this node's work FINISHED — one `done` audit event.
+
+        On a `schema_version=2` chain, returns a `CompletionResult` (bool-coercible, so
+        `if guard.complete():` still reads naturally) and refuses — a falsy `CompletionResult`
+        carrying `.pending_call_ids` — while this node has `allow`ed calls that have not yet
+        reported an outcome; completing while a call is still open would be a false claim that
+        the node's work is finished. Idempotent: `CompletionResult(False, ())` if already marked.
+
+        On a `schema_version=1` chain (the default) this returns a plain `bool`, byte-and-type
+        IDENTICAL to every release before 0.9.0 — v1 never gained pending-call awareness, so
+        there is nothing new to report and no reason to change its return type.
+
+        The whole check-pending -> mark -> append sequence happens under ONE hold of the chain
+        lock, so a concurrent `check()` cannot register a new pending call in the gap between
+        this method's pending check and its `done` append (that race — `allow` -> `done` with the
+        call still pending — was reproducible before this fix). Purely a lifecycle marker either
+        way — it does NOT change authority; revocation is the hard stop."""
+        is_v2 = self._is_v2
+        with self._chain._lock:
+            if getattr(self._node, "complete", False):
+                return CompletionResult(False, ()) if is_v2 else False
+            pending = self._chain.pending_for(self._node.node_id) if is_v2 else ()
+            if pending:
+                return CompletionResult(False, pending)   # only reachable on v2 (v1's pending is always ())
+            self._node.complete = True
+            self._audit.append("done", self._seq.now(), chain_id=self.chain_id,
+                               node=self._node.node_id, agent=self._node.agent_id)
+        return CompletionResult(True, ()) if is_v2 else True
 
     # ---- delegation ----------------------------------------------------
     def delegate(self, agent_id: str, request: Authority, task: str) -> "Guard":
@@ -529,7 +554,14 @@ class Guard:
 
             # 4. commit (append) — a post-commit persistence failure raises CommittedAuditError;
             #    attach `.decision` (spec: "carries the committed entry and the decision") before
-            #    it propagates, and still register the pending call first (step 5).
+            #    it propagates, and still register the pending call first (step 5). ANY OTHER
+            #    exception here (e.g. a canonicalization failure while hashing the entry, inside
+            #    AuditLog.append()'s _hash() call, which runs BEFORE its commit point) is a
+            #    pre-commit failure exactly like the CSPRNG case above: meters are restored,
+            #    nothing is pending, and the exception is re-raised as-is (not swallowed into a
+            #    Decision — unlike CSPRNG exhaustion, a malformed context/authorized_params value
+            #    is the caller's error, and this library's convention elsewhere is to raise on
+            #    malformed input, not silently deny).
             try:
                 self._log_decision(decision, scope, tool, ctx, disposition, extra_fields=extra)
             except CommittedAuditError as exc:
@@ -538,22 +570,30 @@ class Guard:
                     self._chain.register_pending(nid, call_id)
                 exc.decision = decision_with_id
                 raise
+            except Exception:
+                if decision:
+                    for c in filled:
+                        self._chain.uncount_call(nid, getattr(c, "meter_key", "*"))
+                raise
 
             decision = self._attach_call_id(decision, call_id)
             # 5. register pending (allows only).
             if is_v2 and decision:
                 self._chain.register_pending(nid, call_id)
-            # 6. return the Decision — falls through to strike-policy handling below, then returns.
 
-        if not decision and self._strikes is not None and self._strikes.enabled and not self._chain.is_revoked(nid):
-            count = self._chain.record_strike(self._strikes.key(nid, scope))
-            if count >= self._strikes.n:
-                revoked = self._chain.revoke(nid)
-                kill_extra = self._pending_at_kill(revoked) if is_v2 else {}
-                self._append("kill", chain_id=self.chain_id, target=nid,
-                             reason="strike_policy", scope=scope, strikes=count,
-                             mode=self._strikes.mode, revoked=revoked, **kill_extra)
-        return decision
+            # Strike policy (pre-existing feature, unrelated to execution binding): also inside
+            # this same lock hold now, so its revoke()+pending_at_kill snapshot is atomic with
+            # everything else above (Codex review item 1) — a concurrent record_outcome() cannot
+            # resolve a call in the gap between the strike-triggered revocation and its snapshot.
+            if (not decision and self._strikes is not None and self._strikes.enabled
+                    and not self._chain.is_revoked(nid)):
+                count = self._chain.record_strike(self._strikes.key(nid, scope))
+                if count >= self._strikes.n:
+                    self._kill_atomically(lambda: self._chain.revoke(nid),
+                                         chain_id=self.chain_id, target=nid, reason="strike_policy",
+                                         scope=scope, strikes=count, mode=self._strikes.mode)
+            # 6. return the Decision.
+            return decision
 
     def enforce(self, scope: str, **kwargs) -> None:
         """`check()` and raise `AuthorityDenied(decision)` if not allowed.
@@ -640,19 +680,36 @@ class Guard:
                              "(Guard.issue(..., schema_version=2))")
         if body_state not in BodyState.ALL:
             raise ValueError(f"unknown body_state {body_state!r}; expected one of {sorted(BodyState.ALL)}")
-        if (error_code is not None) != (body_state == BodyState.RAISED):
-            raise ValueError("error_code is required exactly when body_state == BodyState.RAISED")
+        if body_state == BodyState.RAISED:
+            if not isinstance(error_code, str) or not error_code:
+                raise ValueError("error_code is required (a non-empty string) when "
+                                 "body_state == BodyState.RAISED")
+        elif error_code is not None:
+            raise ValueError("error_code is only permitted when body_state == BodyState.RAISED")
         if not isinstance(duration_ms, int) or isinstance(duration_ms, bool) or duration_ms < 0:
             raise ValueError(f"duration_ms must be a non-negative integer; got {duration_ms!r}")
         if receipt is not None:
             missing = [k for k in ("type", "ref", "digest") if k not in receipt]
             if missing:
                 raise ValueError(f"receipt is missing {missing}; expected type/ref/digest")
+            for k in ("type", "ref"):
+                if not isinstance(receipt[k], str) or not receipt[k]:
+                    raise ValueError(f"receipt[{k!r}] must be a non-empty string")
+            digest = receipt["digest"]
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("receipt['digest'] must be a lowercase-hex SHA-256 digest "
+                                 "(64 hex characters) — spec section 7")
 
         with self._chain._lock:
-            if not self._chain.mark_outcomed(call_id):
+            # Exactly one outcome per call_id, "enforced at append under the lock" (spec section
+            # 3): peek first (never two threads can be inside this `with` block at once, so the
+            # peek is race-free), but only COMMIT the outcomed/pending state AFTER the append
+            # actually reaches its commit point — see below. A pre-commit failure here (e.g. a
+            # canonicalization failure while hashing this entry) must leave call_id exactly as
+            # unresolved as before this call, so a corrected retry is still possible and
+            # `complete()` does not wrongly believe the call was accounted for.
+            if self._chain.is_outcomed(call_id):
                 raise DuplicateOutcomeError(f"call_id {call_id!r} already has a recorded outcome")
-            self._chain.resolve_pending(call_id)
             fields = dict(chain_id=self.chain_id, node=self._node.node_id, call_id=call_id,
                          body_state=body_state, duration_ms=duration_ms)
             if error_code is not None:
@@ -664,7 +721,20 @@ class Guard:
                 fields["params_hash_reason"] = preason
             if receipt is not None:
                 fields["receipt"] = dict(receipt)
-            return self._append("outcome", **fields)
+
+            try:
+                entry = self._audit.append("outcome", self._seq.now(), **fields)
+            except CommittedAuditError:
+                # post-commit: the outcome DID reach the in-memory chain; it is now safe (and
+                # correct) to mark it done and drop it from pending before the persistence
+                # failure propagates.
+                self._chain.mark_outcomed(call_id)
+                self._chain.resolve_pending(call_id)
+                raise
+            # success: commit the bookkeeping only now, never before.
+            self._chain.mark_outcomed(call_id)
+            self._chain.resolve_pending(call_id)
+            return entry
 
     @contextmanager
     def authorize(self, scope: str, **kwargs):
@@ -676,24 +746,31 @@ class Guard:
         yield
 
     # ---- chain controls ------------------------------------------------
-    def _pending_at_kill(self, revoked_nodes: list) -> dict:
-        """`{"pending_at_kill": [...]}` — the still-open call_ids across every node a kill
-        revoked, snapshotted (NOT cleared: a late `record_outcome()` after this kill is still
-        accepted — spec section 1). Only meaningful on v2 chains; called only when `_is_v2`."""
-        pending: set = set()
-        for nid in revoked_nodes:
-            pending.update(self._chain.pending_for(nid))
-        return {"pending_at_kill": sorted(pending)}
+    def _kill_atomically(self, revoke_fn, **kill_fields) -> list:
+        """Call `revoke_fn()` (a zero-arg callable performing the actual chain revocation) and
+        append the resulting `kill` entry — including the `pending_at_kill` snapshot on v2 — all
+        under ONE hold of the chain lock. Without this, a concurrent `record_outcome()` could
+        resolve a call in the gap between revocation and the snapshot, and the snapshot would
+        then miss a call that WAS genuinely pending at the instant of the kill (reproducible
+        before this fix). Shared by `revoke()`, `revoke_agent()`, and the strike-policy kill in
+        `check()`, so the atomicity guarantee lives in exactly one place."""
+        with self._chain._lock:
+            revoked = revoke_fn()
+            extra = {}
+            if self._is_v2:
+                pending: set = set()
+                for nid in revoked:
+                    pending.update(self._chain.pending_for(nid))
+                extra["pending_at_kill"] = sorted(pending)
+            self._audit.append("kill", self._seq.now(), revoked=revoked, **extra, **kill_fields)
+            return revoked
 
     def revoke(self, node_id: str | None = None) -> list:
         # Audit event stays "kill" (v0.1 wire vocabulary) — see the note in
         # delegate() about schema/agent-audit.schema.json and cli.py.
         target = node_id or self._node.node_id
-        revoked = self._chain.revoke(target)
-        extra = self._pending_at_kill(revoked) if self._is_v2 else {}
-        self._append("kill", chain_id=self.chain_id,
-                           target=target, revoked=revoked, **extra)
-        return revoked
+        return self._kill_atomically(lambda: self._chain.revoke(target),
+                                     chain_id=self.chain_id, target=target)
 
     def revoke_agent(self, agent_id: str) -> list:
         """Revoke an agent BY NAME, chain-wide: every node it holds is
@@ -702,11 +779,8 @@ class Guard:
         `revoke(node_id)` — when the intent is "this principal is done",
         because frameworks re-hand-off to the same agent freely and a fresh
         `delegate()` would otherwise mint it clean authority. One audit event."""
-        revoked = self._chain.revoke_agent(agent_id)
-        extra = self._pending_at_kill(revoked) if self._is_v2 else {}
-        self._append("kill", chain_id=self.chain_id,
-                           target=self._node.node_id, agent=agent_id, revoked=revoked, **extra)
-        return revoked
+        return self._kill_atomically(lambda: self._chain.revoke_agent(agent_id),
+                                     chain_id=self.chain_id, target=self._node.node_id, agent=agent_id)
 
     def would_delegate(self, agent_id: str, request: Authority) -> Decision:
         """Pure dry-run of `delegate()`'s structural preconditions (revoked

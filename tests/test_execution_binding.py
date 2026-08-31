@@ -25,6 +25,8 @@ from attenu_guard.guard import DuplicateOutcomeError
 from attenu_guard.reasons import Capture, BodyState, ReasonCode, CompletionResult
 from attenu_guard.wire import HS256TestSigner
 
+_HEX64 = "ab" * 32
+
 
 def _v2_root(**kwargs):
     return Guard.issue("orchestrator", Authority({"crm.read", "mail.send"}, [RowLimit(100)], ttl=3600),
@@ -146,9 +148,119 @@ class TestCallIdTransition(unittest.TestCase):
             self.assertNotIn("attempt", e)
 
 
+class TestV1Unchanged(unittest.TestCase):
+    """Codex review, item 8: a v1 chain must be byte-and-type unchanged by 0.9.0."""
+
+    def test_complete_returns_a_plain_bool_on_v1(self):
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=60))   # schema_version=1
+        result = g.complete()
+        self.assertIs(type(result), bool)
+        self.assertIs(result, True)
+        self.assertIs(g.complete(), False)
+
+    def test_decision_to_dict_has_no_call_id_key_on_v1(self):
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=60))
+        d = g.check("crm.read")
+        self.assertNotIn("call_id", d.to_dict())
+
+    def test_decision_to_dict_has_call_id_key_on_v2(self):
+        g = _v2_root()
+        d = g.check("crm.read")
+        self.assertIn("call_id", d.to_dict())
+        self.assertEqual(d.to_dict()["call_id"], d.call_id)
+
+    def test_audit_overwrite_forbidden_on_v2(self):
+        import tempfile
+        p = Path(tempfile.mkdtemp(prefix="attenu-ov-")) / "l.jsonl"
+        with self.assertRaises(ValueError):
+            Guard.issue("a", Authority({"crm.read"}, [], ttl=60), schema_version=2,
+                       audit_path=p, audit_overwrite=True)
+
+    def test_audit_overwrite_still_works_on_v1(self):
+        import tempfile
+        p = Path(tempfile.mkdtemp(prefix="attenu-ov-")) / "l.jsonl"
+        p.write_text('{"seq": 0}\n')
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=60), audit_path=p, audit_overwrite=True)
+        self.assertTrue(g.check("crm.read"))
+
+
 # =========================================================================
 # capture / adapter on the allow entry
 # =========================================================================
+class TestAtomicityAndRollback(unittest.TestCase):
+    """Codex review, items 1-2: complete()/revoke()/strike-policy-kill must be atomic under the
+    chain lock, and EVERY pre-commit check()/record_outcome() failure must roll back — not only
+    the CSPRNG-unavailable case."""
+
+    def _assert_blocks_a_concurrent_check(self, trigger):
+        """Patch Chain.pending_for so that its FIRST call (made from inside the locked operation
+        under test) spawns a concurrent g.check() in another thread and records whether that
+        thread finished within a short window. If the operation under test truly holds the chain
+        lock for its whole duration, the concurrent check() blocks on the same lock and does NOT
+        finish in time; if the lock were released early (the bug Codex reproduced), it would."""
+        g = _v2_root()
+        result = {}
+        original = g._chain.pending_for
+        hit = threading.Event()
+
+        def patched(node_id):
+            value = original(node_id)
+            if not hit.is_set():
+                hit.set()
+                def concurrent():
+                    result["decision"] = g.check("crm.read")
+                    result["finished"] = True
+                t = threading.Thread(target=concurrent)
+                t.start()
+                t.join(timeout=0.2)
+                result.setdefault("finished", False)
+            return value
+
+        g._chain.pending_for = patched
+        try:
+            trigger(g)
+        finally:
+            g._chain.pending_for = original
+        self.assertFalse(result.get("finished"),
+                         "a concurrent check() completed WHILE the operation under test still "
+                         "held the chain lock -- not atomic")
+        return g
+
+    def test_complete_is_atomic_under_the_lock(self):
+        def trigger(g):
+            g.complete()
+        self._assert_blocks_a_concurrent_check(trigger)
+
+    def test_revoke_is_atomic_under_the_lock(self):
+        def trigger(g):
+            g.revoke()
+        self._assert_blocks_a_concurrent_check(trigger)
+
+    def test_pre_commit_canonicalization_failure_restores_meters_and_propagates(self):
+        g = Guard.issue("a", Authority({"crm.read"}, [RowLimit(100)], ttl=60), schema_version=2)
+        before = g._chain.calls_so_far(g.node_id, "*")
+        with self.assertRaises(canonical.CanonicalizationError):
+            g.check("crm.read", context={"rows": 1, "note": "\ud800"})   # a lone surrogate: fails _hash() pre-commit
+        after = g._chain.calls_so_far(g.node_id, "*")
+        self.assertEqual(before, after, "meters must be restored on ANY pre-commit failure, not only CSPRNG")
+        self.assertEqual(len(g.audit_log().entries), 1)   # just the root -- nothing was appended
+
+    def test_record_outcome_pre_commit_failure_leaves_the_call_id_unresolved(self):
+        g = _v2_root()
+        d = g.check("crm.read")
+        bad_receipt = {"type": "\ud800", "ref": "x", "digest": _HEX64}
+        with self.assertRaises(canonical.CanonicalizationError):
+            g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1, receipt=bad_receipt)
+        # NOT marked outcomed, STILL pending -- the outcome was never actually committed
+        self.assertFalse(g._chain.is_outcomed(d.call_id))
+        self.assertIn(d.call_id, g._chain.pending_for(g.node_id))
+        # a corrected retry succeeds, exactly once
+        entry = g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1)
+        self.assertEqual(entry["event"], "outcome")
+        with self.assertRaises(DuplicateOutcomeError):
+            g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1)
+
+
 class TestCaptureAdapter(unittest.TestCase):
     def test_capture_requires_adapter(self):
         g = _v2_root()

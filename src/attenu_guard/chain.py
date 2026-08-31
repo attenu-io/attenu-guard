@@ -246,15 +246,21 @@ class Chain:
         with self._lock:
             return tuple(sorted(self._pending.get(node_id, ())))
 
-    def mark_outcomed(self, call_id: str) -> bool:
-        """True the FIRST time `call_id` is marked (and it is now recorded as outcomed); False if
-        it was already outcomed — the runtime half of "exactly one outcome per call_id" (the
-        restart rule is what makes this enforceable within one chain's continuous lifetime)."""
+    def is_outcomed(self, call_id: str) -> bool:
+        """Peek: has `call_id` already received an outcome? Callers hold `self._lock` across
+        both this peek and the eventual `mark_outcomed` (see Guard.record_outcome) so no two
+        threads can race between them — the lock, not this method, is what makes "exactly one
+        outcome per call_id, enforced at append under the lock" true."""
         with self._lock:
-            if call_id in self._outcomed:
-                return False
+            return call_id in self._outcomed
+
+    def mark_outcomed(self, call_id: str) -> None:
+        """Commit `call_id` as having received its outcome. Call ONLY after the outcome entry
+        has actually reached AuditLog's commit point (a plain successful append, or a
+        CommittedAuditError post-commit failure) — never before, so a pre-commit failure leaves
+        call_id exactly as unresolved as it was (see Guard.record_outcome)."""
+        with self._lock:
             self._outcomed.add(call_id)
-            return True
 
     def graph(self) -> dict:
         return {
