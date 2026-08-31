@@ -445,6 +445,35 @@ All notable changes to attenu-guard are documented here. The format follows
   `_check()` now calls `guard.check()` directly (raising `AuthorityDenied(decision)` itself on a
   deny) instead of the old `guard.enforce()`, which discarded the `Decision` and its `call_id`;
   behaviourally identical on `schema_version=1`.
+- Execution binding wired into `adapters.claude_sdk` (Claude Agent SDK), OPT-IN via
+  `DelegationGuardRegistry(..., strict_single_hook=True)`. Unlike every other adapter in this
+  batch, the tool body here runs inside the Claude Code CLI -- a separate, closed-source Node.js
+  process on the other side of a JSON control channel -- so this is `Capture.FRAMEWORK_POST_HOOK`
+  from a THIRD hook, not a wrapper: `PreToolUse` (`pre_tool_use`) authorizes and stashes a
+  pending outcome keyed by `tool_use_id` (the SDK's own documented, wire-protocol-guaranteed
+  unique-per-call correlation key -- verified against `ToolPermissionContext.tool_use_id`'s and
+  `PreToolUseHookInput`/`PostToolUseHookInput`/`PostToolUseFailureHookInput`'s field docstrings in
+  pinned claude-agent-sdk 0.2.148's `types.py`, no collision machinery needed, same shape as
+  `adapters.strands`'s `toolUseId`); `PostToolUse`/`PostToolUseFailure` (newly registered by
+  `hooks()`, strict mode only) close it out. `BodyState.RETURNED` from `PostToolUse`;
+  `BodyState.RAISED` from `PostToolUseFailure`, with `error_code` set to the CLI's own free-text
+  `error` string (single-lined) rather than a Python exception class name -- there usually is no
+  Python exception object, since the tool ran across the process boundary, an explicitly
+  documented deviation from every in-process adapter's convention; `PostToolUseFailure` with
+  `is_interrupt` set is `BodyState.ABANDONED` instead (no `error_code`, per the contract). The
+  delegation tool call (`Agent`/`Task`) gets the same treatment as any other tool: its own
+  `PostToolUse` genuinely fires when the whole subagent run completes, a real body-completion
+  signal. `can_use_tool` -- the SDK's second, independent permission gate on the SAME call
+  `PreToolUse` already gated -- deliberately never participates in execution binding in either
+  mode: only one `PostToolUse`/`PostToolUseFailure` can ever fire per `tool_use_id`, so binding
+  both call sites would either double-count one call as two ledger entries or leave one `Decision`
+  permanently orphaned in the pending set; binding only the primary enforcement point avoids both.
+  Honesty note specific to this adapter: the "fires exactly once" guarantee is NOT independently
+  verifiable from this package's Python source the way every other adapter's dispatch loop was --
+  it rests on the SDK's own `TypedDict` field documentation across a process boundary to a
+  closed-source CLI, not on anything this module can read or exercise offline; documented
+  prominently in the module docstring rather than assumed. `duration_ms` is an observation window
+  (`PreToolUse` hook seen to `PostToolUse`/`PostToolUseFailure` hook seen), not a body-only timer.
 
 ## [0.9.0] — 2026-08-31
 

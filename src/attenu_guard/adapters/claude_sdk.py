@@ -83,17 +83,109 @@ DESIGN NOTES (both are security-relevant)
 This module imports ``claude_agent_sdk`` only lazily, from inside the two
 methods that genuinely need its dataclasses (``hooks()`` and ``can_use_tool``),
 so the file imports and unit-tests with zero third-party dependencies.
+
+EXECUTION BINDING (``record_outcome``, 0.9.0, OPT-IN via ``schema_version=2``)
+-------------------------------------------------------------------------
+By default (``strict_single_hook=False``, the constructor default) every call
+authorized here is ``Capture.PRE_HOOK_ONLY``: this hook denies BEFORE the tool
+body runs, but the tool body itself runs inside the CLI subprocess, entirely
+outside this adapter's reach, so no outcome is ever recorded. Unchanged v1
+shape either way.
+
+Set ``DelegationGuardRegistry(..., strict_single_hook=True)`` to also register
+``PostToolUse``/``PostToolUseFailure`` hooks (``hooks()`` below) and bind
+execution: ``pre_tool_use``'s ``authorize()`` call stashes a pending outcome
+keyed by ``tool_use_id`` -- the SDK's own documented, wire-protocol-guaranteed
+unique-per-call correlation key (``ToolPermissionContext.tool_use_id``'s
+docstring, ``types.py:213``) -- and ``post_tool_use``/``post_tool_use_failure``
+close it out: ``PostToolUse`` -> ``BodyState.RETURNED``; ``PostToolUseFailure``
+with ``is_interrupt`` truthy -> ``BodyState.ABANDONED`` (no ``error_code``,
+per the contract); ``PostToolUseFailure`` otherwise -> ``BodyState.RAISED``.
+This applies uniformly to the delegation tool call too (``Agent``/``Task``):
+its own ``PostToolUse`` genuinely fires when the whole subagent run finishes,
+a real body-completion signal, not a fabricated one.
+
+``can_use_tool`` never participates in execution binding, in either mode, even
+though it also calls ``authorize()``. It is a SECOND, independent gate on the
+SAME call ``PreToolUse`` already gated (see the SECOND HOOK note above); only
+one ``PostToolUse``/``PostToolUseFailure`` will ever fire per ``tool_use_id``,
+so binding both call sites would either double-count one call as two ledger
+entries or leave one of the two ``Decision``s permanently orphaned in the
+pending set. Binding only the primary enforcement point avoids both, and
+matches the existing design note that ``PreToolUse``, not ``can_use_tool``, is
+where enforcement really happens.
+
+Honesty notes, all specific to this adapter and worth reading before trusting
+strict mode's numbers:
+
+* **The termination guarantee is NOT independently verifiable from this
+  package's source.** Every other adapter in this batch calls the tool body
+  itself, or hooks a framework whose dispatch loop is plain importable Python
+  this module's own tests read directly. Here the tool body runs inside the
+  Claude Code CLI -- a separate, closed-source Node.js process on the other
+  side of a JSON control channel -- so "``PostToolUse``/``PostToolUseFailure``
+  fires exactly once for every ``PreToolUse``-allowed call" rests on the
+  SDK's own ``TypedDict`` field documentation, not on anything this module can
+  read or exercise offline. Treat strict mode as trusting a documented
+  contract across a process boundary, not as a locally-proven guarantee.
+* If the CLI process is killed, or the session is torn down, before either
+  terminal hook can fire, the call is left pending forever -- ``complete()``
+  then just reports it as still-pending (``guard.py``'s own documented
+  behaviour), exactly like ``SubagentStop`` racing ahead of a straggling
+  ``PreToolUse`` already does for delegation minting above. Not distinguishable
+  from a call that is merely slow.
+* ``error_code`` here is NOT a Python exception class name -- there usually
+  is no Python exception object at all, since the tool ran across the
+  process boundary. It is the CLI's own free-text ``PostToolUseFailureHookInput
+  .error`` string (single-lined), the only failure signal the wire protocol
+  carries.
+* ``duration_ms`` is an observation window -- ``PreToolUse`` hook seen to
+  ``PostToolUse``/``PostToolUseFailure`` hook seen -- not a body-only timer,
+  since the wrapper never touches the tool's actual execution.
 """
 from __future__ import annotations
 
 import fnmatch
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional
 
-from attenu_guard import Authority, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 __all__ = ["ToolPolicy", "AgentGrant", "DelegationGuardRegistry", "DELEGATION_TOOLS"]
+
+_ADAPTER_INFO = {"module": __name__, "version": __version__, "hook_path": f"{__name__}.pre_tool_use"}
+
+
+def _freeze(value: Any) -> Any:
+    """Snapshot ``value`` as plain, already-copied builtins -- never a copy
+    protocol (``copy.deepcopy``), which a hostile ``tool_input`` could subvert
+    by defining ``__deepcopy__`` to return itself (or anything) unchanged."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+@dataclass
+class _PendingOutcome:
+    """A call ``pre_tool_use`` authorized under ``strict_single_hook`` and is
+    waiting for ``post_tool_use``/``post_tool_use_failure`` to close out."""
+    guard: Guard
+    call_id: str
+    snapshot: Any
+    started_at: float
 
 # The parent invokes a subagent through this built-in tool. Renamed from
 # "Task" to "Agent" in Claude Code v2.1.63; the old name still appears in
@@ -168,6 +260,7 @@ class DelegationGuardRegistry:
         delegate_scope: Callable[[str], str] = lambda t: f"agent.delegate.{t}",
         delegation_tools: tuple[str, ...] = DELEGATION_TOOLS,
         revoke_on_stop: bool = True,
+        strict_single_hook: bool = False,
     ) -> None:
         self.root = root
         self.agent_grants = dict(agent_grants)
@@ -180,8 +273,14 @@ class DelegationGuardRegistry:
         # agent_id back to life — its Guard would otherwise stay revoked and
         # deny everything on the second run.
         self.revoke_on_stop = revoke_on_stop
+        # See the module docstring's EXECUTION BINDING section: opt-in,
+        # PreToolUse-only (never `can_use_tool`), FRAMEWORK_POST_HOOK via
+        # PostToolUse/PostToolUseFailure correlated by the SDK's own
+        # documented-unique `tool_use_id`.
+        self.strict_single_hook = strict_single_hook
         self._guards: MutableMapping[str, Guard] = {}
         self._pending: list[_Pending] = []
+        self._pending_outcomes: MutableMapping[str, _PendingOutcome] = {}
         self.denials: list[dict] = []   # everything this registry blocked, for reporting
 
     # ---- lookup ---------------------------------------------------------
@@ -287,12 +386,18 @@ class DelegationGuardRegistry:
 
     # ---- hook point 2: tool invocation -----------------------------------
     def authorize(self, tool_name: str, tool_input: Mapping[str, Any],
-                  agent_id: Optional[str], agent_type: Optional[str]):
+                  agent_id: Optional[str], agent_type: Optional[str], *,
+                  tool_use_id: Optional[str] = None, bind: bool = False):
         """The whole policy decision, framework-free.
 
         Returns ``(allowed: bool, reason: str)``. Every denial is also appended
         to ``self.denials`` and — when a Guard was found — to the hash-chained
         audit log.
+
+        ``bind`` requests execution binding on a v2 chain when this registry
+        is in ``strict_single_hook`` mode; only ``pre_tool_use`` ever passes
+        it True — see the module docstring's EXECUTION BINDING section for
+        why ``can_use_tool`` never does.
         """
         guard = self.guard_for(agent_id)
         if guard is None:
@@ -304,6 +409,8 @@ class DelegationGuardRegistry:
                     f"unknown sub-agent {agent_id!r} of type {agent_type!r}: "
                     f"no attenu-guard authority grant is declared for it")
 
+        v2_bind = bind and self.strict_single_hook and guard.schema_version == 2 and bool(tool_use_id)
+
         if tool_name in self.delegation_tools:
             subagent_type = str(tool_input.get("subagent_type") or "")
             if subagent_type not in self.agent_grants:
@@ -312,12 +419,18 @@ class DelegationGuardRegistry:
                     f"no authority grant declared for subagent_type "
                     f"{subagent_type!r}; refusing to delegate")
             scope = self.delegate_scope(subagent_type)
+            snapshot = _freeze({"subagent_type": subagent_type}) if v2_bind else None
+            extra = dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
+                        authorized_params=snapshot) if v2_bind else {}
             decision = guard.check(scope, context={"subagent_type": subagent_type},
-                                   tool=tool_name)
+                                   tool=tool_name, **extra)
             if not decision:
                 return self._deny(tool_name, agent_id, decision.explain())
             self._pending.append(_Pending(agent_id, subagent_type,
                                           str(tool_input.get("_tool_use_id") or "") or None))
+            if v2_bind and decision.call_id:
+                self._pending_outcomes[tool_use_id] = _PendingOutcome(
+                    guard, decision.call_id, snapshot, time.monotonic())
             return True, f"delegation to {subagent_type!r} authorized"
 
         policy = self.policy_for(tool_name)
@@ -329,11 +442,17 @@ class DelegationGuardRegistry:
                                 disposition=Disposition.UNRESOLVED)
             return self._deny(tool_name, agent_id, msg)
 
+        snapshot = _freeze(policy.context(tool_input)) if v2_bind else None
+        extra = dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
+                    authorized_params=snapshot) if v2_bind else {}
         decision = guard.check(policy.scope, context=policy.context(tool_input),
                                metered=policy.metered, tool=tool_name,
-                               disposition=policy.disposition)
+                               disposition=policy.disposition, **extra)
         if not decision:
             return self._deny(tool_name, agent_id, decision.explain())
+        if v2_bind and decision.call_id:
+            self._pending_outcomes[tool_use_id] = _PendingOutcome(
+                guard, decision.call_id, snapshot, time.monotonic())
         return True, f"{policy.scope} authorized"
 
     def _deny(self, tool_name: str, agent_id: Optional[str], reason: str):
@@ -358,7 +477,8 @@ class DelegationGuardRegistry:
 
         allowed, reason = self.authorize(
             tool_name, tool_input,
-            input_data.get("agent_id"), input_data.get("agent_type"))
+            input_data.get("agent_id"), input_data.get("agent_type"),
+            tool_use_id=tool_use_id, bind=True)
         if allowed:
             return {}
         return {
@@ -369,6 +489,51 @@ class DelegationGuardRegistry:
             },
             "systemMessage": f"attenu-guard denied {tool_name}: {reason}",
         }
+
+    # ---- hook point 3 (strict_single_hook only): terminal observation ----
+    async def post_tool_use(self, input_data: Mapping[str, Any],
+                            tool_use_id: Optional[str],
+                            context: Mapping[str, Any]) -> dict:
+        """``PostToolUse`` hook — closes a pending outcome as ``RETURNED``.
+
+        Only registered (``hooks()``) when ``strict_single_hook=True``. A
+        ``tool_use_id`` with no matching pending entry (default mode, a
+        denied call, or ``can_use_tool``-only path) is a silent no-op.
+        """
+        if input_data.get("hook_event_name") != "PostToolUse" or not tool_use_id:
+            return {}
+        pending = self._pending_outcomes.pop(tool_use_id, None)
+        if pending is None:
+            return {}
+        pending.guard.record_outcome(
+            pending.call_id, BodyState.RETURNED,
+            invoked_params=pending.snapshot, duration_ms=_elapsed_ms(pending.started_at))
+        return {}
+
+    async def post_tool_use_failure(self, input_data: Mapping[str, Any],
+                                    tool_use_id: Optional[str],
+                                    context: Mapping[str, Any]) -> dict:
+        """``PostToolUseFailure`` hook — closes a pending outcome as
+        ``RAISED`` (with the CLI's own error string as ``error_code``) or, if
+        ``is_interrupt`` is set, as ``ABANDONED`` (no ``error_code``, per
+        ``Guard.record_outcome``'s contract). Same registration gate as
+        ``post_tool_use``."""
+        if input_data.get("hook_event_name") != "PostToolUseFailure" or not tool_use_id:
+            return {}
+        pending = self._pending_outcomes.pop(tool_use_id, None)
+        if pending is None:
+            return {}
+        duration_ms = _elapsed_ms(pending.started_at)
+        if input_data.get("is_interrupt"):
+            pending.guard.record_outcome(
+                pending.call_id, BodyState.ABANDONED,
+                invoked_params=pending.snapshot, duration_ms=duration_ms)
+            return {}
+        error_code = " ".join(str(input_data.get("error") or "unknown error").split())
+        pending.guard.record_outcome(
+            pending.call_id, BodyState.RAISED, error_code=error_code,
+            invoked_params=pending.snapshot, duration_ms=duration_ms)
+        return {}
 
     # ---- the second gate: ClaudeAgentOptions.can_use_tool ----------------
     async def can_use_tool(self, tool_name: str, tool_input: Mapping[str, Any],
@@ -383,6 +548,9 @@ class DelegationGuardRegistry:
         denies instead. Harmless in practice because ``PreToolUse`` fires
         first for the same call and does the minting; it is one more reason the
         hook, not this callback, is the enforcement point.
+
+        Never binds execution (``bind`` is not passed, so it defaults False) —
+        see the module docstring's EXECUTION BINDING section.
         """
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
@@ -399,15 +567,22 @@ class DelegationGuardRegistry:
         No ``matcher`` is set on ``PreToolUse`` deliberately: an unmatched hook
         runs for *every* tool call, which is what fail-closed requires — a
         per-tool matcher would silently exempt any tool nobody remembered to
-        list.
+        list. ``PostToolUse``/``PostToolUseFailure`` are only registered under
+        ``strict_single_hook`` — they are pure no-ops (see above) when nothing
+        is pending, but registering them unconditionally would misrepresent
+        the default mode's promise of NO terminal observation.
         """
         from claude_agent_sdk import HookMatcher
 
-        return {
+        hooks = {
             "PreToolUse": [HookMatcher(hooks=[self.pre_tool_use])],
             "SubagentStart": [HookMatcher(hooks=[self.subagent_start])],
             "SubagentStop": [HookMatcher(hooks=[self.subagent_stop])],
         }
+        if self.strict_single_hook:
+            hooks["PostToolUse"] = [HookMatcher(hooks=[self.post_tool_use])]
+            hooks["PostToolUseFailure"] = [HookMatcher(hooks=[self.post_tool_use_failure])]
+        return hooks
 
     def agent_definitions(self, **common: Any) -> dict:
         """Derive ``ClaudeAgentOptions.agents`` from the same ``AgentGrant``
