@@ -725,7 +725,7 @@ def _v2_summarizer_registry():
 
 def test_v2_allowed_call_records_a_returned_outcome():
     root, registry = _v2_summarizer_registry()
-    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
 
     result = hook(
         function_name="crm_query",
@@ -749,7 +749,7 @@ def test_v2_allowed_call_records_a_returned_outcome():
 
 def test_v2_async_allowed_call_records_a_returned_outcome_wrapper_async():
     root, registry = _v2_summarizer_registry()
-    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
 
     async def acrm_query(**kw):
         return crm_query(**kw)
@@ -772,7 +772,7 @@ def test_v2_async_allowed_call_records_a_returned_outcome_wrapper_async():
 
 def test_v2_a_tool_that_raises_records_a_raised_outcome():
     root, registry = _v2_summarizer_registry()
-    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
 
     def boom(**kw):
         raise ValueError("boom")
@@ -794,7 +794,7 @@ def test_v2_a_tool_that_raises_records_a_raised_outcome():
 
 def test_v2_denied_call_never_records_an_outcome():
     root, registry = _v2_summarizer_registry()
-    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
     reached = []
 
     with pytest.raises(AuthorityDenied):
@@ -817,7 +817,7 @@ def test_v1_chain_gets_no_capture_adapter_or_outcome():
     registry = GuardRegistry(root, root_key="orchestrator")
     registry.register("summarizer",
                       root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarize"))
-    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
 
     hook(
         function_name="crm_query",
@@ -856,7 +856,7 @@ def test_v2_delegation_never_gets_capture_or_an_outcome():
 
 def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
     root, registry = _v2_summarizer_registry()
-    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
 
     async def hangs(**kw):
         await asyncio.sleep(3600)
@@ -898,3 +898,109 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+# ==========================================================================
+# Codex review round 2 (batch 2, finding 1): `function_call` is only
+# genuinely the raw body when this hook is the ONLY entry in Agent(tool_
+# hooks=[...]) AND the tool is not cache_results=True -- Agno folds every
+# tool_hook into one nested chain, and its own entrypoint dispatch itself
+# can satisfy a call from cache without ever calling the real function.
+# DEFAULT mode must never fabricate an outcome regardless of either.
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and no outcome is ever recorded -- not merely "no outcome happens
+    to be missing", but zero outcome events at all, and the body still genuinely runs."""
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)  # strict_single_hook defaults False
+
+    result = hook(
+        function_name="crm_query",
+        function_call=lambda **kw: crm_query(**kw),
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    )
+    assert result == "read 10 rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert registry.guard_for("summarizer").complete()
+
+
+def test_v2_strict_mode_never_fabricates_when_a_sibling_hook_short_circuits_guard_outer():
+    """This hook is OUTER (Agno folds tool_hooks with the FIRST-listed hook outermost, per
+    `_build_nested_execution_chain`'s reversed-fold): its own `function_call` reaches a sibling
+    that never invokes the real entrypoint -- e.g. a caching/mocking hook. This adapter cannot
+    tell that apart from a genuine return, so it DOES record RETURNED here -- the documented,
+    deliberately-opted-into residual of a violated strict_single_hook attestation."""
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
+    reached = []
+
+    def short_circuiting_sibling(**kw):
+        # Never calls the real entrypoint -- e.g. Agno's own cache-hit path, or a mocking hook.
+        return "mocked, never reached the real body"
+
+    result = hook(
+        function_name="crm_query",
+        function_call=short_circuiting_sibling,
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    )
+    assert result == "mocked, never reached the real body"
+    assert reached == []
+
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes and outcomes[0]["body_state"] == BodyState.RETURNED  # the documented residual
+
+
+def test_v2_strict_mode_never_fabricates_when_this_hook_is_inner_and_never_reached():
+    """The SAFE direction: if a sibling is listed first (outer) and never calls this hook at
+    all (e.g. it fully emulates the tool itself), this hook's own guarded_tool_hook body simply
+    never runs -- nothing is authorized, nothing is fabricated. Modeled directly: this hook is
+    just never invoked."""
+    root, registry = _v2_summarizer_registry()
+    guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)  # never called
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+
+
+def test_v2_strict_mode_cache_short_circuit_is_a_documented_residual_not_a_sibling():
+    """Agno's OWN entrypoint dispatch (`execute_entrypoint` inside `_build_nested_execution_
+    chain`) can itself return a cached result without calling the real function, EVEN when this
+    hook is the only/innermost one -- not a sibling hook, baked into the same call this hook's
+    own `function_call` argument resolves into. Modeled directly: `function_call` behaves like a
+    cache hit (returns a stored value without any real side effect), same shape and same
+    residual as the sibling-short-circuit case above -- this hook has no way to distinguish
+    them, by design (both are "function_call was invoked and returned a value")."""
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES, strict_single_hook=True)
+    real_body_ran = []
+
+    def cache_hit(**kw):
+        # No call to the real crm_query -- this stands in for execute_entrypoint's own
+        # `return _detached(cached_result)` short-circuit.
+        return "read 10 rows"  # the cached value from a PRIOR real invocation
+
+    result = hook(
+        function_name="crm_query",
+        function_call=cache_hit,
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    )
+    assert result == "read 10 rows"
+    assert real_body_ran == []  # the body did not run THIS time -- the cache answered
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RETURNED  # the documented residual, not a crash

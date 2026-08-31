@@ -62,21 +62,48 @@ Agno's `StopAgentRun` instead and tear the whole run down. Returning a denial
 *string* is deliberately not offered: Agno would record that as a successful
 tool result.
 
-Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `guarded_tool_
-hook`/`aguarded_tool_hook` call the tool body themselves (`function_call(**arguments)` /
-`await function_call(**arguments)`), exactly like `adapters.langgraph`'s reference wiring --
-Agno's own nested-execution-chain design (a hook that never calls `function_call` prevents the
-body from running at all) makes this a genuine observation, not a hook racing the framework's
-own dispatch. `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` accordingly. `authorized_params`/
-`invoked_params` are one immutable snapshot (`_freeze()`, never a copy protocol -- see its own
-docstring) of the model-supplied `arguments`, taken BEFORE `function_call` runs and reused
-unchanged for both. `BodyState.RAISED` (with `error_code`) is genuinely observed on both paths
--- Agno does not swallow a tool's exception before this hook's own call returns/raises.
-`asyncio.CancelledError` on the async path is `BodyState.ABANDONED`, still re-raised.
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`) -- TWO MODES
+-----------------------------------------------------------------------------------------
+`guarded_tool_hook`/`aguarded_tool_hook` call `function_call(**arguments)`/`await
+function_call(**arguments)` themselves -- but whether that genuinely IS the raw tool body
+depends on what else is wired up, verified directly against pinned agno 2.9's
+`agno/tools/function.py`, `FunctionCall._build_nested_execution_chain`:
+
+  * `Agent(tool_hooks=[...])` is a LIST. Every hook in it is folded into ONE nested chain
+    (`reduce(create_hook_wrapper, reversed(final_hooks), execute_entrypoint)`); the `function_
+    call`/`next_func` THIS hook receives is whichever accumulator sits just inside it in that
+    fold -- another hook's own wrapper, unless this hook is the innermost (last) one listed.
+  * EVEN when this hook is the innermost (or the only) one, `execute_entrypoint` itself --
+    Agno's OWN dispatch, not a sibling's -- returns a CACHED result (`_detached(cached_result)`)
+    without ever calling `self.function.entrypoint(**arguments)` when the tool declares
+    `cache_results=True` and the cache key still matches. This is not a sibling hook this file
+    could detect or refuse; it is baked into the same function this hook's `function_call`
+    argument resolves into.
+
+Per this whole effort's governing principle -- an honest unobserved beats a promised outcome
+that can be lost -- this adapter therefore ships with TWO modes, controlled by
+`guarded_tool_hook(..., strict_single_hook=...)` (and `aguarded_tool_hook`'s identical kwarg):
+
+  * DEFAULT (`strict_single_hook=False`): every `guard.check()` call passes NO `capture`/
+    `authorized_params` at all. On a v2 chain the Guard itself stamps its own default, honest
+    `Capture.PRE_HOOK_ONLY`; this adapter never calls `record_outcome()`.
+  * STRICT (`strict_single_hook=True`): an explicit attestation that (a) this hook is the ONLY
+    entry in the tool's `tool_hooks=[...]` list, and (b) none of the tools it guards declare
+    `cache_results=True` -- this file cannot verify either half itself, there is no hook
+    exposing the full `tool_hooks` list or each tool's cache configuration to an individual
+    hook the way `AbstractCapability.for_agent()` does in `adapters.pydantic_ai`.
+    `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` accordingly. `authorized_params`/`invoked_params`
+    are one immutable snapshot (`_freeze()`, never a copy protocol -- see its own docstring) of
+    the model-supplied `arguments`, taken BEFORE `function_call` runs and reused unchanged for
+    both. `BodyState.RAISED` (with `error_code`) is genuinely observed on both paths when the
+    attestation holds -- Agno does not swallow a tool's exception before this hook's own call
+    returns/raises. `asyncio.CancelledError` on the async path is `BodyState.ABANDONED`, still
+    re-raised.
+
 `delegation_tool_hook`/`adelegation_tool_hook` mint the child via `parent.delegate(...)`, which
 never calls `guard.check()` at all -- there is no `Decision`/`call_id` to bind an outcome to,
-so delegation is unaffected by any of this, on any schema version. On `schema_version=1` (the
-default), nothing here changes at all.
+so delegation is unaffected by any of this, on any mode or schema version. On `schema_version=1`
+(the default), nothing here changes at all.
 """
 from __future__ import annotations
 
@@ -263,6 +290,7 @@ def guarded_tool_hook(
     *,
     on_deny: str = "error",
     key: Optional[str] = None,
+    strict_single_hook: bool = False,
 ) -> Callable[..., Any]:
     """An Agno `tool_hook` that authorizes every tool call against the caller's
     Guard before the tool body runs.
@@ -270,6 +298,15 @@ def guarded_tool_hook(
     Pass as `Agent(tool_hooks=[guarded_tool_hook(registry, policies)])`. `key`
     overrides the automatic `agent.id` lookup for agents whose id you cannot
     control.
+
+    strict_single_hook: execution-binding (0.9.0) mode switch -- see the module docstring's
+                       "EXECUTION BINDING ... TWO MODES". `False` (default): every
+                       `guard.check()` call is left to the Guard's own honest
+                       `Capture.PRE_HOOK_ONLY` default; no outcome is ever recorded. `True`:
+                       an explicit attestation that this hook is the ONLY entry in
+                       `Agent(tool_hooks=[...])` for the tools it guards, AND that none of
+                       them declare `cache_results=True` -- this file cannot verify either
+                       half of that attestation itself; see the HONESTY NOTES.
     """
 
     def authorize(function_name, arguments, agent, team, *,
@@ -290,7 +327,7 @@ def guarded_tool_hook(
                                       f"no ToolPolicy declared for tool {function_name!r}",
                                       tool=function_name, disposition=Disposition.UNRESOLVED), on_deny)
 
-        v2 = guard.schema_version == 2
+        v2 = strict_single_hook and guard.schema_version == 2
         snapshot = _snapshot_params(arguments) if v2 else None
         extra = (
             dict(capture=capture, adapter=_ADAPTER_INFO, authorized_params=snapshot)
@@ -338,6 +375,7 @@ def aguarded_tool_hook(
     *,
     on_deny: str = "error",
     key: Optional[str] = None,
+    strict_single_hook: bool = False,
 ) -> Callable[..., Any]:
     """Async twin of `guarded_tool_hook`, for agents whose tools are `async def`.
 
@@ -349,8 +387,11 @@ def aguarded_tool_hook(
     as a *successful* result. Conversely a sync tool never reaches this hook:
     async hooks are dropped from the sync chain with only a warning
     (`agno/tools/function.py:2081`). Match the flavour to the tool.
+
+    strict_single_hook: see `guarded_tool_hook`'s own docstring.
     """
-    sync = guarded_tool_hook(registry, policies, on_deny=on_deny, key=key)
+    sync = guarded_tool_hook(registry, policies, on_deny=on_deny, key=key,
+                             strict_single_hook=strict_single_hook)
     authorize = sync._dg_authorize  # type: ignore[attr-defined]
 
     async def hook(function_name, function_call, arguments, agent=None, team=None):

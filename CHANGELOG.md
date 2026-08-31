@@ -392,18 +392,30 @@ All notable changes to attenu-guard are documented here. The format follows
   extra's `mcp<3` pin was stale -- camel-ai 0.2.90 imports `mcp.server.FastMCP`, renamed to
   `MCPServer` in mcp 2.x (mcp's own migration guide recommends `mcp<2`), so `pip install
   'attenu-guard[camel]'` was broken on a clean install; corrected to `mcp<2`.
-- Execution binding wired into `adapters.agno`, same terms: `Capture.WRAPPER_SYNC`/
-  `WRAPPER_ASYNC` from `guarded_tool_hook`/`aguarded_tool_hook`, which call
-  `function_call(**arguments)`/`await function_call(**arguments)` themselves -- Agno's own
-  nested-execution-chain design (a hook that never calls `function_call` prevents the body from
-  running at all) makes this a genuine observation. `_freeze()` snapshot of the model-supplied
+- Execution binding wired into `adapters.agno`: `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` from
+  `guarded_tool_hook`/`aguarded_tool_hook`, which call `function_call(**arguments)`/`await
+  function_call(**arguments)` themselves. `_freeze()` snapshot of the model-supplied
   `arguments`, taken before `function_call` runs. `BodyState.RAISED` (with `error_code`) is
-  genuinely observed on both paths; `asyncio.CancelledError` on the async path is
-  `BodyState.ABANDONED`, still re-raised. `authorize()` (shared by both hook flavours) now
-  returns `(guard, call_id, snapshot)` instead of `None`, threading `capture=` through from
-  each hook since they share one authorization function. `delegation_tool_hook`/
+  genuinely observed on both paths when the attestation below holds; `asyncio.CancelledError`
+  on the async path is `BodyState.ABANDONED`, still re-raised. `authorize()` (shared by both
+  hook flavours) returns `(guard, call_id, snapshot)` instead of `None`, threading `capture=`
+  through from each hook since they share one authorization function. `delegation_tool_hook`/
   `adelegation_tool_hook` mint via `parent.delegate(...)`, which never calls `guard.check()` --
   unaffected.
+  **Round 2 correction (Codex review, batch 2, finding 1):** the original claim that a hook
+  never calling `function_call` "prevents the body from running at all" was true but incomplete
+  -- it did not establish that `function_call` genuinely IS the body when it IS called. Verified
+  directly against pinned agno 2.9's `FunctionCall._build_nested_execution_chain`:
+  `Agent(tool_hooks=[...])` is a list, folded into ONE nested chain, so `function_call` this
+  hook receives can be ANOTHER listed hook's own wrapper, not the real entrypoint; AND, even
+  when this hook is the only/innermost one, Agno's own `execute_entrypoint` can itself return a
+  CACHED result (`cache_results=True`) without calling the real function at all -- not a
+  sibling hook, baked into the same dispatch. `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` is now
+  OPT-IN via `guarded_tool_hook(..., strict_single_hook=True)` (and `aguarded_tool_hook`'s
+  identical kwarg), an attestation that this hook is the ONLY entry in `tool_hooks=[...]` AND
+  that none of the guarded tools declare `cache_results=True`. The default
+  (`strict_single_hook=False`) is `Capture.PRE_HOOK_ONLY` with no outcome ever recorded, safe
+  regardless of either.
 - Execution binding wired into `adapters.ag2` (the AutoGen fork): `Capture.WRAPPER_ASYNC` from
   `_Gate.run`, which awaits `call_next(event, context)` itself. `_freeze()` snapshot of
   `event.serialized_arguments`, taken at authorization time before `call_next` runs.
