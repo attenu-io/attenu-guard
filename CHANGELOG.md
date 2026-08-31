@@ -188,6 +188,21 @@ All notable changes to attenu-guard are documented here. The format follows
   CONSTRUCTION time via `DelegationGuard.for_agent()`, which walks `agent.toolsets` (unwrapping
   `WrapperToolset` chains) for a `GuardedToolset` instance -- undetectable only for a
   `GuardedToolset` built and used entirely dynamically, never listed in `agent.toolsets` at all.
+  **Round 3 correction (Codex review, finding 3):** the SECOND-`innermost`-capability residual
+  documented (not fixed) in round 2 above was real, and documenting it did not stop it: a live
+  probe against pinned 2.31.1 confirmed a sibling `innermost` capability's own pre-handler
+  failure gets misreported here as `BodyState.RAISED` for a body `DelegationGuard` never
+  reached (the raw body's own side-effect sink stayed empty). `for_agent()` now ALSO rejects
+  this combination at agent construction time, the same way it already rejects `DelegationGuard`
+  + `GuardedToolset`: it walks `agent.root_capability.capabilities` (populated for every sibling
+  by pydantic-ai's own two-phase `bind_capabilities_tier`, verified directly against pinned
+  2.31.1) for any OTHER capability whose `get_ordering().position == "innermost"` AND that
+  overrides `wrap_tool_execute` (the same `type(x).method is not Base.method` idiom pydantic-ai
+  uses internally for its own `_has_wrap_node_run`), and raises `UserError` naming it -- for
+  EITHER list order, since pinned 2.31.1's innermost tier has no ordering edges among its own
+  members, only list order as a tiebreaker. Undetectable only for a capability added entirely
+  dynamically, per-run (`for_run()`, never declared in the agent's own `capabilities=[...]`) --
+  the same category of limit as the dynamic-`GuardedToolset` case, documented on `for_agent()`.
 - `adapters.autogen`: `GuardedWorkbench.call_tool_stream` recorded no outcome at all when a
   consumer closed the stream early (one event consumed, then `.aclose()`/GC) -- `GeneratorExit`,
   raised inside the generator at its suspended `yield`, is a `BaseException`, bypassing the

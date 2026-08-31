@@ -419,12 +419,17 @@ class DelegationGuard(AbstractCapability[Any]):
     registers a SECOND `innermost`-positioned capability, this one's `handler` may be that OTHER
     capability's own `wrap_tool_execute`, not the raw body, and that capability's own failure
     (before it calls its own handler) would still be observed here as a `RAISED` outcome for a
-    body this capability itself never actually reached. Pydantic AI's ordering primitives
-    (`wraps`/`wrapped_by`) reference specific OTHER capability types/instances, which this file
-    cannot know in advance for an arbitrary caller-supplied capability, so this residual is a
-    genuine, documented limit of the framework's own ordering guarantee, not something this file
-    can code around -- distinct from the LEAKED PENDING ENTRY defect the one-operation design
-    below eliminates structurally.
+    body this capability itself never actually reached (round 3, finding 3, live-probed against
+    pinned 2.31.1: raw body sink empty, ledger said `RAISED`/`RuntimeError`). Pydantic AI's
+    ordering primitives (`wraps`/`wrapped_by`) reference specific OTHER capability types/
+    instances, which this file cannot know in advance for an arbitrary caller-supplied
+    capability, so this file cannot simply out-order its way to safety -- `for_agent()` instead
+    REJECTS this combination at AGENT CONSTRUCTION time (not per-call), the same way it already
+    rejects `DelegationGuard` + `GuardedToolset` dual instrumentation -- see its own docstring.
+    The one thing that rejection cannot see is a capability added entirely dynamically, per-run
+    (`for_run()`, never declared in the agent's own `capabilities=[...]`); that residual is
+    genuine and documented on `for_agent()` itself, distinct from the LEAKED PENDING ENTRY
+    defect the one-operation design below eliminates structurally.
 
     WHY ONE OPERATION, NOT TWO: an earlier version of this class authorized in `before_tool_
     execute` and stashed the allowed decision for a SEPARATE `wrap_tool_execute` to pick up and
@@ -471,15 +476,37 @@ class DelegationGuard(AbstractCapability[Any]):
 
     def for_agent(self, agent: Any) -> "DelegationGuard":
         """Rejects `DelegationGuard` + `GuardedToolset` dual instrumentation on the SAME agent,
-        at AGENT CONSTRUCTION time -- see the class docstring's "DO NOT also wrap...". Called
-        after the agent's toolsets are fully assembled (`AbstractCapability.for_agent`'s own
-        docstring: an `innermost` capability's `for_agent` runs in a second phase specifically
-        so `agent.toolsets` is complete), so `agent.toolsets` is walked here, unwrapping
-        `WrapperToolset` chains, for a `GuardedToolset` instance -- direct membership in
-        `toolsets=[...]` and nesting inside another wrapper are both detected. What this CANNOT
-        detect: a `GuardedToolset` built and used entirely dynamically (e.g. constructed inside
-        a tool call and never listed in `agent.toolsets` at all) -- there is no hook this file
-        can use to see that ahead of time; the class docstring's warning is what covers it."""
+        AND a second `innermost`-tier sibling capability that itself wraps execution, both at
+        AGENT CONSTRUCTION time. Called after the agent's toolsets are fully assembled
+        (`AbstractCapability.for_agent`'s own docstring: an `innermost` capability's `for_agent`
+        runs in a second phase specifically so `agent.toolsets` is complete), so `agent.toolsets`
+        is walked here, unwrapping `WrapperToolset` chains, for a `GuardedToolset` instance --
+        direct membership in `toolsets=[...]` and nesting inside another wrapper are both
+        detected -- see the class docstring's "DO NOT also wrap...". What this CANNOT detect: a
+        `GuardedToolset` built and used entirely dynamically (e.g. constructed inside a tool
+        call and never listed in `agent.toolsets` at all) -- there is no hook this file can use
+        to see that ahead of time; the class docstring's warning is what covers it.
+
+        Codex review round 3, finding 3: `agent.root_capability.capabilities` is ALSO walked for
+        every OTHER capability declaring `get_ordering().position == "innermost"` that overrides
+        `wrap_tool_execute` (checked via `type(sibling).wrap_tool_execute is not
+        AbstractCapability.wrap_tool_execute`, the same idiom pydantic-ai's own
+        `_has_wrap_node_run` uses internally for the analogous check). Pinned pydantic-ai
+        2.31.1's `innermost` tier has NO ordering edges among its own members
+        (`_ordering.py:90-103` -- only list order as a tiebreaker), so this capability cannot
+        PROVE it is the closest wrapper to the raw tool body when a sibling in the same tier
+        also wraps execution: `handler` could be that sibling's own `wrap_tool_execute`, not the
+        raw body, and a live probe against pinned 2.31.1 confirmed the consequence -- the
+        sibling's own pre-handler failure was misreported here as a `RAISED` outcome for a body
+        this capability never actually reached (the raw body's own side-effect sink stayed
+        empty). `agent.root_capability` reflects every sibling capability at this point, per
+        `bind_capabilities_tier`'s own two-phase design (`combined.py`) -- verified directly
+        against pinned 2.31.1 rather than assumed. What this CANNOT detect: a capability added
+        entirely dynamically, per-run, via `for_run()` rather than declared in the agent's own
+        `capabilities=[...]` at construction time -- it is not listed on
+        `agent.root_capability.capabilities` yet when THIS `for_agent` runs, the same category
+        of limit as the dynamic-`GuardedToolset` case above.
+        """
         for toolset in getattr(agent, "toolsets", None) or ():
             seen = toolset
             while seen is not None:
@@ -492,6 +519,28 @@ class DelegationGuard(AbstractCapability[Any]):
                         "whole agent, or GuardedToolset for just this toolset (not both)."
                     )
                 seen = getattr(seen, "wrapped", None)
+
+        root = getattr(agent, "root_capability", None)
+        for sibling in getattr(root, "capabilities", None) or ():
+            if sibling is self:
+                continue
+            ordering = sibling.get_ordering()
+            sibling_is_innermost = ordering is not None and ordering.position == "innermost"
+            sibling_wraps_execution = (
+                type(sibling).wrap_tool_execute is not AbstractCapability.wrap_tool_execute
+            )
+            if sibling_is_innermost and sibling_wraps_execution:
+                raise UserError(
+                    f"DelegationGuard and {type(sibling).__name__} are both registered in the "
+                    "'innermost' ordering tier and both wrap tool execution. Pydantic AI's "
+                    "innermost tier has no ordering edges among its own members (only list "
+                    "order as a tiebreaker), so DelegationGuard cannot prove it sits closest to "
+                    "the raw tool body -- a call it authorizes could actually execute inside "
+                    f"{type(sibling).__name__}'s own wrap_tool_execute, and that capability's "
+                    "own failure before calling its handler would be misreported here as a "
+                    "RAISED outcome for a body DelegationGuard never reached. Register at most "
+                    "one innermost, execution-wrapping capability alongside DelegationGuard."
+                )
         return self
 
     async def wrap_tool_execute(

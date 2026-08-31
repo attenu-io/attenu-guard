@@ -586,6 +586,52 @@ def test_delegation_guard_alone_does_not_trip_the_dual_instrumentation_check():
     )
 
 
+class _OtherInnermostWrapper(AbstractCapability):
+    """A second, `innermost`-positioned capability that wraps tool execution and RAISES before
+    ever calling its own handler -- reproduces the exact defect Codex live-probed against pinned
+    pydantic-ai 2.31.1: the innermost tier has no ordering edges among its own members (only
+    list order as a tiebreaker), so DelegationGuard cannot prove it sits closer to the raw body
+    than this sibling does."""
+
+    def get_ordering(self):
+        return CapabilityOrdering(position="innermost")
+
+    async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
+        raise RuntimeError("the sibling wrapper failed before ever reaching the raw body")
+
+
+def test_delegation_guard_rejects_a_sibling_innermost_execution_wrapper_listed_after():
+    """Codex review round 3, finding 3: [DelegationGuard, OtherInnermostWrapper] must be
+    refused at agent construction -- closing off the live-probed defect (the sibling's own
+    pre-handler failure misreported here as DelegationGuard's own RAISED outcome for a body it
+    never reached) before any run, and so any false outcome, can happen at all."""
+    guard_cap = dg_pai.DelegationGuard(policies={})
+    other = _OtherInnermostWrapper()
+
+    with pytest.raises(dg_pai.UserError, match="innermost"):
+        Agent(
+            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+            deps_type=dg_pai.GuardedDeps,
+            capabilities=[guard_cap, other],
+        )
+
+
+def test_delegation_guard_rejects_a_sibling_innermost_execution_wrapper_listed_before():
+    """Same rejection, the OPPOSITE list order -- pinned 2.31.1's innermost tier preserves
+    LISTED order as its only tiebreaker (no ordering edges among its own members), so this file
+    cannot lean on registration order to sidestep the collision either way; both orders must be
+    refused identically."""
+    guard_cap = dg_pai.DelegationGuard(policies={})
+    other = _OtherInnermostWrapper()
+
+    with pytest.raises(dg_pai.UserError, match="innermost"):
+        Agent(
+            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+            deps_type=dg_pai.GuardedDeps,
+            capabilities=[other, guard_cap],
+        )
+
+
 class _RaisingBeforeCapability(AbstractCapability):
     """A second, ordinary-positioned capability whose before_tool_execute always raises."""
 
