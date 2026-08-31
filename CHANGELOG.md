@@ -6,6 +6,33 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `adapters.crewai`: outcome correlation was keyed by a thread-local slot (one per OS thread,
+  not per dispatch); two async tool calls interleaved on one thread (CrewAI's own async
+  executor can do this) could let a later call's `before` hook overwrite an earlier call's still-
+  pending outcome. Now keyed by `id(ctx.tool_input)`, the object CrewAI itself threads through
+  the before/after hook contexts for one dispatch, held with a strong reference for that
+  dispatch's whole span. Also: a THIRD-PARTY `before_tool_call` hook (not this bridge's own) that
+  vetoes a call after this bridge already authorized it no longer gets recorded as a fabricated
+  `BodyState.RETURNED` -- CrewAI's own literal "blocked by hook" result is recognized and the
+  outcome is left unrecorded instead.
+- `adapters.openai_agents`: rebuilt on genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`, wrapping
+  the tool's own `on_invoke_tool` directly) instead of a second, unreliable `ToolOutputGuardrail`
+  that a later `tool_input_guardrails` entry could cause to never run at all (leaving an `allow`
+  with no outcome ever recorded, and no way to tell that apart from one merely still in flight).
+  Execution binding is now OPT-IN via `guarded_tool(..., registry=...)`: previously an output
+  guardrail (and the schema-2 `capture` on `check()`) was attached unconditionally, which changed
+  a `schema_version=1` tool's shape (`tool_output_guardrails`) even though behavior was
+  unaffected -- a real regression against every adapter's "`schema_version=1` stays byte-and-
+  type identical" guarantee. Omitting `registry=` (the default) now never touches the tool at
+  all, on any chain.
+- All six new adapters (below): the "immutable snapshot" helper fell back to a shallow `dict(...)`
+  copy whenever `copy.deepcopy` failed on any nested value, silently keeping shared references to
+  the live, mutable call arguments -- exactly the false-substitution risk the snapshot exists to
+  rule out. Replaced with `_freeze()`/`_snapshot_params()`: dicts and lists are always rebuilt
+  fresh, recursively; a leaf that cannot itself be deep-copied is replaced by its `repr()` (a new,
+  immutable string) rather than shared as-is. Never raises, never shares a mutable container.
+
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a
   `schema_version=2` chain (unchanged, byte-and-type identical to before, on `schema_version=1`),
@@ -15,14 +42,20 @@ All notable changes to attenu-guard are documented here. The format follows
     for every dispatch path including a blocked call. `BodyState.RAISED` is never reported: CrewAI's
     `ToolUsage.use`/`ause` catches every tool exception internally and turns it into a formatted
     string before the post hook ever runs, so a raise and an ordinary return are indistinguishable
-    at the one hook point this adapter has.
-  - `adapters.openai_agents`: `Capture.FRAMEWORK_POST_HOOK` via a second guardrail,
-    `ToolOutputGuardrail`, added alongside the existing `ToolInputGuardrail`; the two correlate
-    through the SDK's own `tool_call_id`. Same honesty limit as CrewAI: the SDK's default
-    `failure_error_function` catches a tool's exception inside `on_invoke_tool`, before the output
-    guardrail runs, so `BodyState.RAISED` is unreachable under default configuration; with
-    `failure_error_function=None` the exception propagates past the output guardrail entirely and
-    that call's outcome is simply never recorded (the hook structurally never fires for it).
+    at the one hook point this adapter has. `duration_ms` is an observation window (before-hook to
+    after-hook), documented as such, not a body-only timer.
+  - `adapters.openai_agents`: `Capture.WRAPPER_ASYNC`, OPT-IN via `guarded_tool(..., registry=...)`
+    -- `registry.root_guard.schema_version` is checked once, at build time (a whole-chain property),
+    to decide whether to replace the tool's `on_invoke_tool` with a wrapper that calls the original
+    directly and observes completion itself, exactly like `adapters.langgraph`'s reference wiring.
+    `BodyState.RAISED` (with `error_code`) is reached only when the wrapped tool's own
+    `on_invoke_tool` genuinely lets the exception through (e.g. `failure_error_function=None`); the
+    SDK's *default* `failure_error_function` still catches it first and returns an error string, so
+    the honest result there is `RETURNED`, same as CrewAI. `BodyState.ABANDONED` on
+    `asyncio.CancelledError` is reliably reached either way (cancellation is a `BaseException`, not
+    caught by the SDK's own `except Exception`). A later `tool_input_guardrails` entry (not this
+    adapter's own) rejecting the call after this one authorized it means `on_invoke_tool` -- ours or
+    the original -- is simply never called, so nothing is fabricated for a body that never ran.
     `guarded_agent_tool()`'s delegation-scope check and `guarded_handoff()`/`DelegationGuardHooks`
     mint via `Guard.delegate()`, not a tool body, so they stay the library's default `pre_hook_only`.
   - `adapters.google_adk`: `Capture.FRAMEWORK_POST_HOOK`, and the richest of the six -- ADK's

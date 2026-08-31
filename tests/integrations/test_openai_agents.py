@@ -23,6 +23,8 @@ from agents import (  # noqa: E402
     Agent,
     RunConfig,
     Runner,
+    ToolGuardrailFunctionOutput,
+    ToolInputGuardrail,
     function_tool,
     handoff,
 )
@@ -89,23 +91,33 @@ def crm_export(destination: str) -> str:
 
 @function_tool
 def crm_query_boom(rows: int) -> str:
-    """Raises instead of returning."""
+    """Raises instead of returning. Default failure_error_function -- the SDK's own
+    on_invoke_tool swallows this before this adapter's wrapper ever sees it."""
     raise ValueError("boom")
 
 
-def _guarded_tools(on_denied="reject"):
+@function_tool(failure_error_function=None)
+def crm_query_boom_unhandled(rows: int) -> str:
+    """Raises instead of returning, with failure_error_function explicitly disabled -- the
+    SDK's own on_invoke_tool does NOT catch this, so this adapter's wrapper genuinely does."""
+    raise ValueError("boom")
+
+
+def _guarded_tools(on_denied="reject", registry=None):
     return [
         guarded_tool(
             crm_query,
             "crm.read",
             context_fn=lambda args: {"rows": args.get("rows", 0)},
             on_denied=on_denied,
+            registry=registry,
         ),
         guarded_tool(
             crm_export,
             "crm.export",
             context_fn=lambda args: {"egress": "any"},
             on_denied=on_denied,
+            registry=registry,
         ),
     ]
 
@@ -542,42 +554,66 @@ class PlainHandoffObjectTests(unittest.TestCase):
 
 
 class ExecutionBindingTests(unittest.TestCase):
-    """0.9.0: `guarded_tool()`'s output guardrail as this adapter's `record_outcome()` wiring --
-    only active on a `schema_version=2` chain."""
+    """0.9.0: `guarded_tool(..., registry=...)`'s wrapped `on_invoke_tool` as this adapter's
+    `record_outcome()` wiring -- opt-in, and only active on a `schema_version=2` chain."""
 
     def setUp(self):
         EXECUTED.clear()
 
-    def _run_single_tool(self, tool, args, root_kwargs=None):
+    def _run_single_tool(self, tool, args, root_kwargs=None, pass_registry=True,
+                          expect_raise=False):
         registry = _registry(**(root_kwargs or {}))
         orchestrator = Agent(
             name="orchestrator", instructions="o",
-            tools=[guarded_tool(tool, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)})],
+            tools=[guarded_tool(tool, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)},
+                                registry=registry if pass_registry else None)],
         )
         model = ScriptedModel([
             [function_call(tool.name, args, call_id="c1")],
             [assistant_message("done")],
         ])
-        _run(orchestrator, "go", registry, model)
+        if expect_raise:
+            with self.assertRaises(Exception):
+                _run(orchestrator, "go", registry, model)
+        else:
+            _run(orchestrator, "go", registry, model)
         return registry
 
-    def test_v2_allowed_call_records_a_returned_outcome_via_the_output_guardrail(self):
+    def test_v2_allowed_call_records_a_returned_outcome_via_the_wrapped_invoker(self):
         registry = self._run_single_tool(crm_query, {"rows": 10}, {"schema_version": 2})
 
         entries = registry.root_guard.audit_log().entries
         allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
         outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
-        self.assertEqual(allow["capture"], Capture.FRAMEWORK_POST_HOOK)
+        self.assertEqual(allow["capture"], Capture.WRAPPER_ASYNC)
         self.assertEqual(allow["adapter"]["module"], "attenu_guard.adapters.openai_agents")
         self.assertEqual(outcome["body_state"], BodyState.RETURNED)
         self.assertEqual(allow["authorized_params_hash"], outcome["invoked_params_hash"])
         self.assertIsInstance(outcome["duration_ms"], int)
         self.assertGreaterEqual(outcome["duration_ms"], 0)
 
-    def test_v2_a_tool_that_raises_is_still_recorded_returned_not_raised(self):
-        """Honesty check: the SDK's default failure_error_function catches the exception INSIDE
-        on_invoke_tool, before the output guardrail ever runs, so this adapter cannot -- and must
-        not claim to -- observe BodyState.RAISED here. See the module docstring."""
+    def test_v2_without_registry_stays_v1_shaped_even_on_a_v2_chain(self):
+        """The opt-in contract (finding 8): omitting `registry=` must never attach an output
+        wrapper or pass capture/authorized_params, EVEN when the guard actually resolves to a
+        schema_version=2 chain -- this is what keeps a caller who never opts in byte-and-type
+        unchanged, unconditionally."""
+        registry = self._run_single_tool(crm_query, {"rows": 10}, {"schema_version": 2},
+                                         pass_registry=False)
+
+        entries = registry.root_guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+        # the v2 GUARD's own check() still stamps its default pre_hook_only + guard-attributed
+        # adapter (Guard.check()'s own honesty default for a bare call) -- this adapter itself
+        # passed no capture/authorized_params at all, which is the point of the test.
+        self.assertEqual(allow["capture"], Capture.PRE_HOOK_ONLY)
+        self.assertEqual(allow["adapter"]["hook_path"], "Guard.check")
+        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
+
+    def test_v2_a_tool_with_the_default_failure_error_function_is_still_recorded_returned(self):
+        """Honesty check: the SDK's OWN on_invoke_tool (built by @function_tool with its default
+        failure_error_function) catches the exception internally and returns an error STRING --
+        this adapter's wrapper calls that SAME on_invoke_tool, so it never sees a raw exception
+        either, and the call is honestly BodyState.RETURNED, not a fabricated RAISED."""
         registry = self._run_single_tool(crm_query_boom, {"rows": 10}, {"schema_version": 2})
 
         entries = registry.root_guard.audit_log().entries
@@ -585,6 +621,20 @@ class ExecutionBindingTests(unittest.TestCase):
         self.assertTrue(outcomes)
         self.assertEqual(outcomes[-1]["body_state"], BodyState.RETURNED)
         self.assertNotIn("error_code", outcomes[-1])
+
+    def test_v2_a_tool_with_failure_error_function_none_records_a_raised_outcome(self):
+        """With failure_error_function=None, the SDK's own on_invoke_tool does NOT catch the
+        tool's exception -- it re-raises, all the way out of Runner.run() too (nothing else in
+        the SDK catches it either) -- so THIS adapter's wrapper genuinely observes it before that
+        propagation, which is the point under test."""
+        registry = self._run_single_tool(crm_query_boom_unhandled, {"rows": 10}, {"schema_version": 2},
+                                         expect_raise=True)
+
+        entries = registry.root_guard.audit_log().entries
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        self.assertTrue(outcomes)
+        self.assertEqual(outcomes[-1]["body_state"], BodyState.RAISED)
+        self.assertEqual(outcomes[-1]["error_code"], "ValueError")
 
     def test_v1_guard_gets_no_call_id_capture_or_outcome(self):
         registry = self._run_single_tool(crm_query, {"rows": 10})
@@ -595,13 +645,27 @@ class ExecutionBindingTests(unittest.TestCase):
         self.assertNotIn("capture", allow)
         self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
 
+    def test_v1_tool_shape_is_byte_identical_no_registry_ever_passed(self):
+        """finding 8: without `registry=`, `guarded_tool()` must not attach an output wrapper or
+        replace on_invoke_tool at all -- checked directly on the returned FunctionTool object,
+        not just on ledger fields. `copy.copy(tool)` (used unconditionally, before and after this
+        change, to leave the caller's original tool untouched) makes the SDK itself rebind
+        on_invoke_tool to a fresh `_FailureHandlingFunctionToolInvoker` around the SAME
+        underlying Python callable -- so identity isn't the right check; `__wrapped__` (which the
+        SDK only exposes through that exact rebinding shape) is."""
+        base = crm_query
+        guarded = guarded_tool(base, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)})
+        self.assertIsNone(guarded.tool_output_guardrails)
+        self.assertIs(guarded.__wrapped__, base.__wrapped__)  # not OUR _wrapped_invoke closure
+        self.assertEqual(len(guarded.tool_input_guardrails), 1)  # only this adapter's own
+
     def test_v2_denied_call_never_records_an_outcome(self):
         """The summarizer is only granted `crm.read` (SUMMARIZER_AUTHORITY); its `crm_export`
         call is denied before the tool body runs, and must never get an outcome."""
         registry = _registry(schema_version=2)
-        summarizer = Agent(name="summarizer", instructions="s", tools=_guarded_tools())
+        summarizer = Agent(name="summarizer", instructions="s", tools=_guarded_tools(registry=registry))
         orchestrator = Agent(
-            name="orchestrator", instructions="o", tools=_guarded_tools(),
+            name="orchestrator", instructions="o", tools=_guarded_tools(registry=registry),
             handoffs=[summarizer],
         )
         model = ScriptedModel([
@@ -614,6 +678,33 @@ class ExecutionBindingTests(unittest.TestCase):
         self.assertEqual(EXECUTED, [])
         entries = registry.root_guard.audit_log().entries
         self.assertTrue(any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries))
+        self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
+
+    def test_v2_a_later_input_guardrail_rejecting_after_this_one_allowed_leaves_no_outcome(self):
+        """finding 2: if a LATER tool_input_guardrail (not this adapter's own) rejects the call
+        after this adapter's guardrail already authorized it and stashed a pending outcome, the
+        SDK never invokes on_invoke_tool at all -- this adapter's wrapper is simply never called,
+        so nothing fabricates an outcome for a body that never ran."""
+        async def veto_everything(data):
+            return ToolGuardrailFunctionOutput.reject_content("vetoed by another guardrail")
+
+        registry = _registry(schema_version=2)
+        tool = guarded_tool(crm_query, "crm.read", context_fn=lambda a: {"rows": a.get("rows", 0)},
+                            registry=registry)
+        tool.tool_input_guardrails = [
+            *tool.tool_input_guardrails,
+            ToolInputGuardrail(guardrail_function=veto_everything, name="third_party_veto"),
+        ]
+        orchestrator = Agent(name="orchestrator", instructions="o", tools=[tool])
+        model = ScriptedModel([
+            [function_call("crm_query", {"rows": 10}, call_id="c1")],
+            [assistant_message("done")],
+        ])
+        _run(orchestrator, "go", registry, model)
+
+        self.assertEqual(EXECUTED, [])  # the body never ran
+        entries = registry.root_guard.audit_log().entries
+        self.assertTrue(any(e["event"] == "allow" and e.get("tool") == "crm_query" for e in entries))
         self.assertEqual([e for e in entries if e["event"] == "outcome"], [])
 
 
