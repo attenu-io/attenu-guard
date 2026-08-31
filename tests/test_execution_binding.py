@@ -95,12 +95,13 @@ class TestCallIdTransition(unittest.TestCase):
         g = _v2_root()
         g.audit_log().sinks = (_ExplodingSink(),)
         with self.assertRaises(CommittedAuditError) as ctx:
-            g.check("crm.read", context={"rows": 1})
+            g.check("crm.read", context={"rows": 1}, capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         err = ctx.exception
         self.assertTrue(err.decision.allowed)
         self.assertIsNotNone(err.decision.call_id)
         self.assertEqual(err.entry.get("call_id"), err.decision.call_id)
-        # spec: "the guard registers an allowed call as pending before raising"
+        # spec: "the guard registers an allowed call as pending before raising" -- for a capture
+        # that promises terminal observation; see TestPendingAndLifecycle for the PRE_HOOK_ONLY case
         self.assertIn(err.decision.call_id, g._chain.pending_for(g.node_id))
 
     def test_record_denial_also_gets_a_call_id_on_v2(self):
@@ -247,7 +248,7 @@ class TestAtomicityAndRollback(unittest.TestCase):
 
     def test_record_outcome_pre_commit_failure_leaves_the_call_id_unresolved(self):
         g = _v2_root()
-        d = g.check("crm.read")
+        d = g.check("crm.read", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         bad_receipt = {"type": "\ud800", "ref": "x", "digest": _HEX64}
         with self.assertRaises(canonical.CanonicalizationError):
             g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1, receipt=bad_receipt)
@@ -293,16 +294,16 @@ class TestCaptureAdapter(unittest.TestCase):
 # pending / complete() / kill's pending_at_kill
 # =========================================================================
 class TestPendingAndLifecycle(unittest.TestCase):
-    def test_only_allow_enters_the_pending_set(self):
+    def test_only_a_terminal_capture_allow_enters_the_pending_set(self):
         g = _v2_root()
-        allow = g.check("crm.read")
-        deny = g.check("pay.transfer")
+        allow = g.check("crm.read", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
+        deny = g.check("pay.transfer", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         self.assertIn(allow.call_id, g._chain.pending_for(g.node_id))
         self.assertNotIn(deny.call_id, g._chain.pending_for(g.node_id))
 
     def test_complete_refuses_while_pending_and_reports_the_call_ids(self):
         g = _v2_root()
-        d = g.check("crm.read")
+        d = g.check("crm.read", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         cr = g.complete()
         self.assertIsInstance(cr, CompletionResult)
         self.assertFalse(cr)
@@ -311,7 +312,7 @@ class TestPendingAndLifecycle(unittest.TestCase):
 
     def test_complete_succeeds_once_the_outcome_is_recorded(self):
         g = _v2_root()
-        d = g.check("crm.read")
+        d = g.check("crm.read", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=5)
         cr = g.complete()
         self.assertTrue(cr)
@@ -319,7 +320,7 @@ class TestPendingAndLifecycle(unittest.TestCase):
 
     def test_kill_snapshots_pending_without_clearing_and_late_outcome_is_accepted(self):
         g = _v2_root()
-        d = g.check("crm.read")
+        d = g.check("crm.read", capture=Capture.WRAPPER_ASYNC, adapter=_adapter())
         revoked = g.revoke()
         kill_entry = next(e for e in g.audit_log().entries if e["event"] == "kill")
         self.assertEqual(kill_entry["pending_at_kill"], [d.call_id])
@@ -329,6 +330,49 @@ class TestPendingAndLifecycle(unittest.TestCase):
         entry = g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=3)
         self.assertEqual(entry["event"], "outcome")
         self.assertNotIn(d.call_id, g._chain.pending_for(g.node_id))
+
+    # ---------------------------------------------------------------------
+    # Codex review round 3, finding 1 (critical): a bare v2 check() -- or any
+    # explicit capture=Capture.PRE_HOOK_ONLY -- promises no terminal observation
+    # (the Guard itself stamps this default per Guard.check()'s own docstring),
+    # so it must never be registered pending. Before this fix, guard.py
+    # unconditionally called register_pending() for every v2 allow regardless of
+    # capture mode: an adapter's default (no-attestation) mode would authorize
+    # correctly and then wedge complete() forever, since nothing was ever going
+    # to call record_outcome() for it. The offline verifier already treated a
+    # missing PRE_HOOK_ONLY outcome as merely `unobserved` (evidence.py) -- this
+    # closes the runtime/offline disagreement Codex found.
+    # ---------------------------------------------------------------------
+    def test_bare_check_never_enters_pending_and_complete_finalizes_immediately(self):
+        g = _v2_root()
+        d = g.check("crm.read")   # no capture -- the Guard's own PRE_HOOK_ONLY default
+        self.assertNotIn(d.call_id, g._chain.pending_for(g.node_id))
+        cr = g.complete()
+        self.assertTrue(cr)
+        self.assertEqual(cr.pending_call_ids, ())
+        self.assertTrue(g.is_complete)
+
+    def test_explicit_pre_hook_only_capture_also_never_enters_pending(self):
+        g = _v2_root()
+        d = g.check("crm.read", capture=Capture.PRE_HOOK_ONLY, adapter=_adapter())
+        self.assertNotIn(d.call_id, g._chain.pending_for(g.node_id))
+        self.assertTrue(g.complete())
+
+    def test_bare_check_then_complete_verifies_as_unobserved_not_unaccounted(self):
+        """The runtime fix (nothing pending, so complete() finalizes True) must agree with the
+        offline verifier's own, pre-existing treatment of a PRE_HOOK_ONLY allow with no outcome:
+        `unobserved` (honestly promised nothing), never `unaccounted` (promised, never delivered)
+        -- and a finalized node with only unobserved calls must never escalate to `failed`."""
+        signer = HS256TestSigner(b"k", kid="k")
+        g = _v2_root()
+        d = g.check("crm.read")   # no capture -- the Guard's own PRE_HOOK_ONLY default
+        cr = g.complete()
+        self.assertTrue(cr)
+        rep = evidence.verify_bundle(evidence.export_bundle(g.audit_log(), signer), signer)
+        eb = rep["execution_binding"]
+        self.assertEqual(eb["per_call"][d.call_id], "unobserved")
+        self.assertEqual(eb["per_node_lifecycle"][g.node_id], "finalized")
+        self.assertEqual(eb["aggregate"], "incomplete")   # spec: any unobserved call keeps it out of "clean"
 
     def test_kill_with_nothing_pending_still_writes_an_empty_list(self):
         g = _v2_root()

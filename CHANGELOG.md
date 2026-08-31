@@ -7,6 +7,23 @@ All notable changes to attenu-guard are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- **`Guard.check()` (core, `guard.py`) — a `PRE_HOOK_ONLY` allow wedged `complete()` forever.**
+  Codex review round 3, finding 1 (critical): `register_pending()` ran unconditionally for
+  every v2 `allow`, in both the normal commit path and the `CommittedAuditError` path, with no
+  regard for `capture`. A bare `check()` (or any explicit `capture=Capture.PRE_HOOK_ONLY`) is an
+  honest promise of NO terminal observation -- nothing is ever going to call `record_outcome()`
+  for it -- yet it was registered pending exactly like a `WRAPPER_SYNC`/`WRAPPER_ASYNC`/
+  `FRAMEWORK_POST_HOOK` allow, so `complete()` refused forever for a node with only
+  `PRE_HOOK_ONLY` calls. This is a defect in the shipped 0.9.0 execution-binding layer itself
+  (unchanged before this fix), surfaced -- not caused -- by round 2/3's adapter mode-splits: the
+  moment `adapters.crewai`/`adapters.google_adk` shipped a genuinely PRE_HOOK_ONLY default mode
+  that real callers would use, this was reachable in ordinary use, not just in a synthetic test.
+  The offline verifier already treated a missing `PRE_HOOK_ONLY` outcome as merely `unobserved`
+  (`evidence.py`'s `_execution_binding`), so runtime and offline semantics disagreed. Fixed: a
+  call is now registered pending only when its capture is one of `WRAPPER_SYNC`/`WRAPPER_ASYNC`/
+  `FRAMEWORK_POST_HOOK` -- in both the normal path and the `CommittedAuditError` path. A bare/
+  `PRE_HOOK_ONLY` allow never enters the pending set, so `complete()` finalizes immediately, and
+  the verifier's `unobserved` classification for it now matches the runtime's own view.
 - `adapters.crewai`: outcome correlation was keyed by a thread-local slot (one per OS thread,
   not per dispatch); two async tool calls interleaved on one thread (CrewAI's own async
   executor can do this) could let a later call's `before` hook overwrite an earlier call's still-

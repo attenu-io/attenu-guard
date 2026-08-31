@@ -1055,6 +1055,11 @@ def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome(effects, 
     assert allow["capture"] == Capture.PRE_HOOK_ONLY
     assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
     assert [e for e in entries if e["event"] == "outcome"] == []
+    # Codex review round 3, finding 1 (core guard.py fix): a PRE_HOOK_ONLY allow must never
+    # wedge complete() -- the coworker's own guard.complete() (this bridge's delegation-
+    # lifecycle marker, fired when the coworker returns) must genuinely finalize, not sit
+    # pending forever behind a call nothing was ever going to record_outcome() for.
+    assert bridge.guard_for(SUMMARIZER).is_complete
 
 
 def test_two_dispatches_sharing_the_same_tool_input_object_correlate_fifo(tools):

@@ -95,6 +95,15 @@ _UNSET = object()
 
 _REQUIRED_ADAPTER_KEYS = ("module", "version", "hook_path")
 
+# Capture modes that promise a terminal observation of the body — the only ones a call should
+# ever be registered PENDING for. `Capture.PRE_HOOK_ONLY` (the Guard's own default for a bare
+# v2 check(), and any adapter's explicit choice) is honest about NOT observing completion —
+# nothing will ever call record_outcome() for it, so treating it as pending would wedge
+# complete() forever (Codex review round 3, finding 1). The offline verifier already treats a
+# missing PRE_HOOK_ONLY outcome as merely `unobserved`, never as broken (evidence.py); runtime
+# pending-tracking now agrees.
+_TERMINAL_CAPTURES = frozenset({Capture.WRAPPER_SYNC, Capture.WRAPPER_ASYNC, Capture.FRAMEWORK_POST_HOOK})
+
 _pkg_version_cache: str | None = None
 
 
@@ -589,7 +598,7 @@ class Guard:
                 self._log_decision(decision, scope, tool, ctx, disposition, extra_fields=extra)
             except CommittedAuditError as exc:
                 decision_with_id = self._attach_call_id(decision, call_id)
-                if is_v2 and decision:
+                if is_v2 and decision and extra.get("capture") in _TERMINAL_CAPTURES:
                     self._chain.register_pending(nid, call_id)
                 exc.decision = decision_with_id
                 raise
@@ -600,8 +609,10 @@ class Guard:
                 raise
 
             decision = self._attach_call_id(decision, call_id)
-            # 5. register pending (allows only).
-            if is_v2 and decision:
+            # 5. register pending (allows only, and only for a capture that promises a terminal
+            #    observation -- a PRE_HOOK_ONLY allow is never going to get a record_outcome()
+            #    call, by construction, so it must never sit in `complete()`'s pending set).
+            if is_v2 and decision and extra.get("capture") in _TERMINAL_CAPTURES:
                 self._chain.register_pending(nid, call_id)
 
             # Strike policy (pre-existing feature, unrelated to execution binding): also inside

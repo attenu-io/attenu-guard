@@ -912,9 +912,9 @@ def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
         )
         session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
         await _drive(runner, session, "go")
-        return root_guard, calls
+        return root_guard, plugin, calls
 
-    root_guard, calls = asyncio.run(scenario())
+    root_guard, plugin, calls = asyncio.run(scenario())
     assert calls  # the body genuinely ran
     entries = root_guard.audit_log().entries
     allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
@@ -922,6 +922,11 @@ def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
     assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default stamp, not ours
     assert "call_id" in allow  # still a genuine v2 chain -- just no outcome recorded against it
     assert [e for e in entries if e["event"] == "outcome"] == []
+    # Codex review round 3, finding 1 (core guard.py fix): a PRE_HOOK_ONLY allow must never
+    # wedge complete() -- summarizer's own guard.complete() (this plugin's after_agent_callback
+    # lifecycle marker, fired when the agent's own run ends) must genuinely finalize, not sit
+    # pending forever behind a call nothing was ever going to record_outcome() for.
+    assert plugin.guard_for("summarizer").is_complete
 
 
 def test_strict_mode_pending_outcome_holds_a_strong_reference_to_tool_context():
