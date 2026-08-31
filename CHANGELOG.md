@@ -434,6 +434,29 @@ All notable changes to attenu-guard are documented here. The format follows
   tool call gets exactly the same capture/outcome treatment as any other allowed call; only the
   internal `registry.delegate(...)` mint step (inside the same `authorize()` call, after the
   scope check passes) adds no second, separate check/outcome of its own.
+  - **Round 2 correction (Codex review, batch 2, finding 1):** the claim above --
+    `Capture.WRAPPER_ASYNC` as an unconditional, always-genuine observation -- was wrong.
+    Pinned ag2 1.0.2's `FunctionTool.register()` folds an ORDERED LIST of middleware into ONE
+    composed chain around the tool body, at TWO independent composition points: agent-level
+    (`Agent(middleware=[...])`, no `reversed()` -- verified empirically, not read off the loop
+    shape alone, that the LAST-listed `on_tool_execution` ends up outermost) and, separately,
+    tool-level (`FunctionTool.with_middleware(...)` / `Toolkit(middleware=[...])`, reversed, so
+    the LAST-listed hook ends up innermost). `ag2/middleware/builtin/` ships real stackable
+    middleware (`llm_retry.py`, `token_limiter.py`, `approval.py`, `logging.py`, `metrics.py`,
+    `telemetry.py`, `history_limiter.py`), so a sibling at either point is not hypothetical. Added
+    `strict_single_hook: bool = False` to `_Gate`, `DelegationGuard`, `guard_middleware()`,
+    `guard_tool_hook()` and `guarded_tools()`. Default: `Capture.PRE_HOOK_ONLY`, no
+    `record_outcome()` ever, safe regardless of what any sibling at either composition point
+    does. `strict_single_hook=True`: an explicit, scoped attestation that this gate is the sole
+    middleware at ITS composition point, unlocking `Capture.WRAPPER_ASYNC` -- this package
+    cannot verify the attestation itself (ag2 exposes no construction-time roster the way
+    `pydantic-ai`'s `for_agent()` does for batch 1's equivalent detect-and-refuse pattern).
+    Tests added, verified against ag2's OWN `_wrap_middleware` composition primitive (not a
+    hand-rolled stand-in): default-mode-honest; both-order short-circuit (`guard_outer`
+    records a false `RETURNED`, `sibling_outer` is never reached); guard-outer with a sibling
+    retrying the real body underneath it (empirically confirmed first, per this project's own
+    "verify, don't assume" discipline: the real body runs twice, this gate records exactly one
+    honest `RETURNED` for the final attempt, silently under-reporting the retry).
 - Execution binding wired into `adapters.agent_framework` (Microsoft Agent Framework):
   `Capture.WRAPPER_ASYNC` from `DelegationGuard.process`, which awaits `call_next()` itself.
   `_freeze()` snapshot of the tool call's arguments, taken at authorization time before

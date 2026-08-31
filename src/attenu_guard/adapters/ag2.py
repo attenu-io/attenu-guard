@@ -118,13 +118,72 @@ KNOWN GAPS (things this seam cannot see)
 
 EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`)
 ------------------------------------------------------------------------------
-`_Gate.run` awaits `call_next(event, context)` itself, exactly like `adapters.langgraph`'s
-reference wiring, so `Capture.WRAPPER_ASYNC` is a genuine observation with no cross-hook
-correlation of any kind. `authorized_params`/`invoked_params` are one immutable snapshot
-(`_freeze()`, never a copy protocol -- see its own docstring) of `event.serialized_arguments`,
-taken at authorization time -- BEFORE `call_next` runs -- and reused unchanged for both.
+TWO MODES, gated by `strict_single_hook` (constructor/factory parameter, default `False`) --
+see the "Round 2 correction" below for why this is no longer a bare, unconditional claim.
 
-`BodyState.RAISED`, genuinely: pinned ag2 1.0.2's `FunctionTool.__call__` (`function_tool.py`)
+Pinned ag2 1.0.2's `FunctionTool.register()` (`function_tool.py`) folds an ORDERED LIST of
+middleware into ONE composed chain around the tool body, at TWO INDEPENDENT points:
+
+* Agent-level: ``for mw in middleware: execution = _wrap_middleware(mw.on_tool_execution,
+  execution)`` -- iterated in the list's original order WITHOUT reversal, so each successive
+  middleware wraps AROUND whatever came before it and the LAST-listed ``on_tool_execution``
+  ends up OUTERMOST (closest to the caller); the FIRST-listed ends up innermost, closest to the
+  tool-level chain below (empirically confirmed against pinned ag2 1.0.2, not read off the
+  loop shape alone -- the absence of a `reversed()` here does not by itself say which end is
+  outer). This is what `Agent(middleware=[...])` -> `guard_middleware()` / `DelegationGuard`
+  sits in.
+* Tool-level: ``for hook in reversed(self._middleware): execution = _wrap_middleware(hook,
+  execution)`` -- reversed, so the LAST-listed hook ends up INNERMOST, closest to the raw
+  ``execution: ToolExecution = self``. This is what `FunctionTool.with_middleware(...)` /
+  `Toolkit(middleware=[...])` -> `guard_tool_hook()` / `guarded_tools()` sits in.
+
+Both are genuinely composable, not hypothetical: `ag2/middleware/builtin/` ships real
+middleware meant to be stacked (`llm_retry.py`, `token_limiter.py`, `approval.py`,
+`logging.py`, `metrics.py`, `telemetry.py`, `history_limiter.py`).
+
+`_Gate.run` genuinely awaits whatever `call_next` it was handed, so `Capture.WRAPPER_ASYNC`
+(when unlocked, see below) is never a fabricated pre-hook read -- but on either composition
+point above, that `call_next` can be a SIBLING middleware's wrapper rather than the tool body,
+if a sibling sits closer to `FunctionTool.__call__` at the SAME composition point:
+
+* Sibling OUTER, short-circuits (returns its own event without calling its `call_next`): this
+  gate is never reached -- nothing is recorded, nothing false.
+* Sibling OUTER, reaches this gate, then RETRIES its own `call_next` (= this gate) more than
+  once for what the model sees as one tool call: each invocation is independently authorized
+  and independently recorded -- honest per-call, but the ledger cannot tell two such records
+  apart from two genuinely separate tool calls.
+* This gate OUTER, a sibling further in short-circuits the real body: this gate's own
+  `call_next` still returns genuinely, so `BodyState` is recorded honestly for whatever it
+  returned -- which is the sibling's fabricated event, not the real tool body's. `RETURNED` (or
+  `RAISED`) is recorded for a body that never ran. Same shape as langchain's/agno's "guard
+  outer, sibling short-circuits" residual.
+* This gate OUTER, a sibling further in retries the real body: `call_next` returns once with
+  the FINAL attempt's result -- one honest record, under-reporting that the body ran more than
+  once.
+* This gate INNER, closest to the body (or to a still-inner middleware): safe by construction
+  at this composition point -- nothing between it and the body can fabricate what it observes.
+
+`strict_single_hook=False` (the default): `capture`/`authorized_params` are never passed to
+`guard.check()`. `Guard.check()` itself stamps `Capture.PRE_HOOK_ONLY` and `record_outcome()`
+is never called -- authorization is enforced exactly as always, and nothing about the tool
+body's actual completion is claimed, regardless of what any sibling middleware at either
+composition point does.
+
+`strict_single_hook=True`: an explicit caller attestation that this `DelegationGuard` /
+`guard_tool_hook` instance is the ONLY middleware registered at ITS composition point
+(agent-level or tool-level respectively) -- unlocks `Capture.WRAPPER_ASYNC` and
+`record_outcome()`. `authorized_params`/`invoked_params` become one immutable snapshot
+(`_freeze()`, never a copy protocol -- see its own docstring) of `event.serialized_arguments`,
+taken at authorization time -- BEFORE `call_next` runs -- reused unchanged for both. This
+package has no way to verify the attestation from inside `_Gate.run`: pinned ag2 exposes no
+construction-time listing of a tool's or an agent's full middleware roster the way
+`pydantic-ai`'s `for_agent()` does for batch 1's equivalent detect-and-refuse pattern -- so a
+wrong attestation reproduces exactly the residuals enumerated above. Set it only when you
+control every middleware registered at that composition point and can confirm, from your own
+registration call, that this is the sole entry there.
+
+`BodyState.RAISED`, genuinely (independent of `strict_single_hook`, once `record_outcome()`
+actually runs under strict mode): pinned ag2 1.0.2's `FunctionTool.__call__` (`function_tool.py`)
 catches every tool-body exception ITSELF and returns a `ToolErrorEvent` carrying the original
 `.error: Exception` -- it never lets a generic exception propagate as a raised Python exception
 through `call_next`'s own return (unlike CrewAI/AutoGen, which swallow the distinction into an
@@ -134,28 +193,42 @@ propagate). So `isinstance(result, ToolErrorEvent)` is the honest signal here, a
 `asyncio.CancelledError` (a `BaseException`, not caught by that `except Exception`) DOES
 propagate through this wrapper's own `await`, and is `BodyState.ABANDONED`, still re-raised.
 
-HONESTY NOTE: a `ToolErrorEvent` observed here could, in principle, come from a DIFFERENT
-middleware positioned closer to the tool body in the same chain returning its own error/denial
-rather than the tool body itself raising -- this adapter has no way to tell those apart from
-the returned event's type alone. In the documented, single-`DelegationGuard`-per-agent usage
-this file itself prescribes, that gap does not arise; a caller stacking additional middleware
-around a guarded tool should treat `BodyState.RAISED` here as "this call did not complete
-cleanly", not necessarily "the tool body itself threw".
+HONESTY NOTE: even under `strict_single_hook=True`, a `ToolErrorEvent` observed here could, in
+principle, come from a DIFFERENT middleware positioned closer to the tool body at a DIFFERENT
+composition point (e.g. this gate is the sole agent-level middleware, but a tool-level sibling
+exists) returning its own error/denial rather than the tool body itself raising -- the
+attestation is scoped to ONE composition point, not to "nothing else touches this tool
+anywhere." A caller running this gate at one composition point while other middleware sits at
+the other should treat `BodyState.RAISED` here as "this call did not complete cleanly through
+MY composition point", not necessarily "the tool body itself threw".
 
-On `schema_version=1` (the default), nothing here changes at all -- `capture`/`adapter`/
-`authorized_params` are never passed to `check()`, and `record_outcome()` is never called.
+ROUND 2 CORRECTION (Codex review, batch 2, finding 1): the previous revision of this section
+claimed `Capture.WRAPPER_ASYNC` was unconditionally "a genuine observation with no cross-hook
+correlation of any kind" for every `_Gate.run` call. That was wrong at BOTH of AG2's
+composition points -- verified against pinned ag2 1.0.2 source as documented above -- because
+`FunctionTool.register()` composes an ORDERED LIST of middleware, not a single fixed wrapper
+around the body, at the agent level AND independently at the tool level. `strict_single_hook`
+(default `False`) is the fix: genuine capture is now an explicit, scoped opt-in, not a default
+claim this adapter could not actually back.
+
+On `schema_version=1` (the default), nothing in this whole section applies -- `capture`/
+`adapter`/`authorized_params` are never passed to `check()`, and `record_outcome()` is never
+called, regardless of `strict_single_hook`.
 
 DELEGATION IS NOT A SEPARATE PATH HERE: unlike the other adapters in this package, AG2 has no
 distinct delegation callback -- every hand-off IS itself a regular tool call (`Agent.as_tool()`,
 `TaskConfig`, `background_agent_tool`, the network `delegate` tool), authorized through the SAME
 `authorize()`/`run()` as any other tool via its own `ToolPolicy(scope=...)`. So a delegation
-tool call gets exactly the same `capture`/`authorized_params`/`record_outcome()` treatment as
-any other allowed call, on a v2 chain -- one `allow`/`outcome` pair, `Capture.WRAPPER_ASYNC`,
-observing the delegating tool's OWN completion (which includes the sub-agent's whole run, since
-`call_next` does not return until it does). The ONLY thing execution binding does not touch is
-the internal `self.registry.delegate(...)` -> `parent.delegate(...)` MINT step that runs after
-the scope check passes, inside the SAME `authorize()` call -- that step never calls
-`guard.check()` a second time, so it contributes no separate `Decision`/`call_id` of its own.
+tool call gets exactly the same `capture`/`authorized_params`/`record_outcome()` treatment,
+gated by the SAME `strict_single_hook`, as any other allowed call at that composition point: on
+`strict_single_hook=True`, one `allow`/`outcome` pair, `Capture.WRAPPER_ASYNC`, observing the
+delegating tool's OWN completion (which includes the sub-agent's whole run, since `call_next`
+does not return until it does) -- subject to the same sibling-middleware residuals documented
+above. On the `False` default, `Capture.PRE_HOOK_ONLY` and no `record_outcome()`, like any other
+call. The ONLY thing execution binding does not touch, in either mode, is the internal
+`self.registry.delegate(...)` -> `parent.delegate(...)` MINT step that runs after the scope
+check passes, inside the SAME `authorize()` call -- that step never calls `guard.check()` a
+second time, so it contributes no separate `Decision`/`call_id` of its own.
 """
 from __future__ import annotations
 
@@ -344,12 +417,14 @@ class _Gate:
         *,
         agent_name: Optional[str],
         on_deny: str,
+        strict_single_hook: bool = False,
     ) -> None:
         _check_on_deny(on_deny)
         self.registry = registry
         self.policies = dict(policies)
         self.agent_name = agent_name
         self.on_deny = on_deny
+        self.strict_single_hook = strict_single_hook
 
     def principal(self, context: Any) -> str:
         """The agent this call is running on.
@@ -408,7 +483,7 @@ class _Gate:
         except Exception:
             arguments = {}
         ctx = policy.context(arguments) if policy.context else {}
-        v2 = guard.schema_version == 2
+        v2 = self.strict_single_hook and guard.schema_version == 2
         snapshot = _snapshot_params(arguments) if v2 else None
         extra = (
             dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
@@ -498,10 +573,12 @@ class DelegationGuard(BaseMiddleware):
         policies: Mapping[str, ToolPolicy],
         agent_name: Optional[str] = None,
         on_deny: str = "result",
+        strict_single_hook: bool = False,
     ) -> None:
         super().__init__(event, context)
         self._gate = _Gate(
-            registry, policies, agent_name=agent_name, on_deny=on_deny
+            registry, policies, agent_name=agent_name, on_deny=on_deny,
+            strict_single_hook=strict_single_hook,
         )
 
     async def on_tool_execution(self, call_next, event, context):
@@ -514,11 +591,21 @@ def guard_middleware(
     *,
     agent_name: Optional[str] = None,
     on_deny: str = "result",
+    strict_single_hook: bool = False,
 ) -> Middleware:
     """The `Middleware` factory to pass to ``Agent(middleware=[...])``.
 
     AG2 instantiates the middleware once per turn, so `on_deny` is validated here —
     otherwise a typo would only surface on the first tool call of the first run.
+
+    strict_single_hook: execution-binding (0.9.0) mode switch -- see the module docstring's
+                       "EXECUTION BINDING ... TWO MODES". `False` (default): every
+                       `guard.check()` call is left to the Guard's own honest
+                       `Capture.PRE_HOOK_ONLY` default; no outcome is ever recorded. `True`:
+                       an explicit attestation that this middleware is the ONLY entry in
+                       `Agent(middleware=[...])` for the tools it guards, AND that none of
+                       those tools carry their own tool-level `with_middleware(...)` chain --
+                       this file cannot verify either half itself.
     """
     _check_on_deny(on_deny)
     return Middleware(
@@ -527,6 +614,7 @@ def guard_middleware(
         policies=policies,
         agent_name=agent_name,
         on_deny=on_deny,
+        strict_single_hook=strict_single_hook,
     )
 
 
@@ -541,15 +629,21 @@ def guard_tool_hook(
     *,
     agent_name: Optional[str] = None,
     on_deny: str = "result",
+    strict_single_hook: bool = False,
 ) -> Callable[..., Awaitable[Any]]:
     """The gate as a bare `ToolMiddleware` (`ag2/middleware/base.py:85`).
 
     Pass it wherever AG2 accepts per-tool middleware: ``@tool(middleware=[hook])``,
     ``Toolkit(*tools, middleware=[hook])``, ``FunctionTool.with_middleware(hook)`` or
     ``agent.as_tool(middleware=[hook])``.
+
+    strict_single_hook: see `guard_middleware`'s own docstring -- the same attestation, scoped
+                       to this tool's own middleware chain (`with_middleware(...)`) instead of
+                       the agent-level one.
     """
     gate = _Gate(
-        registry, policies, agent_name=agent_name, on_deny=_check_on_deny(on_deny)
+        registry, policies, agent_name=agent_name, on_deny=_check_on_deny(on_deny),
+        strict_single_hook=strict_single_hook,
     )
 
     async def hook(call_next, event, context):
@@ -565,6 +659,7 @@ def guarded_tools(
     *,
     agent_name: Optional[str] = None,
     on_deny: str = "result",
+    strict_single_hook: bool = False,
 ) -> List[Any]:
     """Attach the same gate to each tool as *per-tool* middleware.
 
@@ -581,9 +676,15 @@ def guarded_tools(
     `Toolkit` has no `with_middleware`; rebuild it as
     ``Toolkit(*members, middleware=[guard_tool_hook(...)])`` instead
     (`ag2/tools/final/toolkit.py:42-48` bakes toolkit middleware into every member).
+
+    strict_single_hook: forwarded to `guard_tool_hook` unchanged -- see the module
+                       docstring's "EXECUTION BINDING ... TWO MODES". `False` (default) is
+                       safe regardless of what other tool-level middleware these tools carry;
+                       `True` attests this is the ONLY tool-level middleware on each tool.
     """
     hook = guard_tool_hook(
-        registry, policies, agent_name=agent_name, on_deny=on_deny
+        registry, policies, agent_name=agent_name, on_deny=on_deny,
+        strict_single_hook=strict_single_hook,
     )
 
     out: List[Any] = []

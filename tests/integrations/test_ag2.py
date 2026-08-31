@@ -22,6 +22,7 @@ from ag2 import Agent, MemoryStream, tool  # noqa: E402
 from ag2.agent import TaskConfig  # noqa: E402
 from ag2.events import ToolCallEvent, ToolErrorEvent, ToolResultEvent  # noqa: E402
 from ag2.testing import TestConfig  # noqa: E402
+from ag2.tools.final.function_tool import _wrap_middleware  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
     AuditLog,
@@ -653,11 +654,12 @@ def test_guarded_tools_refuses_a_toolkit():
 # adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
 # observation with no cross-hook correlation of any kind.
 # ==========================================================================
-def _v2_gate(authority=None, *, on_deny="result"):
+def _v2_gate(authority=None, *, on_deny="result", strict_single_hook=True):
     root = Guard.issue("orchestrator", authority or ORCHESTRATOR_AUTHORITY,
                        task="root", schema_version=2)
     registry = GuardRegistry(root, "orchestrator")
-    gate = _Gate(registry, POLICIES, agent_name="orchestrator", on_deny=on_deny)
+    gate = _Gate(registry, POLICIES, agent_name="orchestrator", on_deny=on_deny,
+                 strict_single_hook=strict_single_hook)
     return root, registry, gate
 
 
@@ -746,7 +748,8 @@ def test_v2_delegation_tool_itself_is_a_priced_call_and_gets_a_real_outcome():
     inside authorize()) adds no SEPARATE check/outcome of its own."""
     root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
     registry = GuardRegistry(root, "orchestrator")
-    gate = _Gate(registry, ORCHESTRATOR_POLICIES, agent_name="orchestrator", on_deny="result")
+    gate = _Gate(registry, ORCHESTRATOR_POLICIES, agent_name="orchestrator", on_deny="result",
+                 strict_single_hook=True)
     event = _call("task_summarizer", objective="summarize Q3")
 
     async def call_next(ev, ctx):
@@ -803,3 +806,124 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+# ==========================================================================
+# Round 2 (Codex review, batch 2, finding 1): strict_single_hook mode split.
+#
+# ROUND 2 CORRECTION: the version of this file reviewed by Codex constructed _Gate
+# unconditionally with genuine WRAPPER_ASYNC capture -- true only when this gate is the SOLE
+# middleware at its composition point. Pinned ag2 1.0.2's FunctionTool.register() composes an
+# ORDERED LIST of middleware into one chain at TWO independent points (agent-level and
+# tool-level -- see adapters/ag2.py's own "EXECUTION BINDING" docstring); a sibling at either
+# point can short-circuit or repeat the real body. strict_single_hook (default False) is the
+# fix: genuine capture is now an explicit, scoped attestation, verified below against ag2's OWN
+# _wrap_middleware composition primitive, not a hand-rolled stand-in.
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and no outcome is ever recorded -- not merely "no outcome happens
+    to be missing", but zero outcome events at all, and the body still genuinely runs."""
+    root, registry, gate = _v2_gate(strict_single_hook=False)
+    event = _call("crm_query", rows=10)
+    body_ran = []
+
+    async def call_next(ev, ctx):
+        body_ran.append(1)
+        return ToolResultEvent.from_call(ev, result="10 rows")
+
+    result = asyncio.run(gate.run(call_next, event, context=None))
+    assert isinstance(result, ToolResultEvent)
+    assert body_ran == [1]
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert registry.get("orchestrator").complete()
+
+
+@pytest.mark.parametrize("order", ["guard_outer", "sibling_outer"])
+def test_v2_strict_mode_never_fabricates_when_a_sibling_short_circuits(order):
+    """Compose this gate with a sibling middleware that never calls its own call_next (e.g. a
+    cache/mock hook), using AG2's OWN _wrap_middleware -- the exact primitive
+    FunctionTool.register() folds every middleware through -- in both orders:
+
+    * guard_outer: the sibling is INNER and short-circuits before the real body. This gate's
+      own call_next (the sibling's wrapper) still returns genuinely, so `run()` records
+      RETURNED for a body that never ran. The documented, deliberately-opted-into residual of
+      a violated strict_single_hook attestation.
+    * sibling_outer: the sibling is OUTER and short-circuits before ever reaching this gate at
+      all. Safe by construction: nothing is authorized, nothing is recorded.
+    """
+    root, registry, gate = _v2_gate(strict_single_hook=True)
+    event = _call("crm_query", rows=10)
+    body_ran = []
+    mocked_event = ToolResultEvent.from_call(event, result="mocked, never reached the real body")
+
+    async def body(ev, ctx):
+        body_ran.append(1)
+        return ToolResultEvent.from_call(ev, result="10 rows")
+
+    async def short_circuiting_sibling(call_next, ev, ctx):
+        # Never calls call_next -- stands in for a cache-hit / mocking middleware.
+        return mocked_event
+
+    if order == "guard_outer":
+        execution = _wrap_middleware(short_circuiting_sibling, body)   # sibling INNER
+        execution = _wrap_middleware(gate.run, execution)              # guard OUTER
+    else:
+        execution = _wrap_middleware(gate.run, body)                   # guard INNER
+        execution = _wrap_middleware(short_circuiting_sibling, execution)  # sibling OUTER
+
+    result = asyncio.run(execution(event, None))
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+
+    if order == "guard_outer":
+        assert result is mocked_event
+        assert body_ran == []
+        assert outcomes and outcomes[0]["body_state"] == BodyState.RETURNED  # the residual
+        assert len([e for e in entries if e["event"] == "allow"]) == 1
+    else:
+        assert result is mocked_event
+        assert body_ran == []
+        assert outcomes == []  # the gate was never reached -- nothing to record
+        assert [e for e in entries if e["event"] == "allow"] == []
+
+
+def test_v2_strict_mode_when_guard_is_outer_and_a_sibling_retries_the_real_body():
+    """Guard OUTER, a sibling INNER retries its own call_next (= the real body) twice for what
+    the model sees as one tool call -- e.g. a retry-on-empty-result middleware. Verified
+    empirically against ag2's own _wrap_middleware before writing this assertion (not assumed):
+    the real body runs twice, but this gate's own call_next -- the sibling's wrapper -- is
+    awaited exactly once and returns once with the FINAL attempt's result. One honest record,
+    not corrupted, but silently under-reporting that the real body ran more than once -- the
+    documented "guard outer, sibling retries" residual distinct from the short-circuit case
+    above."""
+    root, registry, gate = _v2_gate(strict_single_hook=True)
+    event = _call("crm_query", rows=10)
+    body_calls = []
+
+    async def body(ev, ctx):
+        body_calls.append(1)
+        return ToolResultEvent.from_call(ev, result=f"attempt {len(body_calls)}")
+
+    async def retrying_sibling(call_next, ev, ctx):
+        await call_next(ev, ctx)          # first attempt, discarded by the sibling
+        return await call_next(ev, ctx)   # final attempt, what the model actually sees
+
+    execution = _wrap_middleware(retrying_sibling, body)   # sibling INNER, wraps the body
+    execution = _wrap_middleware(gate.run, execution)      # guard OUTER
+
+    result = asyncio.run(execution(event, None))
+    assert isinstance(result, ToolResultEvent)
+    assert len(body_calls) == 2, "the real body ran twice, invisibly to this gate's own record"
+
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert len(outcomes) == 1, "exactly one honest record, not two, not a duplicate error"
+    assert outcomes[0]["body_state"] == BodyState.RETURNED
