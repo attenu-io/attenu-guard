@@ -115,9 +115,54 @@ KNOWN GAPS (things this seam cannot see)
   the thread-safe/concurrency-safe surface.
 * **Cross-process fan-out** over `ag2.network` is arbitrated at the hub
   (`ag2/network/hub/arbiter.py:245-324`), not here.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`)
+------------------------------------------------------------------------------
+`_Gate.run` awaits `call_next(event, context)` itself, exactly like `adapters.langgraph`'s
+reference wiring, so `Capture.WRAPPER_ASYNC` is a genuine observation with no cross-hook
+correlation of any kind. `authorized_params`/`invoked_params` are one immutable snapshot
+(`_freeze()`, never a copy protocol -- see its own docstring) of `event.serialized_arguments`,
+taken at authorization time -- BEFORE `call_next` runs -- and reused unchanged for both.
+
+`BodyState.RAISED`, genuinely: pinned ag2 1.0.2's `FunctionTool.__call__` (`function_tool.py`)
+catches every tool-body exception ITSELF and returns a `ToolErrorEvent` carrying the original
+`.error: Exception` -- it never lets a generic exception propagate as a raised Python exception
+through `call_next`'s own return (unlike CrewAI/AutoGen, which swallow the distinction into an
+indistinguishable string; unlike Google ADK/pydantic-ai, which let a genuine exception
+propagate). So `isinstance(result, ToolErrorEvent)` is the honest signal here, and
+`error_code=type(result.error).__name__` is read straight off it, not inferred from a message.
+`asyncio.CancelledError` (a `BaseException`, not caught by that `except Exception`) DOES
+propagate through this wrapper's own `await`, and is `BodyState.ABANDONED`, still re-raised.
+
+HONESTY NOTE: a `ToolErrorEvent` observed here could, in principle, come from a DIFFERENT
+middleware positioned closer to the tool body in the same chain returning its own error/denial
+rather than the tool body itself raising -- this adapter has no way to tell those apart from
+the returned event's type alone. In the documented, single-`DelegationGuard`-per-agent usage
+this file itself prescribes, that gap does not arise; a caller stacking additional middleware
+around a guarded tool should treat `BodyState.RAISED` here as "this call did not complete
+cleanly", not necessarily "the tool body itself threw".
+
+On `schema_version=1` (the default), nothing here changes at all -- `capture`/`adapter`/
+`authorized_params` are never passed to `check()`, and `record_outcome()` is never called.
+
+DELEGATION IS NOT A SEPARATE PATH HERE: unlike the other adapters in this package, AG2 has no
+distinct delegation callback -- every hand-off IS itself a regular tool call (`Agent.as_tool()`,
+`TaskConfig`, `background_agent_tool`, the network `delegate` tool), authorized through the SAME
+`authorize()`/`run()` as any other tool via its own `ToolPolicy(scope=...)`. So a delegation
+tool call gets exactly the same `capture`/`authorized_params`/`record_outcome()` treatment as
+any other allowed call, on a v2 chain -- one `allow`/`outcome` pair, `Capture.WRAPPER_ASYNC`,
+observing the delegating tool's OWN completion (which includes the sub-agent's whole run, since
+`call_next` does not return until it does). The ONLY thing execution binding does not touch is
+the internal `self.registry.delegate(...)` -> `parent.delegate(...)` MINT step that runs after
+the scope check passes, inside the SAME `authorize()` call -- that step never calls
+`guard.check()` a second time, so it contributes no separate `Decision`/`call_id` of its own.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import inspect
+import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional
 
@@ -127,8 +172,8 @@ from ag2.tools import Toolkit
 from ag2.tools.final.function_tool import FunctionTool
 from ag2.utils import AGENT_CONTEXT_DEPENDENCY_KEY
 
-from attenu_guard import Authority, AuthorityError, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityError, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 __all__ = [
     "Grant",
@@ -150,6 +195,58 @@ def _check_on_deny(on_deny: str) -> str:
     if on_deny not in _ON_DENY:
         raise ValueError("on_deny must be 'result' or 'error'")
     return on_deny
+
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}._Gate.run",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or AG2 itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    `call_next` runs -- and reused as both `authorized_params` and `invoked_params`."""
+    return _freeze(dict(arguments))
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +371,14 @@ class _Gate:
             return ToolErrorEvent.from_call(event, PermissionError(message))
         return ToolResultEvent.from_call(event, result=message)
 
-    def authorize(self, event: ToolCallEvent, context: Any) -> Optional[Any]:
-        """Return a denial event, or None when the call may proceed."""
+    def authorize(
+        self, event: ToolCallEvent, context: Any
+    ) -> "tuple[Optional[Any], Optional[Guard], Any, Any]":
+        """Return `(denial_event_or_None, guard, call_id_or_None, snapshot_or_None)`.
+
+        The last two fields are set only for an ALLOWED, v2 `check()` -- what `run()` needs
+        to close the outcome out afterward.
+        """
         name = event.name
         principal = self.principal(context)
         policy = self.policies.get(name)
@@ -290,7 +393,7 @@ class _Gate:
                     ReasonCode.NO_AUTHORITY, msg, tool=name,
                     disposition=Disposition.UNRESOLVED,
                 )
-            return self.denial(event, msg)
+            return self.denial(event, msg), None, None, None
 
         guard = self.registry.get(principal)
         if guard is None:
@@ -298,23 +401,29 @@ class _Gate:
                 event,
                 f"attenu-guard: agent {principal!r} holds no delegated authority "
                 f"(fail-closed).",
-            )
+            ), None, None, None
 
         try:
             arguments = event.serialized_arguments
         except Exception:
             arguments = {}
         ctx = policy.context(arguments) if policy.context else {}
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(arguments) if v2 else None
+        extra = (
+            dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(
             policy.scope, context=ctx, tool=name, metered=policy.metered,
-            disposition=policy.disposition,
+            disposition=policy.disposition, **extra,
         )
         if not decision:
             return self.denial(
                 event,
                 f"attenu-guard: {decision.explain()} "
                 f"(agent={principal}, tool={name}, scope={policy.scope})",
-            )
+            ), None, None, None
 
         # Allowed — and if this tool is itself a delegation point, mint the child now,
         # before the body starts the sub-agent.
@@ -325,12 +434,12 @@ class _Gate:
                 return self.denial(
                     event,
                     f"attenu-guard: cannot delegate to {policy.delegates_to!r}: {exc}",
-                )
-        return None
+                ), None, None, None
+        return None, guard, (decision.call_id if v2 else None), snapshot
 
     async def run(self, call_next, event: ToolCallEvent, context: Any):
         try:
-            denial = self.authorize(event, context)
+            denial, guard, call_id, snapshot = self.authorize(event, context)
         except Exception as exc:
             # Never fall through to the body because the check itself broke. AG2
             # converts a raise into a ToolErrorEvent anyway (`executor.py:116-122`),
@@ -342,7 +451,29 @@ class _Gate:
             # No `call_next` -> `FunctionTool.__call__` (`function_tool.py:132`) is
             # never reached, so the tool body provably does not run.
             return denial
-        return await call_next(event, context)
+        if call_id is None:
+            return await call_next(event, context)
+
+        start = time.monotonic()
+        try:
+            result = await call_next(event, context)
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            guard.record_outcome(call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        if isinstance(result, ToolErrorEvent):
+            # Genuinely observed: FunctionTool.__call__ catches every tool-body exception
+            # itself and returns this typed event carrying the original .error -- see the
+            # module docstring's "EXECUTION BINDING" for what this can and cannot tell apart.
+            guard.record_outcome(call_id, BodyState.RAISED,
+                                 error_code=type(result.error).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        else:
+            guard.record_outcome(call_id, _body_state_for(result),
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
 
 class DelegationGuard(BaseMiddleware):

@@ -394,6 +394,24 @@ All notable changes to attenu-guard are documented here. The format follows
   each hook since they share one authorization function. `delegation_tool_hook`/
   `adelegation_tool_hook` mint via `parent.delegate(...)`, which never calls `guard.check()` --
   unaffected.
+- Execution binding wired into `adapters.ag2` (the AutoGen fork): `Capture.WRAPPER_ASYNC` from
+  `_Gate.run`, which awaits `call_next(event, context)` itself. `_freeze()` snapshot of
+  `event.serialized_arguments`, taken at authorization time before `call_next` runs.
+  `BodyState.RAISED` is read from a genuinely honest, TYPED signal here: pinned ag2 1.0.2's
+  `FunctionTool.__call__` catches every tool-body exception ITSELF and returns a
+  `ToolErrorEvent` carrying the original `.error: Exception` -- it never lets the exception
+  propagate as a raised Python exception through `call_next`'s own return (unlike CrewAI/
+  AutoGen, which swallow the distinction into an indistinguishable string), so
+  `isinstance(result, ToolErrorEvent)` + `type(result.error).__name__` is read straight off the
+  framework's own typed result, not inferred. Documented honesty note: a `ToolErrorEvent` could,
+  in principle, come from a different middleware ahead of this one in the chain rather than the
+  tool body itself, though not in this module's own prescribed single-`DelegationGuard`-per-
+  agent usage. `asyncio.CancelledError` on the wrapper's own `await` is `BodyState.ABANDONED`,
+  still re-raised. AG2 has no separate delegation callback -- every hand-off IS a regular tool
+  call authorized through this SAME path via its own `ToolPolicy(scope=...)`, so a delegation
+  tool call gets exactly the same capture/outcome treatment as any other allowed call; only the
+  internal `registry.delegate(...)` mint step (inside the same `authorize()` call, after the
+  scope check passes) adds no second, separate check/outcome of its own.
 
 ## [0.9.0] — 2026-08-31
 

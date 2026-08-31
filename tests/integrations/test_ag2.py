@@ -20,7 +20,7 @@ pytest.importorskip("ag2")
 
 from ag2 import Agent, MemoryStream, tool  # noqa: E402
 from ag2.agent import TaskConfig  # noqa: E402
-from ag2.events import ToolCallEvent  # noqa: E402
+from ag2.events import ToolCallEvent, ToolErrorEvent, ToolResultEvent  # noqa: E402
 from ag2.testing import TestConfig  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
@@ -30,8 +30,10 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 from attenu_guard.adapters.ag2 import (  # noqa: E402
     Grant,
+    _Gate,
     GuardRegistry,
     ToolPolicy,
     guard_middleware,
@@ -643,3 +645,161 @@ def test_guarded_tools_refuses_a_toolkit():
     kit = Toolkit(*_summarizer_tools(Effects()))
     with pytest.raises(TypeError):
         guarded_tools([kit], registry, POLICIES)
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# _Gate.run awaits call_next(event, context) itself, exactly like
+# adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
+# observation with no cross-hook correlation of any kind.
+# ==========================================================================
+def _v2_gate(authority=None, *, on_deny="result"):
+    root = Guard.issue("orchestrator", authority or ORCHESTRATOR_AUTHORITY,
+                       task="root", schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    gate = _Gate(registry, POLICIES, agent_name="orchestrator", on_deny=on_deny)
+    return root, registry, gate
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    root, registry, gate = _v2_gate()
+    event = _call("crm_query", rows=10)
+
+    async def call_next(ev, ctx):
+        return ToolResultEvent.from_call(ev, result="10 rows")
+
+    result = asyncio.run(gate.run(call_next, event, context=None))
+    assert isinstance(result, ToolResultEvent)
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.ag2"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert registry.get("orchestrator").complete()
+
+
+def test_v2_a_tool_error_event_records_a_raised_outcome():
+    """Pinned ag2 1.0.2's FunctionTool.__call__ catches every tool-body exception itself and
+    returns a ToolErrorEvent carrying the original .error -- never a raised Python exception
+    through call_next's own return. This adapter reads that typed signal honestly."""
+    root, registry, gate = _v2_gate()
+    event = _call("crm_query", rows=10)
+
+    async def call_next(ev, ctx):
+        return ToolErrorEvent.from_call(ev, error=ValueError("boom"))
+
+    result = asyncio.run(gate.run(call_next, event, context=None))
+    assert isinstance(result, ToolErrorEvent)
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    narrow = Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900)
+    root, registry, gate = _v2_gate(narrow)  # no crm.export
+    event = _call("crm_export", destination="attacker.example")
+    reached = []
+
+    async def call_next(ev, ctx):
+        reached.append(ev)
+        return ToolResultEvent.from_call(ev, result="exported")
+
+    result = asyncio.run(gate.run(call_next, event, context=None))
+    assert isinstance(result, ToolResultEvent)  # the denial message, not the tool's own result
+    assert reached == [], "the wrapped call must never be reached on denial"
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root")  # v1, default
+    registry = GuardRegistry(root, "orchestrator")
+    gate = _Gate(registry, POLICIES, agent_name="orchestrator", on_deny="result")
+    event = _call("crm_query", rows=10)
+
+    async def call_next(ev, ctx):
+        return ToolResultEvent.from_call(ev, result="10 rows")
+
+    asyncio.run(gate.run(call_next, event, context=None))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_tool_itself_is_a_priced_call_and_gets_a_real_outcome():
+    """AG2's delegation is a regular tool call with its own ToolPolicy(scope=...) here
+    (`task_summarizer` costs `crm.read`), so it goes through the SAME authorize()/run() as
+    any other tool and DOES get capture/outcome bound -- unlike CrewAI/LangChain, where
+    delegation mints via a separate path that never calls guard.check() at all. Only the
+    internal registry.delegate() mint step (which runs AFTER the scope check passes, still
+    inside authorize()) adds no SEPARATE check/outcome of its own."""
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    gate = _Gate(registry, ORCHESTRATOR_POLICIES, agent_name="orchestrator", on_deny="result")
+    event = _call("task_summarizer", objective="summarize Q3")
+
+    async def call_next(ev, ctx):
+        return ToolResultEvent.from_call(ev, result="delegated")
+
+    asyncio.run(gate.run(call_next, event, context=None))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "task_summarizer")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert "summarizer" in registry._guards, "the child Guard must still have been minted"
+    # exactly one allow/outcome pair for this call -- the mint step contributes no second one
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    assert len([e for e in entries if e["event"] == "outcome"]) == 1
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    root, registry, gate = _v2_gate()
+    event = _call("crm_query", rows=10)
+
+    async def hangs(ev, ctx):
+        await asyncio.sleep(3600)
+        return ToolResultEvent.from_call(ev, result="never")
+
+    async def scenario():
+        task = asyncio.ensure_future(gate.run(hangs, event, context=None))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    from attenu_guard.adapters.ag2 import _snapshot_params
+
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"x": AliasingList([1])}
+    snapshot = _snapshot_params(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
