@@ -36,6 +36,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Load the example modules by path.
@@ -386,3 +387,154 @@ def test_missing_guard_is_denied_by_default():
         _run(agent.run("go", deps=object()))
 
     assert ran == []
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# Both hook points here are WRAPPER capture -- the adapter calls the tool body
+# itself (via `handler`/`self.wrapped.call_tool`), so no cross-hook honesty
+# caveat is needed: RETURNED and RAISED are both genuinely observed.
+# ==========================================================================
+
+def _single_read_toolset(sink: dict):
+    toolset = FunctionToolset()
+
+    @toolset.tool_plain
+    def crm_query(rows: int) -> str:
+        sink["rows"] = rows
+        return f"read {rows} rows"
+
+    return toolset
+
+
+def _boom_toolset():
+    toolset = FunctionToolset()
+
+    @toolset.tool_plain
+    def crm_query(rows: int) -> str:
+        raise ValueError("boom")
+
+    return toolset
+
+
+def _query_agent(toolset, *, schema_version=1, on_denial="raise"):
+    agent = Agent(
+        FunctionModel(
+            lambda m, i: ModelResponse(parts=[ToolCallPart("crm_query", {"rows": 10})])
+            if _step(m) == 0
+            else ModelResponse(parts=[TextPart("done")])
+        ),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[toolset],
+        capabilities=[dg_pai.DelegationGuard(
+            policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+            on_denial=on_denial,
+        )],
+    )
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root",
+                       schema_version=schema_version)
+    return agent, root
+
+
+def test_delegation_guard_v2_allowed_call_records_a_returned_outcome():
+    sink: dict = {}
+    agent, root = _query_agent(_single_read_toolset(sink), schema_version=2)
+
+    _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    assert sink["rows"] == 10
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.pydantic_ai"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_delegation_guard_v2_raising_tool_records_a_raised_outcome():
+    agent, root = _query_agent(_boom_toolset(), schema_version=2)
+
+    with pytest.raises(ValueError):
+        _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes and outcomes[-1]["body_state"] == BodyState.RAISED
+    assert outcomes[-1]["error_code"] == "ValueError"
+
+
+def test_delegation_guard_v1_gets_no_call_id_capture_or_outcome():
+    sink: dict = {}
+    agent, root = _query_agent(_single_read_toolset(sink), schema_version=1)
+
+    _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "call_id" not in allow and "capture" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_delegation_guard_v2_denied_call_never_records_an_outcome():
+    """The child's RowLimit(5_000) is exceeded -- denied before the tool body runs."""
+    sink: dict = {}
+    toolset = _single_read_toolset(sink)
+    agent = Agent(
+        FunctionModel(
+            lambda m, i: ModelResponse(parts=[ToolCallPart("crm_query", {"rows": 90_000})])
+            if _step(m) == 0 else ModelResponse(parts=[TextPart("done")])
+        ),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[toolset],
+        capabilities=[dg_pai.DelegationGuard(
+            policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+        )],
+    )
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    child = root.delegate("summarizer", demo.SUMMARIZER_AUTHORITY, task="summarize")  # RowLimit(5_000)
+
+    with pytest.raises(AuthorityDenied):
+        _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=child, app=None)))
+
+    assert sink == {}
+    entries = root.audit_log().entries
+    assert any(e["event"] == "deny" and e.get("tool") == "crm_query" for e in entries)
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_guarded_toolset_v2_allowed_call_records_a_returned_outcome():
+    """GuardedToolset.call_tool is the OTHER wrapper hook point -- no cross-hook correlation,
+    authorization and the wrapper capture live in one method."""
+    exported: dict = {}
+
+    toolset = FunctionToolset()
+
+    @toolset.tool_plain
+    def crm_export(destination: str) -> str:
+        exported["to"] = destination
+        return "exported"
+
+    guarded = dg_pai.GuardedToolset(
+        toolset,
+        policies={"crm_export": dg_pai.ToolPolicy("crm.export", context=lambda a: {"egress": "any"})},
+    )
+    agent = Agent(
+        FunctionModel(
+            lambda m, i: ModelResponse(parts=[ToolCallPart("crm_export", {"destination": "s3://x"})])
+            if _step(m) == 0 else ModelResponse(parts=[TextPart("done")])
+        ),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[guarded],
+    )
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+
+    _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    assert exported["to"] == "s3://x"
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_export")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED

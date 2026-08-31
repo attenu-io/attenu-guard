@@ -48,9 +48,35 @@ its body runs, and every allow/deny lands in the chain's hash-chained audit log.
 
 This module is deliberately dependency-light: it imports `pydantic_ai` and
 `attenu_guard`, and nothing else. Copy it into your project as-is.
+
+Execution binding (0.9.0, on a `schema_version=2` chain — see `Guard.issue`):
+BOTH hook points here are genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`) — unlike
+most other framework adapters, this one calls the tool body itself and awaits it, the
+same way `adapters.langgraph`'s reference wiring does:
+
+  * `DelegationGuard`: `before_tool_execute` still does authorization (unchanged shape,
+    unchanged on `schema_version=1`); on a v2 chain it ALSO passes `capture`/`adapter`/
+    `authorized_params` and stashes the allowed `Decision` for `wrap_tool_execute` --
+    `AbstractCapability`'s own wrap-the-body hook -- to close out, correlated by
+    `id(call)` (the SAME `ToolCallPart` object flows through both hooks for one call
+    within `ToolManager._run_execute_hooks`).
+  * `GuardedToolset.call_tool`: a `WrapperToolset.call_tool` override that already calls
+    `self.wrapped.call_tool(...)` directly -- no cross-hook correlation needed at all;
+    authorization and the wrapper capture live in the same method, exactly like
+    `adapters.langgraph`'s `guard_node`.
+
+Both report `BodyState.RAISED` (with `error_code`) on a genuine exception from the tool
+body -- pydantic-ai does not swallow it before either hook runs -- and `BodyState.ABANDONED`
+on `asyncio.CancelledError` (still re-raised, so cancellation propagates normally).
+`UNGUARDED` tools (`policy.scope is None`) never call `guard.check()` at all, so there is
+nothing to bind an outcome to.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
+import inspect
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Literal, Mapping, TypeVar
 
@@ -61,8 +87,35 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
-from attenu_guard import Authority, AuthorityDenied, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.DelegationGuard.wrap_tool_execute",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    return inspect.isgenerator(result) or inspect.isasyncgen(result)
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _snapshot_params(args: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
+    try:
+        return copy.deepcopy(dict(args))
+    except Exception:
+        return dict(args)
 
 __all__ = [
     "ToolPolicy",
@@ -236,6 +289,58 @@ def authorize_tool_call(
     raise AuthorityDenied(decision)
 
 
+def _authorize_v2(
+    guard: Guard,
+    policy: ToolPolicy,
+    tool_name: str,
+    args: Mapping[str, Any],
+    *,
+    on_denial: OnDenial,
+) -> tuple[Decision, Any]:
+    """Like `authorize_tool_call`, for a `schema_version=2` chain: passes `capture`/`adapter`/
+    `authorized_params` and RETURNS `(decision, snapshot)` on allow instead of `None`, so the
+    caller can bind an outcome to `decision.call_id`. Never called for `UNGUARDED`
+    (`policy.scope is None`) -- callers check that first, exactly as `authorize_tool_call` does."""
+    snapshot = _snapshot_params(args)
+    context = dict(policy.context(args)) if policy.context is not None else {}
+    decision = guard.check(
+        policy.scope, context=context, metered=policy.metered, tool=tool_name,
+        disposition=policy.disposition, capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO,
+        authorized_params=snapshot,
+    )
+    if decision:
+        return decision, snapshot
+
+    if on_denial == "tool_failed":
+        raise ToolFailed(
+            f"Denied by attenu-guard: {decision.explain()} "
+            f"(tool={tool_name!r}, scope={policy.scope!r}). "
+            f"This agent does not hold the authority for this action; do not retry it."
+        )
+    raise AuthorityDenied(decision)
+
+
+async def _run_wrapped_and_record_outcome(
+    guard: Guard, call_id: str, snapshot: Any, handler: Callable[[], Any],
+) -> Any:
+    """Call `handler()` (the tool body), time it, and call `guard.record_outcome()` with what
+    actually happened -- the shared tail of both hook points' wrapper capture."""
+    started_at = time.monotonic()
+    try:
+        result = await handler()
+    except asyncio.CancelledError:
+        guard.record_outcome(call_id, BodyState.ABANDONED, invoked_params=snapshot,
+                             duration_ms=_elapsed_ms(started_at))
+        raise
+    except Exception as exc:
+        guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+        raise
+    guard.record_outcome(call_id, _body_state_for(result), invoked_params=snapshot,
+                         duration_ms=_elapsed_ms(started_at))
+    return result
+
+
 def _resolve(
     ctx: RunContext[Any],
     tool_name: str,
@@ -298,6 +403,10 @@ class DelegationGuard(AbstractCapability[Any]):
         self.on_unmapped = on_unmapped
         self.on_denial = on_denial
         self.id = id
+        # Execution binding (0.9.0): an allowed, v2 check() waiting on wrap_tool_execute to
+        # close it out -- keyed by id(call), the SAME ToolCallPart before_tool_execute and
+        # wrap_tool_execute both see for one call within ToolManager._run_execute_hooks.
+        self._pending: dict[int, tuple[Guard, str, Any]] = {}
 
     async def before_tool_execute(
         self,
@@ -313,10 +422,33 @@ class DelegationGuard(AbstractCapability[Any]):
         )
         if resolved is not None:
             guard, policy = resolved
-            authorize_tool_call(
-                guard, policy, call.tool_name, args, on_denial=self.on_denial
-            )
+            if policy.scope is not None and guard.schema_version == 2:
+                decision, snapshot = _authorize_v2(
+                    guard, policy, call.tool_name, args, on_denial=self.on_denial
+                )
+                self._pending[id(call)] = (guard, decision.call_id, snapshot)
+            else:
+                authorize_tool_call(
+                    guard, policy, call.tool_name, args, on_denial=self.on_denial
+                )
         return args
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[Any],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        handler: Callable[[dict[str, Any]], Any],
+    ) -> Any:
+        pending = self._pending.pop(id(call), None)
+        if pending is None:
+            return await handler(args)  # v1, UNGUARDED, or the call was denied
+        guard, call_id, snapshot = pending
+        return await _run_wrapped_and_record_outcome(
+            guard, call_id, snapshot, lambda: handler(args)
+        )
 
 
 # ==========================================================================
@@ -349,9 +481,16 @@ class GuardedToolset(WrapperToolset[Any]):
         resolved = _resolve(
             ctx, name, self.policies, self.get_guard, self.on_unmapped, "GuardedToolset"
         )
-        if resolved is not None:
-            guard, policy = resolved
-            authorize_tool_call(guard, policy, name, tool_args, on_denial=self.on_denial)
+        if resolved is None:
+            return await self.wrapped.call_tool(name, tool_args, ctx, tool)
+        guard, policy = resolved
+        if policy.scope is not None and guard.schema_version == 2:
+            decision, snapshot = _authorize_v2(guard, policy, name, tool_args, on_denial=self.on_denial)
+            return await _run_wrapped_and_record_outcome(
+                guard, decision.call_id, snapshot,
+                lambda: self.wrapped.call_tool(name, tool_args, ctx, tool),
+            )
+        authorize_tool_call(guard, policy, name, tool_args, on_denial=self.on_denial)
         return await self.wrapped.call_tool(name, tool_args, ctx, tool)
 
     # NOTE: `WrapperToolset` rebuilds itself with `dataclasses.replace` in

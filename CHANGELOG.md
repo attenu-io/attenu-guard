@@ -34,6 +34,15 @@ All notable changes to attenu-guard are documented here. The format follows
     through before/after/error uniformly. Applies uniformly to both the tool check and the
     delegation-scope check (`delegation_scope=...`), since both go through `_authorize()` and
     both are real ADK tool calls with the same before/after/error lifecycle.
+  - `adapters.pydantic_ai`: `Capture.WRAPPER_ASYNC` at BOTH hook points -- unlike the framework-post-hook
+    adapters above, this one calls the tool body itself and awaits it, like `adapters.langgraph`'s
+    reference wiring. `DelegationGuard` authorizes in `before_tool_execute` (unchanged shape on
+    `schema_version=1`) and closes the outcome out in `AbstractCapability.wrap_tool_execute`,
+    correlated by `id(call)` (the same `ToolCallPart` flows through both for one call).
+    `GuardedToolset.call_tool` needs no such correlation -- it already calls
+    `self.wrapped.call_tool(...)` directly, so authorization and capture live in one method. Both
+    genuinely observe and report `BodyState.RAISED` (pydantic-ai does not swallow a tool's
+    exception before either hook runs) and `BodyState.ABANDONED` on `asyncio.CancelledError`.
 
 ## [0.9.0] — 2026-08-31
 
