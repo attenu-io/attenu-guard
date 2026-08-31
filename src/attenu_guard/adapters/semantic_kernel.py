@@ -83,10 +83,49 @@ Every tool call is then checked against *that agent's* authority before its body
 runs, and every allow/deny lands in the chain's hash-chained audit log.
 `chain.revoke("Summarizer")` cascades to the whole subtree immediately.
 
+EXECUTION BINDING (`record_outcome`, 0.9.0, OPT-IN via `schema_version=2`)
+---------------------------------------------------------------------
+`_dg_tool_gate` calls the function body itself — `await next(context)` — so
+this is a genuine `Capture.WRAPPER_ASYNC` (there is no sync entry point;
+`KernelFunction.invoke`/`invoke_stream` are both `async`), exactly like
+`adapters.langgraph`'s reference wiring. Verified directly against pinned
+semantic-kernel 1.44.1: `KernelFunction.invoke`'s own `try`/`except Exception
+as e: ...; raise e` around `await stack(function_context)` re-raises
+unchanged, and `KernelFunctionFromMethod._invoke_internal` does not swallow
+its own exception either — a raise from the tool body reaches this filter's
+`await next(context)` as a real Python exception, so `BodyState.RAISED` (with
+`error_code = type(exc).__name__`) is genuinely observed, not inferred.
+
+The SAME registered filter also gates `invoke_stream` (both call sites share
+one `FilterTypes.FUNCTION_INVOCATION` stack). There,
+`KernelFunctionFromMethod._invoke_internal_stream` sets `context.result.value`
+to the raw generator/async-generator without consuming it — the actual
+iteration happens in `invoke_stream` itself, AFTER `next(context)` has already
+returned to this filter — so `context.result.value` is inspected for
+generator-ness (`_is_deferred_result`) and reported as `BodyState.DEFERRED`
+when it is one, never fabricated as `RETURNED`.
+
+`_freeze()` snapshot of `dict(context.arguments)` — the function's own raw
+invocation arguments, not the derived `policy.context_for(...)` ceiling
+context — taken immediately before `await next(context)` runs.
+`asyncio.CancelledError` on the filter's own `await` is `BodyState.ABANDONED`,
+still re-raised.
+
+The delegation gate (`_dg_delegation_gate`) never calls `guard.check()` at
+all — a handoff mints the target's Guard via `chain.delegate()` ->
+`Guard.delegate()`, not a scope check — so it stays outside execution binding
+entirely, same as every adapter whose delegation is a mint rather than a
+priced call (`adapters.langchain`/`adapters.llama_index`/`adapters.camel`,
+unlike `adapters.ag2`/`adapters.agent_framework`).
+
 This module imports `semantic_kernel` and `attenu_guard` and nothing else.
 Copy it into your project as-is.
 """
 from __future__ import annotations
+
+import asyncio
+import inspect
+import time
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Literal, Mapping
@@ -95,13 +134,46 @@ from semantic_kernel.exceptions.function_exceptions import FunctionExecutionExce
 from semantic_kernel.filters.filter_types import FilterTypes
 from semantic_kernel.functions.function_result import FunctionResult
 
-from attenu_guard import Authority, AuthorityDenied, Decision, Guard, ReasonCode
-from attenu_guard.reasons import Disposition
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard, ReasonCode, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition
 
 # Reason code for "this principal holds no Authority in the chain at all".
 # `getattr` because older attenu-guard releases predate the constant; the
 # wire value is the contract, not the Python name.
 NO_AUTHORITY = getattr(ReasonCode, "NO_AUTHORITY", "no_authority")
+
+_ADAPTER_INFO = {"module": __name__, "version": __version__, "hook_path": f"{__name__}._dg_tool_gate"}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """Snapshot `value` as plain, already-copied builtins — never a copy
+    protocol (`copy.deepcopy`), which a hostile argument could subvert by
+    defining `__deepcopy__` to return itself (or anything) unchanged."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
 
 __all__ = [
     "ToolPolicy",
@@ -419,12 +491,17 @@ def attach_guard(
                                  NO_AUTHORITY, message)
             raise MissingGuardError(message)
 
+        v2 = guard.schema_version == 2
+        snapshot = _freeze(dict(context.arguments)) if v2 else None
+        extra = dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO,
+                    authorized_params=snapshot) if v2 else {}
         decision = guard.check(
             policy.scope,
             context=policy.context_for(context.arguments),
             metered=policy.metered,
             tool=function.fully_qualified_name,
             disposition=policy.disposition,
+            **extra,
         )
         chain._record(agent_name, function.fully_qualified_name, policy.scope, decision)
 
@@ -442,7 +519,25 @@ def attach_guard(
             )
             return
 
-        await next(context)
+        call_id = decision.call_id if v2 else None
+        if call_id is None:
+            await next(context)
+            return
+
+        started_at = time.monotonic()
+        try:
+            await next(context)
+        except asyncio.CancelledError:
+            guard.record_outcome(call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+            raise
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+            raise
+        result_value = context.result.value if context.result is not None else None
+        guard.record_outcome(call_id, _body_state_for(result_value),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
 
     kernel.add_filter(FilterTypes.FUNCTION_INVOCATION, _dg_tool_gate)
 

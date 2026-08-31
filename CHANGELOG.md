@@ -474,6 +474,30 @@ All notable changes to attenu-guard are documented here. The format follows
   closed-source CLI, not on anything this module can read or exercise offline; documented
   prominently in the module docstring rather than assumed. `duration_ms` is an observation window
   (`PreToolUse` hook seen to `PostToolUse`/`PostToolUseFailure` hook seen), not a body-only timer.
+- Execution binding wired into `adapters.semantic_kernel` (Microsoft Semantic Kernel):
+  `Capture.WRAPPER_ASYNC` from `_dg_tool_gate`, which `await`s `next(context)` itself -- there is
+  no sync entry point (`KernelFunction.invoke`/`invoke_stream` are both `async`), exactly like
+  `adapters.langgraph`'s reference wiring. Verified against pinned semantic-kernel 1.44.1:
+  `KernelFunction.invoke`'s own `try`/`except Exception as e: ...; raise e` around
+  `await stack(function_context)` re-raises unchanged, and `KernelFunctionFromMethod.
+  _invoke_internal` does not swallow its own exception either, so `BodyState.RAISED` (with
+  `error_code`) is genuinely observed, not inferred. The SAME registered filter also gates
+  `invoke_stream` (both share one `FilterTypes.FUNCTION_INVOCATION` stack); there,
+  `_invoke_internal_stream` sets `context.result.value` to the raw generator/async-generator
+  WITHOUT consuming it -- the actual iteration happens in `invoke_stream` itself, AFTER
+  `next(context)` has already returned to this filter -- so `context.result.value` is inspected
+  for generator-ness and reported `BodyState.DEFERRED`, never fabricated as `RETURNED`.
+  `_freeze()` snapshot of the function's own raw `context.arguments`, taken immediately before
+  `await next(context)` runs. `asyncio.CancelledError` on the filter's own `await` is
+  `BodyState.ABANDONED`, still re-raised. The handoff gate never calls `guard.check()` at all --
+  a handoff mints the target's Guard via `chain.delegate()` -> `Guard.delegate()`, not a scope
+  check -- so it stays outside execution binding entirely, same as `adapters.langchain`/
+  `llama_index`/`camel`, unlike `adapters.ag2`/`agent_framework` (whose delegation IS a priced
+  call). **Also fixed**, unrelated to execution binding: the `semantic-kernel` extra was missing
+  `protobuf` -- `semantic_kernel.agents.runtime.core.serialization` imports `google.protobuf`,
+  which semantic-kernel itself does not declare as a dependency, so `pip install
+  'attenu-guard[semantic-kernel]'` broke on a clean install as soon as any test imported
+  `semantic_kernel.agents`; added `protobuf` to the extra.
 
 ## [0.9.0] — 2026-08-31
 

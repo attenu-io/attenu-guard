@@ -31,6 +31,8 @@ from semantic_kernel.contents.function_call_content import FunctionCallContent  
 from semantic_kernel.exceptions.kernel_exceptions import KernelInvokeException  # noqa: E402
 from semantic_kernel.functions import KernelArguments, kernel_function  # noqa: E402
 
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
+
 from attenu_guard import (  # noqa: E402
     AuditLog,
     Authority,
@@ -493,3 +495,185 @@ def test_guard_state_survives_kernel_clone():
     assert decision is not None
     assert ReasonCode.REVOKED in {r.code for r in decision.reasons}
     assert tools.crm_query_calls == []
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# _dg_tool_gate awaits next(context) itself, exactly like
+# adapters/langgraph.py's reference wiring, so WRAPPER_ASYNC is a genuine
+# observation with no cross-hook correlation of any kind.
+# ==========================================================================
+def _v2_kernel(agent_name="Summarizer", authority=None):
+    tools = demo.CrmTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate(agent_name.lower(), authority or Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind(agent_name, child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+    dg_sk.attach_guard(kernel, agent_name=agent_name, chain=chain, policies=demo.POLICIES)
+    return kernel, tools, root, child
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    kernel, tools, root, child = _v2_kernel()
+
+    result = asyncio.run(kernel.invoke(
+        plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+    assert tools.crm_query_calls == [100]
+    assert result is not None
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "Crm-crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.semantic_kernel"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert child.complete()
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    class BoomTools:
+        def __deepcopy__(self, memo):
+            return self
+
+        @kernel_function(name="crm_query", description="Raises instead of returning.")
+        def crm_query(self, rows: int) -> str:
+            raise ValueError("boom")
+
+    tools = BoomTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate("summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind("Summarizer", child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES)
+
+    with pytest.raises(KernelInvokeException):
+        asyncio.run(kernel.invoke(
+            plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    kernel, tools, root, child = _v2_kernel()
+
+    with pytest.raises(KernelInvokeException):
+        asyncio.run(kernel.invoke(
+            plugin_name="Crm", function_name="crm_export",
+            arguments=KernelArguments(destination="s3://attacker")))
+
+    assert tools.exported_to == []
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow" and e.get("tool") == "Crm-crm_export"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    tools = demo.CrmTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600))  # v1, default
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate("summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind("Summarizer", child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES)
+
+    asyncio.run(kernel.invoke(
+        plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "Crm-crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    class HangingTools:
+        def __deepcopy__(self, memo):
+            return self
+
+        @kernel_function(name="crm_query", description="Hangs.")
+        async def crm_query(self, rows: int) -> str:
+            await asyncio.sleep(3600)
+            return "never"
+
+    tools = HangingTools()
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = root.delegate("summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    chain.bind("Summarizer", child)
+
+    kernel = Kernel()
+    kernel.add_plugin(tools, plugin_name="Crm")
+    dg_sk.attach_guard(kernel, agent_name="Summarizer", chain=chain, policies=demo.POLICIES)
+
+    async def scenario():
+        task = asyncio.ensure_future(kernel.invoke(
+            plugin_name="Crm", function_name="crm_query", arguments=KernelArguments(rows=100)))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_v2_delegation_never_gets_capture_or_an_outcome():
+    """The handoff gate mints the target's Guard via `chain.delegate()` -> `Guard.delegate()`,
+    never calling `guard.check()` at all -- unaffected, on any schema version."""
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*", "agent.handoff"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        schema_version=2)
+    chain = dg_sk.DelegationChain(root_agent="Orchestrator", root_guard=root)
+    child = chain.delegate("Orchestrator", "Summarizer", Authority(
+        scopes={"crm.read"}, ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
+        task="summarize")
+    assert child is not None
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"x": AliasingList([1])}
+    snapshot = dg_sk._freeze(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
