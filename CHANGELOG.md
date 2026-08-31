@@ -6,6 +6,8 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-31
+
 ### Fixed
 - Integers beyond the RFC 8785 safe range (±(2**53-1)) are now rejected — at canonicalization, at
   `RowLimit`/`SpendCap`/`CallLimit` construction, and by `wire.load` (as `malformed`) — instead of
