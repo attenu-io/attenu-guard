@@ -632,6 +632,110 @@ def test_delegation_guard_rejects_a_sibling_innermost_execution_wrapper_listed_b
         )
 
 
+class _RebindingInnermostWrapper(AbstractCapability):
+    """An innermost capability whose ORIGINAL registered instance does NOT override
+    wrap_tool_execute, but whose for_agent() REBINDS to one (_OtherInnermostWrapper) that does.
+    Invisible to for_agent()'s construction-time check, which only sees agent.root_capability
+    BEFORE the whole binding call returns (pinned 2.31.1 binds the innermost tier through ONE
+    list comprehension) -- Codex review round 4, finding 2."""
+
+    def get_ordering(self):
+        return CapabilityOrdering(position="innermost")
+
+    def for_agent(self, agent):
+        return _OtherInnermostWrapper()
+
+
+def _conflict_agent(sink: dict, capabilities):
+    return Agent(
+        FunctionModel(single_read_script),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[_single_read_toolset(sink)],
+        capabilities=capabilities,
+    )
+
+
+def _assert_construction_time_check_missed_it_but_run_still_refuses(
+    agent, *, run_capabilities=None, expected_exception=None, match=None
+):
+    """Shared assertion for round 4, finding 2's two escapes: construction must have SUCCEEDED
+    (proving the fast path really did miss it), but agent.run() must still be refused, with the
+    tool body never reached and zero allow/outcome entries. `expected_exception`/`match` default
+    to DelegationGuard's own UserError; a caller in an ordering where DelegationGuard is never
+    even INVOKED (see the "listed_before" rebinding test) overrides both."""
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    exc = expected_exception or dg_pai.UserError
+    pattern = match or "innermost"
+    with pytest.raises(exc, match=pattern):
+        if run_capabilities is None:
+            _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+        else:
+            _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None), capabilities=run_capabilities))
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+    return root
+
+
+def test_delegation_guard_construction_succeeds_but_run_rejects_a_rebinding_sibling_listed_after():
+    """Codex review round 4, finding 2: [DelegationGuard, RebindingInnermostWrapper] --
+    construction-time for_agent() only sees the sibling's ORIGINAL instance, which does not
+    (yet) override wrap_tool_execute, so construction SUCCEEDS (proving the fast path misses
+    this case, exactly as documented). wrap_tool_execute's own runtime check inspects the
+    ACTUAL resolved ctx.root_capability instead -- which DOES reflect the rebound wrapper -- and
+    refuses before _resolve()/guard.check() ever run: zero ledger writes, tool body never runs."""
+    sink: dict = {}
+    guard_cap = dg_pai.DelegationGuard(
+        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+    )
+    agent = _conflict_agent(sink, [guard_cap, _RebindingInnermostWrapper()])  # construction must NOT raise
+
+    _assert_construction_time_check_missed_it_but_run_still_refuses(agent)
+    assert "rows" not in sink, "the tool body must never have run"
+
+
+def test_delegation_guard_construction_succeeds_but_run_rejects_a_rebinding_sibling_listed_before():
+    """Same escape, the OPPOSITE list order -- with a genuinely different exception shape, worth
+    being explicit about rather than papering over: pinned 2.31.1's innermost tier nests
+    wrappers in LISTED order, so here the rebound wrapper is OUTER and DelegationGuard is its
+    `handler` -- DelegationGuard's own wrap_tool_execute (and so its own runtime check) is never
+    even INVOKED, because the outer wrapper raises before ever calling its handler. That is not
+    a gap in DelegationGuard: the misattribution defect this whole check exists to prevent
+    (a sibling's own pre-handler failure recorded as DelegationGuard's own RAISED outcome for a
+    body it never reached) specifically requires DelegationGuard to be the one CALLING the
+    conflicting sibling as its handler -- which only happens in the OTHER list order. Here the
+    raw RuntimeError from the sibling itself propagates untouched, and -- the property that
+    actually matters -- DelegationGuard still never ran guard.check() at all: zero allow/outcome
+    entries either way."""
+    sink: dict = {}
+    guard_cap = dg_pai.DelegationGuard(
+        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+    )
+    agent = _conflict_agent(sink, [_RebindingInnermostWrapper(), guard_cap])  # construction must NOT raise
+
+    _assert_construction_time_check_missed_it_but_run_still_refuses(
+        agent, expected_exception=RuntimeError, match="failed before ever reaching the raw body"
+    )
+    assert "rows" not in sink
+
+
+def test_delegation_guard_rejects_a_per_run_injected_conflicting_capability():
+    """Codex review round 4, finding 2's public bypass: agent.run(..., capabilities=[...]) adds
+    capabilities AFTER static for_agent() has already run -- entirely invisible to the
+    construction-time check (no sibling registered at construction at all). The runtime check
+    in wrap_tool_execute still catches it via the actual resolved ctx.root_capability, before
+    any ledger write."""
+    sink: dict = {}
+    guard_cap = dg_pai.DelegationGuard(
+        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
+    )
+    agent = _conflict_agent(sink, [guard_cap])  # no conflict at construction time at all
+
+    _assert_construction_time_check_missed_it_but_run_still_refuses(
+        agent, run_capabilities=[_OtherInnermostWrapper()]
+    )
+    assert "rows" not in sink
+
+
 class _RaisingBeforeCapability(AbstractCapability):
     """A second, ordinary-positioned capability whose before_tool_execute always raises."""
 

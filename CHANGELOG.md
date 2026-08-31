@@ -218,6 +218,28 @@ All notable changes to attenu-guard are documented here. The format follows
   members, only list order as a tiebreaker. Undetectable only for a capability added entirely
   dynamically, per-run (`for_run()`, never declared in the agent's own `capabilities=[...]`) --
   the same category of limit as the dynamic-`GuardedToolset` case, documented on `for_agent()`.
+  **Round 4 correction (Codex review, finding 2, high):** the round-3 construction-time check
+  is a fast path, not the guarantee it was treated as. Pinned pydantic-ai 2.31.1 binds the
+  `innermost` tier through ONE list comprehension and does not update `agent.root_capability`
+  until the WHOLE call returns, so a sibling whose own `for_agent()` REBINDS to a replacement
+  that wraps execution (its originally-registered instance did not) is invisible to
+  `for_agent()` -- a live probe confirmed construction succeeds in both list orders, and the
+  adverse order still reaches the misreported-`RAISED` defect. There is also a public per-run
+  bypass this hook cannot see at all: `agent.run(..., capabilities=[OtherInnermostWrapper()])`
+  adds capabilities AFTER static `for_agent()` has already run; that repro likewise recorded a
+  false `RAISED` with the raw body sink empty. Fixed: `wrap_tool_execute` now runs the SAME
+  conflict check again, at the very start of every call, against the ACTUAL resolved
+  `ctx.root_capability` (`RunContext.root_capability` -- pydantic-ai's own documented mechanism
+  for validating per-run additions, confirmed by a live probe to reflect both adversarial cases
+  correctly) -- BEFORE `_resolve()` or `guard.check()` ever run, so a rejection writes nothing
+  to the ledger. `for_agent()`'s construction-time check stays as the friendly, early-failing
+  fast path for the common case it CAN see; `wrap_tool_execute`'s runtime check is the real
+  guarantee. One structural asymmetry surfaced while testing this: in the list order where the
+  conflicting sibling is OUTER of `DelegationGuard` (not INNER, the shape the original defect
+  needs), `DelegationGuard`'s own `wrap_tool_execute` -- and so its new runtime check -- never
+  even runs, because the outer sibling raises before ever calling its own handler; the raw
+  exception from the sibling propagates untouched instead of `DelegationGuard`'s `UserError`,
+  but the ledger is still untouched either way, since `DelegationGuard`'s own code never ran.
 - `adapters.autogen`: `GuardedWorkbench.call_tool_stream` recorded no outcome at all when a
   consumer closed the stream early (one event consumed, then `.aclose()`/GC) -- `GeneratorExit`,
   raised inside the generator at its suspended `yield`, is a `BaseException`, bypassing the

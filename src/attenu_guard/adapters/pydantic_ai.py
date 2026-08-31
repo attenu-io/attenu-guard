@@ -77,9 +77,10 @@ import asyncio
 import inspect
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Generic, Literal, Mapping, TypeVar
+from typing import Any, Callable, Generic, Literal, Mapping, Optional, TypeVar
 
 from pydantic_ai.capabilities.abstract import AbstractCapability, CapabilityOrdering
+from pydantic_ai.capabilities.combined import CombinedCapability
 from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -392,6 +393,43 @@ def _resolve(
     return guard, policy
 
 
+def _find_conflicting_innermost_execution_wrapper(
+    capabilities: Any, mine: "DelegationGuard"
+) -> Optional[AbstractCapability[Any]]:
+    """The first OTHER capability in `capabilities` (a `CombinedCapability`, or `None`) that
+    declares `get_ordering().position == "innermost"` AND overrides `wrap_tool_execute` -- see
+    `DelegationGuard`'s class docstring "ORDERING" and `for_agent`'s own docstring. Shared by
+    both the construction-time check (`for_agent`, over `agent.root_capability`) and the
+    runtime check (`wrap_tool_execute`, over `ctx.root_capability`) -- see `wrap_tool_execute`'s
+    docstring for why construction alone cannot always see this."""
+    if not isinstance(capabilities, CombinedCapability):
+        return None
+    for sibling in capabilities.capabilities:
+        if sibling is mine:
+            continue
+        ordering = sibling.get_ordering()
+        sibling_is_innermost = ordering is not None and ordering.position == "innermost"
+        sibling_wraps_execution = (
+            type(sibling).wrap_tool_execute is not AbstractCapability.wrap_tool_execute
+        )
+        if sibling_is_innermost and sibling_wraps_execution:
+            return sibling
+    return None
+
+
+def _conflicting_innermost_execution_wrapper_message(sibling: AbstractCapability[Any]) -> str:
+    return (
+        f"DelegationGuard and {type(sibling).__name__} are both registered in the 'innermost' "
+        "ordering tier and both wrap tool execution. Pydantic AI's innermost tier has no "
+        "ordering edges among its own members (only list order as a tiebreaker), so "
+        "DelegationGuard cannot prove it sits closest to the raw tool body -- a call it "
+        f"authorizes could actually execute inside {type(sibling).__name__}'s own "
+        "wrap_tool_execute, and that capability's own failure before calling its handler would "
+        "be misreported here as a RAISED outcome for a body DelegationGuard never reached. "
+        "Register at most one innermost, execution-wrapping capability alongside DelegationGuard."
+    )
+
+
 # ==========================================================================
 # Hook point 2a — agent-wide capability (preferred)
 # ==========================================================================
@@ -423,13 +461,14 @@ class DelegationGuard(AbstractCapability[Any]):
     pinned 2.31.1: raw body sink empty, ledger said `RAISED`/`RuntimeError`). Pydantic AI's
     ordering primitives (`wraps`/`wrapped_by`) reference specific OTHER capability types/
     instances, which this file cannot know in advance for an arbitrary caller-supplied
-    capability, so this file cannot simply out-order its way to safety -- `for_agent()` instead
-    REJECTS this combination at AGENT CONSTRUCTION time (not per-call), the same way it already
-    rejects `DelegationGuard` + `GuardedToolset` dual instrumentation -- see its own docstring.
-    The one thing that rejection cannot see is a capability added entirely dynamically, per-run
-    (`for_run()`, never declared in the agent's own `capabilities=[...]`); that residual is
-    genuine and documented on `for_agent()` itself, distinct from the LEAKED PENDING ENTRY
-    defect the one-operation design below eliminates structurally.
+    capability, so this file cannot simply out-order its way to safety -- `for_agent()` REJECTS
+    this combination at AGENT CONSTRUCTION time (not per-call) as a fast path, the same way it
+    already rejects `DelegationGuard` + `GuardedToolset` dual instrumentation, but pinned
+    2.31.1 can bind a conflicting sibling in ways that fast path cannot see (a REBINDING sibling
+    whose `for_agent()` returns the wrapper; a per-run `agent.run(..., capabilities=[...])`
+    injection) -- so `wrap_tool_execute` ALSO checks the ACTUAL resolved `ctx.root_capability`
+    at the start of every call, before `_resolve()`/`guard.check()` run, which is the real
+    guarantee (round 4, finding 2). See both methods' own docstrings.
 
     WHY ONE OPERATION, NOT TWO: an earlier version of this class authorized in `before_tool_
     execute` and stashed the allowed decision for a SEPARATE `wrap_tool_execute` to pick up and
@@ -487,25 +526,32 @@ class DelegationGuard(AbstractCapability[Any]):
         call and never listed in `agent.toolsets` at all) -- there is no hook this file can use
         to see that ahead of time; the class docstring's warning is what covers it.
 
-        Codex review round 3, finding 3: `agent.root_capability.capabilities` is ALSO walked for
-        every OTHER capability declaring `get_ordering().position == "innermost"` that overrides
-        `wrap_tool_execute` (checked via `type(sibling).wrap_tool_execute is not
-        AbstractCapability.wrap_tool_execute`, the same idiom pydantic-ai's own
-        `_has_wrap_node_run` uses internally for the analogous check). Pinned pydantic-ai
-        2.31.1's `innermost` tier has NO ordering edges among its own members
-        (`_ordering.py:90-103` -- only list order as a tiebreaker), so this capability cannot
-        PROVE it is the closest wrapper to the raw tool body when a sibling in the same tier
-        also wraps execution: `handler` could be that sibling's own `wrap_tool_execute`, not the
-        raw body, and a live probe against pinned 2.31.1 confirmed the consequence -- the
-        sibling's own pre-handler failure was misreported here as a `RAISED` outcome for a body
-        this capability never actually reached (the raw body's own side-effect sink stayed
-        empty). `agent.root_capability` reflects every sibling capability at this point, per
-        `bind_capabilities_tier`'s own two-phase design (`combined.py`) -- verified directly
-        against pinned 2.31.1 rather than assumed. What this CANNOT detect: a capability added
-        entirely dynamically, per-run, via `for_run()` rather than declared in the agent's own
-        `capabilities=[...]` at construction time -- it is not listed on
-        `agent.root_capability.capabilities` yet when THIS `for_agent` runs, the same category
-        of limit as the dynamic-`GuardedToolset` case above.
+        Codex review round 3, finding 3: `agent.root_capability.capabilities` is ALSO walked
+        (via `_find_conflicting_innermost_execution_wrapper`) for every OTHER capability
+        declaring `get_ordering().position == "innermost"` that overrides `wrap_tool_execute`
+        (checked via `type(sibling).wrap_tool_execute is not AbstractCapability.
+        wrap_tool_execute`, the same idiom pydantic-ai's own `_has_wrap_node_run` uses
+        internally for the analogous check). Pinned pydantic-ai 2.31.1's `innermost` tier has NO
+        ordering edges among its own members (`_ordering.py:90-103` -- only list order as a
+        tiebreaker), so this capability cannot PROVE it is the closest wrapper to the raw tool
+        body when a sibling in the same tier also wraps execution: `handler` could be that
+        sibling's own `wrap_tool_execute`, not the raw body, and a live probe against pinned
+        2.31.1 confirmed the consequence -- the sibling's own pre-handler failure was
+        misreported here as a `RAISED` outcome for a body this capability never actually
+        reached (the raw body's own side-effect sink stayed empty).
+
+        THIS CHECK IS A FAST PATH, NOT THE GUARANTEE (Codex review round 4, finding 2): pinned
+        2.31.1 binds the `innermost` tier through ONE list comprehension
+        (`bind_capabilities_tier`, `combined.py`) and does not update `agent.root_capability`
+        until that whole call returns, so a sibling whose OWN `for_agent()` REBINDS to a
+        replacement that wraps execution (its ORIGINAL registered instance did not) is
+        invisible here -- a live probe confirmed construction succeeds in both list orders in
+        that case, and the adverse order still reaches the misreported-`RAISED` defect above.
+        There is also a public per-run bypass this hook cannot see at all:
+        `agent.run(..., capabilities=[OtherInnermostWrapper()])` adds capabilities AFTER this
+        `for_agent` has already run. `wrap_tool_execute`'s own docstring covers the runtime
+        check that is the actual guarantee; this construction-time check exists to fail fast,
+        with a clear message, for the common case where it CAN see the conflict.
         """
         for toolset in getattr(agent, "toolsets", None) or ():
             seen = toolset
@@ -521,26 +567,9 @@ class DelegationGuard(AbstractCapability[Any]):
                 seen = getattr(seen, "wrapped", None)
 
         root = getattr(agent, "root_capability", None)
-        for sibling in getattr(root, "capabilities", None) or ():
-            if sibling is self:
-                continue
-            ordering = sibling.get_ordering()
-            sibling_is_innermost = ordering is not None and ordering.position == "innermost"
-            sibling_wraps_execution = (
-                type(sibling).wrap_tool_execute is not AbstractCapability.wrap_tool_execute
-            )
-            if sibling_is_innermost and sibling_wraps_execution:
-                raise UserError(
-                    f"DelegationGuard and {type(sibling).__name__} are both registered in the "
-                    "'innermost' ordering tier and both wrap tool execution. Pydantic AI's "
-                    "innermost tier has no ordering edges among its own members (only list "
-                    "order as a tiebreaker), so DelegationGuard cannot prove it sits closest to "
-                    "the raw tool body -- a call it authorizes could actually execute inside "
-                    f"{type(sibling).__name__}'s own wrap_tool_execute, and that capability's "
-                    "own failure before calling its handler would be misreported here as a "
-                    "RAISED outcome for a body DelegationGuard never reached. Register at most "
-                    "one innermost, execution-wrapping capability alongside DelegationGuard."
-                )
+        conflict = _find_conflicting_innermost_execution_wrapper(root, self)
+        if conflict is not None:
+            raise UserError(_conflicting_innermost_execution_wrapper_message(conflict))
         return self
 
     async def wrap_tool_execute(
@@ -552,6 +581,21 @@ class DelegationGuard(AbstractCapability[Any]):
         args: dict[str, Any],
         handler: Callable[[dict[str, Any]], Any],
     ) -> Any:
+        """Codex review round 4, finding 2: `for_agent()`'s construction-time check is a fast
+        path, not the guarantee -- pinned pydantic-ai 2.31.1 can bind a REBINDING sibling
+        (`for_agent()` returns an execution-wrapping replacement) or a per-run-injected one
+        (`agent.run(..., capabilities=[...])`) invisibly to it. `ctx.root_capability` is the
+        agent's own documented mechanism for exactly this ("the effective root capability for
+        this run... capability implementations can use this to validate per-run additions" --
+        `pydantic_ai._run_context.RunContext.root_capability`'s own docstring), and a live probe
+        confirmed it reflects BOTH adversarial cases correctly by the time `wrap_tool_execute`
+        runs. So the same conflict check runs again here, against the ACTUAL resolved chain,
+        BEFORE `_resolve()` or `guard.check()` -- zero ledger writes on a rejection, exactly
+        like an unresolved tool or missing Guard denies before touching the ledger."""
+        conflict = _find_conflicting_innermost_execution_wrapper(ctx.root_capability, self)
+        if conflict is not None:
+            raise UserError(_conflicting_innermost_execution_wrapper_message(conflict))
+
         resolved = _resolve(
             ctx, call.tool_name, self.policies, self.get_guard, self.on_unmapped,
             "DelegationGuard",
