@@ -643,6 +643,34 @@ def test_v2_stream_path_allowed_call_records_a_returned_outcome():
     assert outcome["body_state"] == BodyState.RETURNED
 
 
+def test_v2_early_stream_close_records_an_abandoned_outcome_exactly_once():
+    """Codex review (DO NOT MERGE, finding 6, high): consuming one streamed event and then
+    closing the async generator before it is exhausted must record BodyState.ABANDONED exactly
+    once -- not leave the call silently pending (a prior version's except Exception/else split
+    let GeneratorExit, a BaseException, bypass both, recording nothing)."""
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        _summarizer_tools(effects), agent_name="summarizer", registry=registry, policies=POLICIES,
+    )
+
+    async def run():
+        gen = wb.call_tool_stream("crm_query", {"rows": 10})
+        await gen.__anext__()  # consume the one event AutoGen's non-streaming path yields --
+                               # this adapter's own generator is now suspended at its `yield`
+        await gen.aclose()    # delivers GeneratorExit at that suspension point
+
+    asyncio.run(run())
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcomes = [e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"]]
+    assert len(outcomes) == 1, outcomes
+    assert outcomes[0]["body_state"] == BodyState.ABANDONED
+
+
 def test_v2_delegation_tool_also_records_an_outcome():
     """Unlike every other adapter, a delegation-marked tool here STILL gets execution binding:
     its body (the nested run) genuinely executes through call_tool() -- see the module

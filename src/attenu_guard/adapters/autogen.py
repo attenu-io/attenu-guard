@@ -65,9 +65,13 @@ call is `BodyState.RETURNED`, whatever `is_error` says. `asyncio.CancelledError`
 NOT caught by AutoGen's own `except Exception` (it is a `BaseException`), so it DOES
 propagate past both layers -- `BodyState.ABANDONED` is genuinely reachable, and is
 still re-raised so cancellation propagates normally.
-`call_tool_stream` records the outcome once the underlying stream is exhausted (every
-event forwarded via `yield` first); an early `aclose()` before exhaustion leaves that
-call's outcome simply unrecorded, the honest reflection of never having observed completion.
+`call_tool_stream` records the outcome once the underlying stream is exhausted
+(`RETURNED`, every event forwarded via `yield` first) or raises (`RAISED`/`ABANDONED`).
+An early `aclose()` (or garbage collection) before exhaustion raises `GeneratorExit`
+INSIDE this generator at the `yield` -- also a `BaseException`, so it too propagates
+past `except Exception` -- and is recorded `BodyState.ABANDONED`, then re-raised
+(required: an async generator that does not re-raise `GeneratorExit`, or return without
+yielding again, is a `RuntimeError` per Python's own generator protocol).
 """
 from __future__ import annotations
 
@@ -104,13 +108,35 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
+    container with the live object graph, so a later in-place mutation (by the tool body, or by
+    AutoGen itself) cannot change what was already committed. `copy.deepcopy` alone is not
+    enough: on ANY failure deep in a nested structure, a naive `except: return dict(...)`
+    fallback keeps sharing whatever nested dicts/lists deepcopy did not reach. This never falls
+    back to a shared reference: dicts/lists are always rebuilt fresh (recursively), and a leaf
+    that cannot itself be deep-copied is replaced by its `repr()` -- a brand-new, immutable
+    string -- rather than shared as-is."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
     """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
     the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
-    try:
-        return copy.deepcopy(dict(arguments))
-    except Exception:
-        return dict(arguments)
+    return _freeze(dict(arguments))
 
 __all__ = [
     "Grant",
@@ -378,15 +404,23 @@ class GuardedWorkbench(StaticStreamWorkbench):
         # recorded once the underlying stream is exhausted (RETURNED) or raises (RAISED -- see
         # the module docstring's honesty note: rarely reached, AutoGen's own
         # StaticStreamWorkbench.call_tool_stream already catches every Exception the tool body
-        # raises and yields a ToolResult(is_error=True) instead). An early aclose() before
-        # exhaustion leaves this call's outcome unrecorded -- honest, since completion was
-        # never actually observed.
+        # raises and yields a ToolResult(is_error=True) instead). An early `aclose()`/GC before
+        # exhaustion raises `GeneratorExit` INSIDE this generator at the `yield` -- a
+        # `BaseException`, not caught by `except Exception` below -- recorded `ABANDONED`
+        # (Codex review finding 6: a prior version left it unrecorded here despite `allow`
+        # advertising `wrapper_async`, an observation this adapter can actually make and must
+        # not skip). `GeneratorExit` MUST be re-raised (or the generator must return without
+        # yielding again) -- Python itself enforces this on every async generator.
         guard, oc_call_id, snapshot = pending
         started_at = time.monotonic()
         try:
             async for event in super().call_tool_stream(name, arguments, cancellation_token, call_id):
                 yield event
         except asyncio.CancelledError:
+            guard.record_outcome(oc_call_id, BodyState.ABANDONED, invoked_params=snapshot,
+                                 duration_ms=_elapsed_ms(started_at))
+            raise
+        except GeneratorExit:
             guard.record_outcome(oc_call_id, BodyState.ABANDONED, invoked_params=snapshot,
                                  duration_ms=_elapsed_ms(started_at))
             raise

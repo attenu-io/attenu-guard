@@ -66,6 +66,14 @@ All notable changes to attenu-guard are documented here. The format follows
   invocation, never another capability's own wrapping. The docstring also now explicitly warns
   against using both `DelegationGuard` and `GuardedToolset` on the same tool (two independent,
   complete authorization paths -- two `allow`/`outcome` pairs on the ledger for one body).
+- `adapters.autogen`: `GuardedWorkbench.call_tool_stream` recorded no outcome at all when a
+  consumer closed the stream early (one event consumed, then `.aclose()`/GC) -- `GeneratorExit`,
+  raised inside the generator at its suspended `yield`, is a `BaseException`, bypassing the
+  `except Exception`/`else` split entirely, despite the call's `allow` advertising
+  `Capture.WRAPPER_ASYNC` (a promise this adapter CAN keep here, since it does observe the
+  closure). Added an `except GeneratorExit` arm recording `BodyState.ABANDONED` before
+  re-raising (required by Python's own generator protocol). Also fixes the snapshot fallback
+  (finding 7), matching the other five adapters.
 
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a
