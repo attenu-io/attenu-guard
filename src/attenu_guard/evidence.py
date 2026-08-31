@@ -256,26 +256,34 @@ def _valid_params_hash_reason(e: dict, hash_field: str) -> str | None:
     return None
 
 
+_ALLOW_ONLY_FIELDS = frozenset({"capture", "adapter", "authorized_params_hash", "params_hash_reason"})
+
+
 def _validate_allow(e: dict) -> str | None:
     err = _valid_call_id(e)
     if err:
         return err
     if _present_but_null(e, "capture"):
-        return "capture is explicitly null (must be a valid Capture value or absent)"
+        return "capture is explicitly null (must be a valid Capture value)"
+    if _present_but_null(e, "adapter"):
+        return "adapter is explicitly null (must be a valid adapter object)"
     capture = e.get("capture")
     adapter = e.get("adapter")
-    if capture is not None and capture not in Capture.ALL:
+    # Mandatory on every v2 allow (not merely paired with each other): a bare check() with no
+    # wrapper is ITSELF pre_hook_only observation, and Guard.check() supplies that truthfully —
+    # there is no honest reason for a v2 allow to lack capture/adapter, so absence is now
+    # invalid, not "no claim made" (Codex review item 4).
+    if capture is None:
+        return "capture is required on every v2 allow"
+    if capture not in Capture.ALL:
         return f"capture {capture!r} not a known value"
-    # Pairing is symmetric: capture requires adapter (spec section 2, "together with"), and an
-    # adapter with no capture is meaningless -- reject both directions, not only one.
-    if (capture is not None) != (adapter is not None):
-        return "capture and adapter must be present together, or both absent"
-    if adapter is not None:
-        if _present_but_null(e, "adapter") or not isinstance(adapter, Mapping):
-            return "adapter must be an object with module/version/hook_path"
-        for k in ("module", "version", "hook_path"):
-            if not isinstance(adapter.get(k), str) or not adapter.get(k):
-                return f"adapter[{k!r}] must be a non-empty string"
+    if adapter is None:
+        return "adapter is required alongside capture on every v2 allow"
+    if not isinstance(adapter, Mapping):
+        return "adapter must be an object with module/version/hook_path"
+    for k in ("module", "version", "hook_path"):
+        if not isinstance(adapter.get(k), str) or not adapter.get(k):
+            return f"adapter[{k!r}] must be a non-empty string"
     err = _valid_hash_field(e, "authorized_params_hash")
     if err:
         return err
@@ -283,7 +291,13 @@ def _validate_allow(e: dict) -> str | None:
 
 
 def _validate_deny(e: dict) -> str | None:
-    return _valid_call_id(e)
+    err = _valid_call_id(e)
+    if err:
+        return err
+    leaked = sorted(_ALLOW_ONLY_FIELDS & e.keys())
+    if leaked:
+        return f"deny carries allow-only field(s) {leaked}"
+    return None
 
 
 def _validate_outcome(e: dict) -> str | None:
@@ -371,7 +385,31 @@ def _params_coverage(allows: dict, outcomes: dict, invalid_allow_ids: set) -> st
     return "complete" if both == total else "partial"
 
 
+# Every field the shim ever writes only under schema_version=2 (spec sections 1-7). A
+# schema_version=1 chain must carry NONE of them — including call_id: v1 never allocates one.
+_V2_ONLY_FIELDS = frozenset({
+    "call_id", "capture", "adapter", "authorized_params_hash", "params_hash_reason",
+    "params_salt", "body_state", "error_code", "invoked_params_hash", "duration_ms",
+    "receipt", "pending_at_kill",
+})
+
+
+def _v2_field_leaks_on_v1(entries: list[dict]) -> list[str]:
+    """Every v2-only field found on any entry of a schema_version=1 bundle — mixed-version data,
+    invalid regardless of which field it is (Codex review item 4/(c))."""
+    failures = []
+    for e in entries:
+        leaked = sorted(_V2_ONLY_FIELDS & e.keys())
+        if leaked:
+            failures.append(f"v2_field_on_v1: seq={e.get('seq')} event={e.get('event')!r} "
+                            f"carries v2-only field(s) {leaked} on a schema_version=1 entry")
+    return failures
+
+
 def _execution_binding(entries: list[dict], bundle_v) -> dict:
+    if bundle_v == 1:
+        leaked = _v2_field_leaks_on_v1(entries)
+        return {"status": "not applicable", "failures": leaked} if leaked else {"status": "not applicable"}
     if bundle_v != 2:
         return {"status": "not applicable"}
 

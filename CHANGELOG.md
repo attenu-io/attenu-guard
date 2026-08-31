@@ -49,12 +49,16 @@ All notable changes to attenu-guard are documented here. The format follows
   `record_outcome` on a `schema_version=2` guard, sync and async, from an immutable
   pre-invocation argument snapshot (a callable that mutates its own inputs cannot cause a false
   params mismatch), with generators/futures reported `deferred` and `asyncio.CancelledError`
-  reported `abandoned`. Schema `schema/agent-audit.schema.json` documents version 2 alongside the
-  unchanged version 1; `tests/test_execution_binding.py` runs in CI. A language-neutral
-  `params_c14n_v1` parity vector file (`tests/vectors/params_c14n/params_c14n_v1.json`, consumed
-  by `tests/test_params_c14n_vectors.py`) covers its accepted/rejected numeric boundaries and salt
-  handling — a TypeScript implementation is meant to consume the same file; that implementation
-  itself is not part of this release.
+  reported `abandoned`. Schema and verifier are event- and version-aware and strict: a v2 allow
+  REQUIRES `capture`/`adapter` (`Guard.check()` supplies `pre_hook_only` plus a guard-attributed
+  adapter when the caller passes neither — a bare `check()` IS itself pre_hook_only observation,
+  never merely absent), `deny` FORBIDS every allow-only field, and a v1 entry FORBIDS every
+  v2-only field (including `call_id` — v1 never allocates one); `tests/test_execution_binding.py`
+  runs in CI. A language-neutral `params_c14n_v1` parity vector file
+  (`tests/vectors/params_c14n/params_c14n_v1.json`, consumed by `tests/test_params_c14n_vectors.py`)
+  covers its accepted/rejected numeric boundaries and salt handling; the TypeScript consumer of
+  this same file is being built on `attenu-guard-ts` (`feat/090-execution-binding`) — parity
+  between the two is a release gate for 0.9.0, not deferred work.
 
 ### Changed
 - Behaviour change: constructing an `AuditLog` (or `Guard.issue`) with a `path`/`audit_path` that

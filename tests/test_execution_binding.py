@@ -806,7 +806,20 @@ class TestVerifierExecutionBinding(unittest.TestCase):
         bundle = _bundle_for(g, self.signer)
         entries = bundle["entries"]
         idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
-        entries[idx]["adapter"] = _adapter()   # adapter present, capture absent -- illegal pairing
+        del entries[idx]["capture"]   # adapter present, capture absent -- illegal
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_allow:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_allow_missing_capture_and_adapter_entirely(self):
+        g = _v2_root()
+        g.check("crm.read")
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+        del entries[idx]["capture"]
+        del entries[idx]["adapter"]
         self._rechain_from(entries, idx)
         bundle["anchor"] = evidence._anchor_for(entries, self.signer)
         rep = evidence.verify_bundle(bundle, self.signer)
@@ -869,6 +882,68 @@ class TestVerifierExecutionBinding(unittest.TestCase):
         g.revoke()   # after the fact
         rep = evidence.verify_bundle(_bundle_for(g, self.signer), self.signer)
         self.assertEqual(rep["execution_binding"]["per_call"][d.call_id], "observed")
+
+    # ---- three shapes that must become invalid (merge-gate item 4 completion) ----------------
+
+    def test_bare_check_gets_a_guard_supplied_pre_hook_only_default_and_still_verifies(self):
+        # A bare check() with no capture= supplied is itself pre_hook_only observation, supplied
+        # truthfully by the guard -- not absent. It verifies, reported unobserved (no outcome was
+        # promised), aggregate incomplete (nothing wrong, just nothing more to know).
+        g = _v2_root()
+        d = g.check("crm.read")   # no capture/adapter passed by the caller
+        allow = next(e for e in g.audit_log().entries if e["event"] == "allow")
+        self.assertEqual(allow["capture"], Capture.PRE_HOOK_ONLY)
+        self.assertEqual(allow["adapter"]["module"], "attenu_guard")
+        rep = evidence.verify_bundle(_bundle_for(g, self.signer), self.signer)
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["execution_binding"]["per_call"][d.call_id], "unobserved")
+        self.assertEqual(rep["execution_binding"]["aggregate"], "incomplete")
+
+    def test_v2_allow_missing_capture_or_adapter_is_invalid(self):
+        # Now that Guard.check() always supplies a default, a v2 allow with neither field can
+        # only arise from a hand-crafted/tampered bundle -- and the verifier must reject it.
+        for drop in (["capture"], ["adapter"], ["capture", "adapter"]):
+            with self.subTest(drop=drop):
+                g = _v2_root()
+                g.check("crm.read")
+                bundle = _bundle_for(g, self.signer)
+                entries = bundle["entries"]
+                idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+                for k in drop:
+                    del entries[idx][k]
+                self._rechain_from(entries, idx)
+                bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+                rep = evidence.verify_bundle(bundle, self.signer)
+                self.assertFalse(rep["ok"])
+                self.assertTrue(any(f.startswith("invalid_allow:") for f in rep["execution_binding"]["failures"]))
+
+    def test_deny_carrying_an_allow_only_field_is_invalid(self):
+        g = _v2_root()
+        g.check("pay.transfer")   # denied: scope not granted
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "deny")
+        entries[idx]["capture"] = Capture.WRAPPER_SYNC   # allow-only field, forged onto a deny
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertFalse(rep["ok"])
+        self.assertTrue(any("deny carries allow-only field" in f for f in rep["execution_binding"]["failures"]))
+
+    def test_v1_entry_carrying_a_v2_only_field_is_rejected_as_mixed_version_data(self):
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=60))   # schema_version=1
+        g.check("crm.read")
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+        entries[idx]["call_id"] = "ab" * 16   # v2-only field forged onto a v1 entry
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertFalse(rep["ok"])
+        self.assertEqual(rep["execution_binding"]["status"], "not applicable")
+        self.assertTrue(any(f.startswith("v2_field_on_v1:") for f in rep["execution_binding"]["failures"]))
+        self.assertTrue(any(f.startswith("v2_field_on_v1:") for f in rep["failures"]))
 
     def test_cross_ref_outcome_does_not_count_as_observed(self):
         # Codex review item 5: "observed" requires an outcome that exists AND is bound correctly

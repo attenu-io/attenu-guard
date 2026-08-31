@@ -95,6 +95,20 @@ _UNSET = object()
 
 _REQUIRED_ADAPTER_KEYS = ("module", "version", "hook_path")
 
+_pkg_version_cache: str | None = None
+
+
+def _package_version() -> str:
+    """`attenu_guard.__version__`, imported lazily and cached — `guard.py` is imported BY
+    `attenu_guard/__init__.py` before `__version__` is assigned there, so a top-level
+    `from . import __version__` would be circular. By the time any `Guard` method actually runs,
+    package init has long finished, so a lazy import here is safe and correct."""
+    global _pkg_version_cache
+    if _pkg_version_cache is None:
+        from . import __version__
+        _pkg_version_cache = __version__
+    return _pkg_version_cache
+
 
 class AuthorityDenied(Exception):
     """Raised only by `enforce()`. Carries the full `Decision` so a caller
@@ -546,6 +560,15 @@ class Guard:
                     if capture is not None:
                         extra["capture"] = capture
                         extra["adapter"] = {k: adapter[k] for k in _REQUIRED_ADAPTER_KEYS}
+                    else:
+                        # A bare check() with no wrapper IS itself an observation, honestly
+                        # described: authorization was observed; execution was not. The GUARD
+                        # supplies this default rather than leaving capture/adapter absent, so
+                        # every v2 allow carries them — the verifier requires both (Codex review
+                        # item 4); the caller-facing API stays optional, the ledger is not.
+                        extra["capture"] = Capture.PRE_HOOK_ONLY
+                        extra["adapter"] = {"module": "attenu_guard", "version": _package_version(),
+                                            "hook_path": "Guard.check"}
                     ph, preason = self._params_commitment(authorized_params)
                     if ph is not None:
                         extra["authorized_params_hash"] = ph
