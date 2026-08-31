@@ -1304,6 +1304,8 @@ def test_evidence_bundle_verifies_offline():
         "anchor": "verified",
         "version": True,
         "chain_id": True,
+        "root": True,                        # 0.9.0: exactly-one-root check
+        "expected_anchor": "not checked",     # 0.9.0: no expected_anchor/expected_head was given
     }
     assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
 
