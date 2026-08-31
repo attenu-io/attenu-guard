@@ -407,26 +407,45 @@ class DelegationGuard(AbstractCapability[Any]):
     them (`pydantic_ai/tool_manager.py:454`); they produce the run's result and
     reach no external system.
 
-    ORDERING (0.9.0 execution binding): `get_ordering()` declares `position="innermost"`
-    -- REQUIRED for `before_tool_execute`/`wrap_tool_execute` correlation to be safe when
-    OTHER capabilities are also registered on the same agent. `CombinedCapability` composes
-    `before_tool_execute` sequentially in chain order (outermost first) and `wrap_tool_execute`
-    as nested middleware (outermost wraps innermost) -- declaring innermost means: (a) every
-    OTHER capability's `before_tool_execute` runs BEFORE this one, so if any of them raises,
-    THIS capability's own `before_tool_execute` (where the pending outcome is stashed) never
-    runs either, and nothing leaks; (b) the `handler` this capability's `wrap_tool_execute`
-    receives is the raw tool invocation itself, not another capability's own wrapping --
-    otherwise an inner capability's own failure (e.g. its own retry/validation logic) could be
-    caught by this capability's `except Exception` and misreported as `BodyState.RAISED` for a
-    body that never actually ran. Without `position="innermost"`, correlation would depend on
-    the ORDER capabilities happen to be listed in -- see Codex review finding 5.
+    ORDERING (0.9.0 execution binding): `get_ordering()` declares `position="innermost"`.
+    Authorization and outcome-recording are now ONE operation, both inside `wrap_tool_execute`
+    (there is no `before_tool_execute` override at all any more -- see "WHY ONE OPERATION,
+    NOT TWO" below); `position="innermost"` keeps this capability's `wrap_tool_execute` as close
+    to the raw tool invocation as pydantic-ai's ordering primitives allow, so `handler` is (in
+    the common case of a single such capability) the raw body, not another capability's own
+    wrapping. Codex review finding 5 (round 2) proved this is a TIER, not a unique position:
+    pydantic-ai 2.31.1's sorter places every `innermost` capability after every non-innermost
+    one, but preserves LISTED ORDER among multiple `innermost` capabilities -- so if the caller
+    registers a SECOND `innermost`-positioned capability, this one's `handler` may be that OTHER
+    capability's own `wrap_tool_execute`, not the raw body, and that capability's own failure
+    (before it calls its own handler) would still be observed here as a `RAISED` outcome for a
+    body this capability itself never actually reached. Pydantic AI's ordering primitives
+    (`wraps`/`wrapped_by`) reference specific OTHER capability types/instances, which this file
+    cannot know in advance for an arbitrary caller-supplied capability, so this residual is a
+    genuine, documented limit of the framework's own ordering guarantee, not something this file
+    can code around -- distinct from the LEAKED PENDING ENTRY defect the one-operation design
+    below eliminates structurally.
+
+    WHY ONE OPERATION, NOT TWO: an earlier version of this class authorized in `before_tool_
+    execute` and stashed the allowed decision for a SEPARATE `wrap_tool_execute` to pick up and
+    close out, correlated by `id(call)`. `CombinedCapability.before_tool_execute` composes ALL
+    capabilities' `before_tool_execute` sequentially, in LISTED order (`innermost`ness does not
+    change that: it is a tier over `wrap_tool_execute`'s nesting, not over `before_tool_execute`'s
+    sequence) -- so if `[DelegationGuard, OtherInnermost]` were BOTH registered, and `Other
+    Innermost` was listed second, its OWN `before_tool_execute` could still raise AFTER this
+    class's own already ran and stashed a pending entry -- leaking it, and wedging `complete()`.
+    Collapsing authorization and outcome into ONE call inside `wrap_tool_execute` removes the
+    map entirely: if some OTHER capability's `before_tool_execute` (or an outer `wrap_tool_
+    execute`) raises before this one's own `wrap_tool_execute` is ever reached, THIS capability's
+    `guard.check()` simply never ran either -- no allow, no leak, nothing false.
 
     DO NOT also wrap the SAME tool with `GuardedToolset` (below): each is an independent,
     complete authorization path, and using both on one tool means `guard.check()` runs TWICE
     for the same call -- two `allow`/`outcome` pairs on the ledger for one body, and (with
     `metered=True`) the call counted twice against any `CallLimit`. Pick exactly one hook point
     per tool: `DelegationGuard` for "every tool on this agent", `GuardedToolset` for "just this
-    one toolset, leave the rest alone".
+    one toolset, leave the rest alone". `for_agent()` rejects this combination at AGENT
+    CONSTRUCTION time (not per-call) when it can be detected -- see its docstring.
     """
 
     def __init__(
@@ -443,41 +462,37 @@ class DelegationGuard(AbstractCapability[Any]):
         self.on_unmapped = on_unmapped
         self.on_denial = on_denial
         self.id = id
-        # Execution binding (0.9.0): an allowed, v2 check() waiting on wrap_tool_execute to
-        # close it out -- keyed by id(call), the SAME ToolCallPart before_tool_execute and
-        # wrap_tool_execute both see for one call within ToolManager._run_execute_hooks.
-        self._pending: dict[int, tuple[Guard, str, Any]] = {}
 
     def get_ordering(self) -> CapabilityOrdering:
-        """Fixed `innermost` position -- see the class docstring's "ORDERING". Required for
-        `before_tool_execute`/`wrap_tool_execute` correlation to be safe when other capabilities
-        are also registered; `CombinedCapability` topologically sorts on this at construction."""
+        """Fixed `innermost` position -- see the class docstring's "ORDERING". Keeps this
+        capability's `wrap_tool_execute` as close to the raw tool invocation as pydantic-ai's
+        ordering primitives allow (a TIER, not a unique position -- see the docstring)."""
         return CapabilityOrdering(position="innermost")
 
-    async def before_tool_execute(
-        self,
-        ctx: RunContext[Any],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        resolved = _resolve(
-            ctx, call.tool_name, self.policies, self.get_guard, self.on_unmapped,
-            "DelegationGuard",
-        )
-        if resolved is not None:
-            guard, policy = resolved
-            if policy.scope is not None and guard.schema_version == 2:
-                decision, snapshot = _authorize_v2(
-                    guard, policy, call.tool_name, args, on_denial=self.on_denial
-                )
-                self._pending[id(call)] = (guard, decision.call_id, snapshot)
-            else:
-                authorize_tool_call(
-                    guard, policy, call.tool_name, args, on_denial=self.on_denial
-                )
-        return args
+    def for_agent(self, agent: Any) -> "DelegationGuard":
+        """Rejects `DelegationGuard` + `GuardedToolset` dual instrumentation on the SAME agent,
+        at AGENT CONSTRUCTION time -- see the class docstring's "DO NOT also wrap...". Called
+        after the agent's toolsets are fully assembled (`AbstractCapability.for_agent`'s own
+        docstring: an `innermost` capability's `for_agent` runs in a second phase specifically
+        so `agent.toolsets` is complete), so `agent.toolsets` is walked here, unwrapping
+        `WrapperToolset` chains, for a `GuardedToolset` instance -- direct membership in
+        `toolsets=[...]` and nesting inside another wrapper are both detected. What this CANNOT
+        detect: a `GuardedToolset` built and used entirely dynamically (e.g. constructed inside
+        a tool call and never listed in `agent.toolsets` at all) -- there is no hook this file
+        can use to see that ahead of time; the class docstring's warning is what covers it."""
+        for toolset in getattr(agent, "toolsets", None) or ():
+            seen = toolset
+            while seen is not None:
+                if isinstance(seen, GuardedToolset):
+                    raise UserError(
+                        "DelegationGuard and GuardedToolset are both registered on this agent "
+                        f"(GuardedToolset wraps {seen.wrapped!r}). Each is a complete, "
+                        "independent authorization path; using both means guard.check() runs "
+                        "TWICE for the same call. Use exactly one: DelegationGuard for the "
+                        "whole agent, or GuardedToolset for just this toolset (not both)."
+                    )
+                seen = getattr(seen, "wrapped", None)
+        return self
 
     async def wrap_tool_execute(
         self,
@@ -488,13 +503,22 @@ class DelegationGuard(AbstractCapability[Any]):
         args: dict[str, Any],
         handler: Callable[[dict[str, Any]], Any],
     ) -> Any:
-        pending = self._pending.pop(id(call), None)
-        if pending is None:
-            return await handler(args)  # v1, UNGUARDED, or the call was denied
-        guard, call_id, snapshot = pending
-        return await _run_wrapped_and_record_outcome(
-            guard, call_id, snapshot, lambda: handler(args)
+        resolved = _resolve(
+            ctx, call.tool_name, self.policies, self.get_guard, self.on_unmapped,
+            "DelegationGuard",
         )
+        if resolved is None:
+            return await handler(args)
+        guard, policy = resolved
+        if policy.scope is not None and guard.schema_version == 2:
+            decision, snapshot = _authorize_v2(
+                guard, policy, call.tool_name, args, on_denial=self.on_denial
+            )
+            return await _run_wrapped_and_record_outcome(
+                guard, decision.call_id, snapshot, lambda: handler(args)
+            )
+        authorize_tool_call(guard, policy, call.tool_name, args, on_denial=self.on_denial)
+        return await handler(args)
 
 
 # ==========================================================================

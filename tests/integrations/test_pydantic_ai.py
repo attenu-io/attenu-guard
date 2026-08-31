@@ -554,6 +554,38 @@ def test_delegation_guard_declares_innermost_ordering():
     assert ordering.position == "innermost"
 
 
+def test_delegation_guard_rejects_dual_instrumentation_with_guarded_toolset_at_construction():
+    """Round 2 (finding 5): DelegationGuard + GuardedToolset on the SAME agent is a real double-
+    check() risk -- for_agent() walks agent.toolsets and rejects it at AGENT CONSTRUCTION time,
+    not per-call, when GuardedToolset is directly in toolsets=[...] or nested inside another
+    WrapperToolset."""
+    toolset = FunctionToolset()
+    guarded = dg_pai.GuardedToolset(toolset, policies={})
+    guard_cap = dg_pai.DelegationGuard(policies={})
+
+    with pytest.raises(dg_pai.UserError, match="both registered"):
+        Agent(
+            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+            deps_type=dg_pai.GuardedDeps,
+            toolsets=[guarded],
+            capabilities=[guard_cap],
+        )
+
+
+def test_delegation_guard_alone_does_not_trip_the_dual_instrumentation_check():
+    """The negative case: DelegationGuard with an UNGUARDED (plain) toolset must construct fine
+    -- for_agent()'s probe must not false-positive on an ordinary toolset."""
+    toolset = FunctionToolset()
+    guard_cap = dg_pai.DelegationGuard(policies={})
+
+    Agent(
+        FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[toolset],
+        capabilities=[guard_cap],
+    )
+
+
 class _RaisingBeforeCapability(AbstractCapability):
     """A second, ordinary-positioned capability whose before_tool_execute always raises."""
 
@@ -562,11 +594,14 @@ class _RaisingBeforeCapability(AbstractCapability):
 
 
 def test_a_capability_positioned_outer_that_raises_leaves_no_pending_leak():
-    """With DelegationGuard forced innermost (get_ordering), CombinedCapability.
-    before_tool_execute runs every OTHER capability's before_tool_execute first --
-    so if one of them raises, DelegationGuard's own before_tool_execute (where the
-    pending outcome would be stashed) never runs either, and nothing leaks, no
-    matter where _RaisingBeforeCapability is listed relative to DelegationGuard."""
+    """Round 2 redesign: DelegationGuard no longer has a before_tool_execute/_pending split at
+    all -- authorization and outcome-recording are ONE operation inside wrap_tool_execute. A
+    capability whose OWN before_tool_execute raises (CombinedCapability composes before_tool_
+    execute sequentially in LISTED order, regardless of innermost-ness -- see the class
+    docstring's "WHY ONE OPERATION, NOT TWO") means wrap_tool_execute is never reached at all
+    for that dispatch -- DelegationGuard's own guard.check() simply never ran, so there is
+    nothing to leak and nothing false to record, no matter where _RaisingBeforeCapability is
+    listed relative to DelegationGuard."""
     sink: dict = {}
     toolset = _single_read_toolset(sink)
     guard_cap = dg_pai.DelegationGuard(
@@ -587,14 +622,14 @@ def test_a_capability_positioned_outer_that_raises_leaves_no_pending_leak():
     root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
 
     # ModelRetry is the framework's OWN "ask the model to redo the call" signal, not an
-    # exception that escapes agent.run() -- it just means DelegationGuard's before_tool_execute
-    # (and hence its pending-outcome stash) never runs for the aborted dispatch, which is
-    # exactly what this test is checking.
+    # exception that escapes agent.run() -- it just means DelegationGuard's own wrap_tool_execute
+    # (and hence guard.check()) never runs for the aborted dispatch, which is exactly what this
+    # test is checking.
     _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
 
-    assert guard_cap._pending == {}, "a pending outcome leaked despite innermost ordering"
+    # no allow, no outcome -- authorization never ran at all for the aborted dispatch
+    assert [e for e in root.audit_log().entries if e["event"] in ("allow", "outcome")] == []
     assert sink == {}
-    assert [e for e in root.audit_log().entries if e["event"] == "outcome"] == []
 
 
 def test_snapshot_freeze_never_shares_a_mutable_container_on_deepcopy_failure():

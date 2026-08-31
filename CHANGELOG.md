@@ -90,6 +90,25 @@ All notable changes to attenu-guard are documented here. The format follows
   invocation, never another capability's own wrapping. The docstring also now explicitly warns
   against using both `DelegationGuard` and `GuardedToolset` on the same tool (two independent,
   complete authorization paths -- two `allow`/`outcome` pairs on the ledger for one body).
+  **Round 2 correction (Codex review, finding 5):** `innermost` is a TIER, not a unique position
+  -- pydantic-ai 2.31.1's sorter places every `innermost` capability after every non-innermost
+  one, but preserves LISTED order among MULTIPLE `innermost` capabilities, so
+  `[DelegationGuard, OtherInnermost]` left `DelegationGuard` authorizing first and wrapping
+  around `OtherInnermost`'s own middleware -- reproducing both the leaked-pending-entry and the
+  false-`RAISED` defects. Fixed structurally, not by ordering alone: authorization and outcome-
+  recording collapsed into ONE operation, entirely inside `wrap_tool_execute` -- there is no
+  `before_tool_execute` override, and no `_pending` map, at all any more. If some OTHER
+  capability's `before_tool_execute` (or an outer `wrap_tool_execute`) raises before this one's
+  own `wrap_tool_execute` is ever reached, `guard.check()` simply never ran either -- no allow,
+  no leak, nothing false. The residual (a SECOND `innermost`-positioned capability whose own
+  `wrap_tool_execute` raises before calling its own handler, which this one's `handler` would
+  then be) is documented in the class docstring as a genuine limit of pydantic-ai's own ordering
+  guarantee -- `wraps`/`wrapped_by` reference specific other capability types/instances this
+  file cannot know in advance for an arbitrary caller-supplied capability. Also: `DelegationGuard`
+  + `GuardedToolset` dual instrumentation is now REJECTED (not just documented) at AGENT
+  CONSTRUCTION time via `DelegationGuard.for_agent()`, which walks `agent.toolsets` (unwrapping
+  `WrapperToolset` chains) for a `GuardedToolset` instance -- undetectable only for a
+  `GuardedToolset` built and used entirely dynamically, never listed in `agent.toolsets` at all.
 - `adapters.autogen`: `GuardedWorkbench.call_tool_stream` recorded no outcome at all when a
   consumer closed the stream early (one event consumed, then `.aclose()`/GC) -- `GeneratorExit`,
   raised inside the generator at its suspended `yield`, is a `BaseException`, bypassing the
