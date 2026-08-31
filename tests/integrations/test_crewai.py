@@ -22,6 +22,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,6 +35,7 @@ os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 
 from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.hooks import clear_all_global_hooks  # noqa: E402
+from crewai.hooks.tool_hooks import ToolCallHookContext  # noqa: E402
 from crewai.llms.base_llm import BaseLLM  # noqa: E402
 from crewai.tools import tool  # noqa: E402
 
@@ -860,3 +862,92 @@ def test_v2_denied_tool_call_never_records_an_outcome(effects, tools):
     assert denied_export
     outcomes = [e for e in entries if e["event"] == "outcome"]
     assert all(o["call_id"] != denied_export[-1].get("call_id") for o in outcomes)
+
+
+# --------------------------------------------------------------------------
+# 12. Adversarial: concurrent dispatches and third-party hook interference
+#    (Codex review, finding 1). These call `_before_tool_call`/`_after_tool_call`
+#    directly to reproduce CrewAI's own interleaving/dispatch behaviour without
+#    depending on real async scheduling.
+# --------------------------------------------------------------------------
+def test_concurrent_dispatches_do_not_cross_contaminate_outcomes(tools):
+    """Regression: a thread-local (one slot per thread) pending-outcome store lets a SECOND
+    dispatch's before-hook overwrite a FIRST dispatch's still-pending outcome when CrewAI
+    interleaves before(A), before(B), after(A), after(B) on one thread (its async executor can
+    dispatch several tool calls from one model turn this way). Correlation must be per-dispatch
+    (id(tool_input)), not per-thread."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        input_a, input_b = {"rows": 10}, {"rows": 20}
+        ctx_a = ToolCallHookContext(tool_name="crm_query", tool_input=input_a, tool=tools[0], agent=agent)
+        ctx_b = ToolCallHookContext(tool_name="crm_query", tool_input=input_b, tool=tools[0], agent=agent)
+
+        # before(A), before(B) -- interleaved, as CrewAI's async executor can do
+        bridge._before_tool_call(ctx_a)
+        bridge._before_tool_call(ctx_b)
+
+        after_a = ToolCallHookContext(tool_name="crm_query", tool_input=input_a, tool=tools[0], agent=agent,
+                                      tool_result="10 rows", raw_tool_result="10 rows")
+        after_b = ToolCallHookContext(tool_name="crm_query", tool_input=input_b, tool=tools[0], agent=agent,
+                                      tool_result="20 rows", raw_tool_result="20 rows")
+        # after(A), after(B) -- each must close out ITS OWN call, not the other's
+        bridge._after_tool_call(after_a)
+        bridge._after_tool_call(after_b)
+
+        entries = root.audit_log().entries
+        allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query"]
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        assert len(allows) == 2, allows
+        assert len(outcomes) == 2, outcomes
+        # every allow got exactly one matching outcome -- neither call_id was skipped or reused
+        assert {a["call_id"] for a in allows} == {o["call_id"] for o in outcomes}
+        # each outcome's invoked_params_hash matches ITS OWN allow's authorized_params_hash --
+        # proof the snapshot wasn't swapped between A and B
+        by_call_id = {a["call_id"]: a for a in allows}
+        for o in outcomes:
+            assert o["invoked_params_hash"] == by_call_id[o["call_id"]]["authorized_params_hash"]
+    finally:
+        bridge.uninstall()
+
+
+def test_a_third_party_before_hook_vetoing_after_this_bridge_allowed_leaves_the_outcome_unrecorded(tools):
+    """If some OTHER before_tool_call hook (not this bridge's own) blocks the call after this
+    bridge already authorized and stashed a pending outcome, CrewAI still runs
+    `_after_tool_call` -- with its own literal "blocked by hook" result, not a real one. That
+    must never be recorded as a fabricated RETURNED."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        tool_input = {"rows": 10}
+        ctx = ToolCallHookContext(tool_name="crm_query", tool_input=tool_input, tool=tools[0], agent=agent)
+
+        bridge._before_tool_call(ctx)  # this bridge's own hook: allows, stashes a pending outcome
+
+        entries_after_allow = root.audit_log().entries
+        allow = next(e for e in entries_after_allow if e["event"] == "allow" and e.get("tool") == "crm_query")
+
+        # CrewAI's dispatcher: some OTHER registered before_tool_call hook now vetoes the SAME
+        # dispatch (dispatch.py raises HookAborted on the first False/abort) -- the tool body
+        # never runs, and CrewAI substitutes its own literal blocked message before running
+        # POST_TOOL_CALL (tool_utils.py, both dispatch paths).
+        blocked_ctx = ToolCallHookContext(
+            tool_name="crm_query", tool_input=tool_input, tool=tools[0], agent=agent,
+            tool_result="Tool execution blocked by hook. Tool: crm_query",
+            raw_tool_result="Tool execution blocked by hook. Tool: crm_query",
+        )
+        bridge._after_tool_call(blocked_ctx)
+
+        entries = root.audit_log().entries
+        assert entries == entries_after_allow + []  # nothing new was appended
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        assert outcomes == [], "a body that never ran must not get a fabricated RETURNED outcome"
+        assert not any(e["call_id"] == allow["call_id"] for e in outcomes)
+    finally:
+        bridge.uninstall()

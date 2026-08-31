@@ -78,7 +78,25 @@ that calls the body itself can; it observes it through CrewAI's OWN post hook,
 `_after_tool_call`, which the framework runs for every dispatch path (including
 a hook-blocked call) with the tool's real result attached
 (`ToolCallHookContext.raw_tool_result` -- see `crewai/hooks/tool_hooks.py`).
-`_after_tool_call` calls `guard.record_outcome()` from that.
+`_after_tool_call` calls `guard.record_outcome()` from that. `duration_ms` is
+therefore an OBSERVATION window (before-hook to after-hook), not a body-execution
+timer -- it can include other hooks' dispatch time, cache lookups and CrewAI's own
+formatting overhead; this matches `Guard.record_outcome`'s own documented contract
+("observation start to observation end"), not a body-only clock.
+
+CORRELATION: `ToolCallHookContext.tool_input` is the SAME dict object CrewAI passes
+to both the before and after hook for one dispatch (`tool_utils.py` constructs it
+once and reuses it for `hook_context`/`after_hook_context` alike), including on the
+parallel/native-function-calling and async paths where several dispatches can be in
+flight on one thread at once (CrewAI's own async executor can interleave
+`before(A), before(B), after(A), after(B)`). `id(ctx.tool_input)` is therefore this
+bridge's per-DISPATCH key -- not a thread-local slot, which a prior version of this
+file used and which a second, concurrently-authorized call could silently overwrite
+before the first call's outcome was recorded. `self._pending[key]` holds a strong
+reference to `tool_input` for the dispatch's whole before→after span, which is what
+makes the `id()` safe to use as a key: CPython never gives two simultaneously-alive
+objects the same id, and this bridge keeps `tool_input` alive (via that reference)
+for exactly as long as its `id()` is a live dictionary key.
 
 HONESTY NOTE on `BodyState.RAISED`: CrewAI's own `ToolUsage.use`/`ause`
 (`crewai/tools/tool_usage.py`) catches every exception the tool body raises,
@@ -94,6 +112,19 @@ capture this framework's public hook surface supports, not a shortcut: the
 alternative -- monkeypatching `ToolUsage._use`/`_ause` to see the tool's raw
 `Exception` before CrewAI swallows it -- is not one of the documented hook
 points this file relies on (see the module docstring's "Hook points used").
+
+HONESTY NOTE on "the body never ran at all": `_before_tool_call` is a GLOBAL
+CrewAI hook (`register_before_tool_call_hook`) -- if the caller's process ALSO
+registers other `before_tool_call` hooks, one of THEM can still veto the call
+(`crewai/hooks/dispatch.py`) after this bridge already authorized it and stashed
+a pending outcome. CrewAI still runs `_after_tool_call` for a blocked dispatch
+(`tool_utils.py`), with `ctx.raw_tool_result` set to its own literal
+`"Tool execution blocked by hook. Tool: ..."` string (`_BLOCKED_BY_HOOK_PREFIX`,
+both dispatch paths) rather than a real tool result. `_after_tool_call` matches
+that exact, framework-owned prefix and drops the pending outcome instead of
+recording a fabricated `RETURNED` for a body that never ran -- an honest
+unrecorded call_id, not a wrong one. (A call THIS bridge itself blocks never
+reaches this path: `_authorize` never creates a pending outcome for a denial.)
 """
 
 from __future__ import annotations
@@ -207,6 +238,17 @@ class _PendingOutcome:
 
 @dataclass
 class _Pending:
+    """State for ONE tool dispatch, keyed by `id(ctx.tool_input)` in
+    `CrewAIGuardBridge._pending` -- see the module docstring's "CORRELATION".
+
+    `tool_input` is a strong reference to the dispatch's own `ToolCallHookContext.tool_input`
+    dict, which is what makes `id(tool_input)` a safe key: as long as this entry is in
+    `_pending`, that reference keeps the object alive, so its `id()` cannot be reused by a
+    different, concurrently-live object. `denial` and `outcome` are mutually exclusive (a
+    denied call never gets a pending outcome).
+    """
+
+    tool_input: Any
     denial: Optional[Denial] = None
     outcome: Optional[_PendingOutcome] = None
 
@@ -238,16 +280,46 @@ _ADAPTER_INFO = {
 }
 
 
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
+    container with the live object graph, so a later in-place mutation of `value` (by the tool
+    body, or by CrewAI itself) cannot change what was already committed. `copy.deepcopy` alone
+    is not enough: on ANY failure deep in a nested structure, a naive `except: return dict(...)`
+    fallback keeps sharing whatever nested dicts/lists deepcopy did not reach, so a body that
+    mutates its own inputs in place can still change the "snapshot" between the authorized_params
+    commitment and the invoked_params one. This never falls back to a shared reference: dicts and
+    lists are always rebuilt fresh (recursively), and a leaf that cannot itself be deep-copied is
+    replaced by its `repr()` -- a brand-new, immutable string -- rather than shared as-is."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _snapshot_params(tool_input: Mapping[str, Any]) -> Any:
     """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
     CrewAI invokes the tool body -- and reused as both `authorized_params` and `invoked_params`,
     exactly as adapters/langgraph.py does: CrewAI's `ToolCallHookContext.tool_input` is a single
     mutable dict shared between the before and after hook contexts (`tool_utils.py`), so reading
     it again after the body ran would not prove anything about what the body actually saw."""
-    try:
-        return copy.deepcopy(dict(tool_input))
-    except Exception:
-        return dict(tool_input)
+    return _freeze(dict(tool_input))
+
+
+_BLOCKED_BY_HOOK_PREFIX = "Tool execution blocked by hook. Tool: "
+"""CrewAI's own literal prefix for a hook-vetoed call's synthetic result
+(`crewai/utilities/tool_utils.py`, both dispatch paths: `blocked_message =
+f"Tool execution blocked by hook. Tool: {tool_calling.tool_name}"`). See the module
+docstring's honesty note on "the body never ran at all"."""
 
 
 class CrewAIGuardBridge:
@@ -306,7 +378,9 @@ class CrewAIGuardBridge:
         self._default_delegation_authority = default_delegation_authority
         self._denials: list[Denial] = []
         self._lock = threading.Lock()
-        self._local = threading.local()
+        # Keyed by id(ctx.tool_input) -- ONE dispatch, not one thread. See the module
+        # docstring's "CORRELATION".
+        self._pending: dict[int, _Pending] = {}
         self._installed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -354,33 +428,36 @@ class CrewAIGuardBridge:
         (`crewai/hooks/dispatch.py:264`), so a bug in this bridge — or in a
         user-supplied `context_fn` — would otherwise fail OPEN.
         """
-        pending = self._pending()
-        pending.denial = None
-        pending.outcome = None
+        tool_input = getattr(ctx, "tool_input", None) or {}
+        key = id(tool_input)
+        with self._lock:
+            self._pending[key] = _Pending(tool_input=tool_input)
         try:
-            self._authorize(ctx)
+            self._authorize(ctx, key)
         except HookAborted:
             raise
         except BaseException as exc:  # noqa: BLE001 - deliberate catch-all
             self._deny(
+                key,
                 role=_normalize_role(getattr(getattr(ctx, "agent", None), "role", "")),
                 tool_name=_sanitize_tool_name(getattr(ctx, "tool_name", "") or ""),
-                tool_input=getattr(ctx, "tool_input", None) or {},
+                tool_input=tool_input,
                 reason_text=f"bridge internal error, failing closed: {exc!r}",
             )
 
-    def _authorize(self, ctx: Any) -> None:
+    def _authorize(self, ctx: Any, key: int) -> None:
         tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
         role = _normalize_role(getattr(getattr(ctx, "agent", None), "role", ""))
         args: Mapping[str, Any] = getattr(ctx, "tool_input", None) or {}
 
         if tool_name in self._delegation_tools:
-            self._authorize_delegation(role, tool_name, args)
+            self._authorize_delegation(role, tool_name, args, key)
             return
 
         guard = self.guard_for(role)
         if guard is None:
             self._deny(
+                key,
                 role,
                 tool_name,
                 args,
@@ -401,6 +478,7 @@ class CrewAIGuardBridge:
                 disposition=Disposition.UNRESOLVED,
             )
             self._deny(
+                key,
                 role,
                 tool_name,
                 args,
@@ -418,26 +496,31 @@ class CrewAIGuardBridge:
         decision = guard.check(policy.scope, context=context, tool=tool_name,
                                disposition=policy.disposition, **extra)
         if not decision:
-            self._deny(role, tool_name, args, decision.explain(), decision=decision)
+            self._deny(key, role, tool_name, args, decision.explain(), decision=decision)
             return
         if v2:
             # Nothing calls the tool body here -- CrewAI does, elsewhere, entirely outside this
             # hook -- so the outcome is closed out later, in `_after_tool_call`, from whatever
             # CrewAI's OWN post hook hands back (see the module docstring's "Execution binding").
-            self._pending().outcome = _PendingOutcome(
+            outcome = _PendingOutcome(
                 guard=guard, call_id=decision.call_id, tool_name=tool_name,
                 snapshot=snapshot, started_at=time.monotonic(),
             )
+            with self._lock:
+                pending = self._pending.get(key)
+                if pending is not None:
+                    pending.outcome = outcome
 
     # ---- hook point 1: child creation ------------------------------------
 
     def _authorize_delegation(
-        self, role: str, tool_name: str, args: Mapping[str, Any]
+        self, role: str, tool_name: str, args: Mapping[str, Any], key: int
     ) -> None:
         """Mint the coworker's attenuated Guard at the delegation tool call."""
         parent = self.guard_for(role)
         if parent is None:
             self._deny(
+                key,
                 role,
                 tool_name,
                 args,
@@ -448,13 +531,14 @@ class CrewAIGuardBridge:
             args.get("coworker") or args.get("co_worker") or args.get("agent") or ""
         )
         if not coworker:
-            self._deny(role, tool_name, args, "delegation names no coworker")
+            self._deny(key, role, tool_name, args, "delegation names no coworker")
 
         requested = self._delegation_authorities.get(coworker)
         if requested is None and self._default_delegation_authority is not None:
             requested = self._default_delegation_authority(coworker)
         if requested is None:
             self._deny(
+                key,
                 role,
                 tool_name,
                 args,
@@ -467,6 +551,7 @@ class CrewAIGuardBridge:
             child = parent.delegate(coworker, requested, task=task_text)
         except AuthorityError as exc:
             self._deny(
+                key,
                 role,
                 tool_name,
                 args,
@@ -478,15 +563,9 @@ class CrewAIGuardBridge:
 
     # ---- denial plumbing -------------------------------------------------
 
-    def _pending(self) -> _Pending:
-        pending = getattr(self._local, "pending", None)
-        if pending is None:
-            pending = _Pending()
-            self._local.pending = pending
-        return pending
-
     def _deny(
         self,
+        key: int,
         role: str,
         tool_name: str,
         tool_input: Mapping[str, Any],
@@ -503,7 +582,9 @@ class CrewAIGuardBridge:
         )
         with self._lock:
             self._denials.append(denial)
-        self._pending().denial = denial
+            pending = self._pending.get(key)
+            if pending is not None:
+                pending.denial = denial
 
         # Don't re-revoke an already-revoked subtree: that would append a
         # second `kill` to the audit log on every subsequent probe.
@@ -524,30 +605,34 @@ class CrewAIGuardBridge:
         """POST_TOOL_CALL. CrewAI runs this even for a blocked call, so it is
         where the generic "Tool execution blocked by hook." message gets
         replaced with the real attenu-guard reason."""
-        pending = self._pending()
-        denial = pending.denial
-        pending.denial = None
-        outcome = pending.outcome
-        pending.outcome = None
+        tool_input = getattr(ctx, "tool_input", None) or {}
+        key = id(tool_input)
+        with self._lock:
+            pending = self._pending.pop(key, None)
+        denial = pending.denial if pending is not None else None
+        outcome = pending.outcome if pending is not None else None
         tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
         if denial is None and tool_name in self._delegation_tools:
-            args = getattr(ctx, "tool_input", None) or {}
+            args = tool_input
             coworker = _normalize_role(args.get("coworker") or args.get("co_worker") or args.get("agent") or "")
             child = self.guard_for(coworker) if coworker else None
             if child is not None:
                 child.complete()                  # the coworker returned: lifecycle end on the ledger (informational)
-        if outcome is not None and denial is None and outcome.tool_name == tool_name:
-            # Execution binding (0.9.0): close out the check() this hook's `_authorize` made,
-            # from CrewAI's OWN post-hook result -- see the module docstring's "Execution
-            # binding" and its honesty note on why `BodyState.RAISED` never appears here.
+        if outcome is not None and denial is None:
+            # Execution binding (0.9.0): close out the check() this dispatch's `_authorize`
+            # made, from CrewAI's OWN post-hook result -- see the module docstring's "Execution
+            # binding" and its honesty notes on RAISED and "the body never ran at all".
             raw_result = getattr(ctx, "raw_tool_result", None)
-            outcome.guard.record_outcome(
-                outcome.call_id, _body_state_for(raw_result),
-                invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
-            )
+            if isinstance(raw_result, str) and raw_result.startswith(_BLOCKED_BY_HOOK_PREFIX):
+                pass  # some OTHER before_tool_call hook vetoed it after we authorized -- unrecorded, not fabricated
+            else:
+                outcome.guard.record_outcome(
+                    outcome.call_id, _body_state_for(raw_result),
+                    invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
+                )
         if denial is None:
             return None
-        if _sanitize_tool_name(getattr(ctx, "tool_name", "") or "") != denial.tool_name:
+        if tool_name != denial.tool_name:
             return None
         return self._deny_message_fn(denial)
 
