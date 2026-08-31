@@ -791,9 +791,10 @@ def test_delegation_lifecycle_end_is_recorded_when_the_coworker_returns(effects,
 # --------------------------------------------------------------------------
 def test_v2_allowed_tool_call_records_a_returned_outcome_via_the_framework_post_hook(effects, tools):
     """CrewAI itself calls the tool body -- this bridge never does -- so the outcome is closed
-    out from CrewAI's own `_after_tool_call` post hook, not a wrapper this bridge controls."""
+    out from CrewAI's own `_after_tool_call` post hook, not a wrapper this bridge controls.
+    Requires strict_single_hook=True (round 2): this is the opt-in attestation mode."""
     root = _root_guard(schema_version=2)
-    bridge = _bridge(root)
+    bridge = _bridge(root, strict_single_hook=True)
     with bridge:
         _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
 
@@ -818,7 +819,7 @@ def test_v2_a_tool_that_raises_is_still_recorded_returned_not_raised(effects, to
         raise ValueError("boom")
 
     root = _root_guard(schema_version=2)
-    bridge = _bridge(root)
+    bridge = _bridge(root, strict_single_hook=True)
     with bridge:
         _build_crew(
             _build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]),
@@ -875,9 +876,10 @@ def test_concurrent_dispatches_do_not_cross_contaminate_outcomes(tools):
     dispatch's before-hook overwrite a FIRST dispatch's still-pending outcome when CrewAI
     interleaves before(A), before(B), after(A), after(B) on one thread (its async executor can
     dispatch several tool calls from one model turn this way). Correlation must be per-dispatch
-    (id(tool_input)), not per-thread."""
+    (id(tool_input)), not per-thread. strict_single_hook=True: exercises the outcome-recording
+    path this bug lives in."""
     root = _root_guard(schema_version=2)
-    bridge = _bridge(root)
+    bridge = _bridge(root, strict_single_hook=True)
     bridge.install()
     try:
         bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
@@ -914,13 +916,15 @@ def test_concurrent_dispatches_do_not_cross_contaminate_outcomes(tools):
         bridge.uninstall()
 
 
-def test_a_third_party_before_hook_vetoing_after_this_bridge_allowed_leaves_the_outcome_unrecorded(tools):
+def test_a_third_party_before_hook_vetoing_after_this_bridge_allowed_records_abandoned(tools):
     """If some OTHER before_tool_call hook (not this bridge's own) blocks the call after this
     bridge already authorized and stashed a pending outcome, CrewAI still runs
-    `_after_tool_call` -- with its own literal "blocked by hook" result, not a real one. That
-    must never be recorded as a fabricated RETURNED."""
+    `_after_tool_call` -- with its own literal "blocked by hook" result, not a real one. Round 2
+    (team-lead directive): that must be recorded as ABANDONED (this bridge's own observation was
+    cut short by something outside its control), not a fabricated RETURNED, and not simply
+    dropped either -- an honest, explicit record beats a silently missing one."""
     root = _root_guard(schema_version=2)
-    bridge = _bridge(root)
+    bridge = _bridge(root, strict_single_hook=True)
     bridge.install()
     try:
         bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
@@ -945,10 +949,54 @@ def test_a_third_party_before_hook_vetoing_after_this_bridge_allowed_leaves_the_
         bridge._after_tool_call(blocked_ctx)
 
         entries = root.audit_log().entries
-        assert entries == entries_after_allow + []  # nothing new was appended
         outcomes = [e for e in entries if e["event"] == "outcome"]
-        assert outcomes == [], "a body that never ran must not get a fabricated RETURNED outcome"
-        assert not any(e["call_id"] == allow["call_id"] for e in outcomes)
+        assert len(outcomes) == 1, outcomes
+        assert outcomes[0]["call_id"] == allow["call_id"]
+        assert outcomes[0]["body_state"] == BodyState.ABANDONED
+        assert "error_code" not in outcomes[0]  # record_outcome forbids it together with ABANDONED
+    finally:
+        bridge.uninstall()
+
+
+def test_zero_argument_tool_call_still_correlates_and_records_an_outcome(tools):
+    """Round 2 regression: `getattr(ctx, "tool_input", None) or {}` substituted a BRAND NEW `{}`
+    literal for CrewAI's own (reused, falsey) `{}` on every zero-argument tool call, breaking
+    identity-based correlation entirely for that case -- allow with no outcome, wedged
+    complete(). `getattr(ctx, "tool_input", {})` (no truthiness check) must preserve identity."""
+
+    @tool("zero_arg_tool")
+    def zero_arg_tool() -> str:
+        """Takes no arguments."""
+        return "ok"
+
+    root = _root_guard(schema_version=2)
+    bridge = CrewAIGuardBridge(
+        root_guard=root, root_role=ORCHESTRATOR,
+        tool_policies={"zero_arg_tool": ToolPolicy(scope="crm.read")},
+        delegation_authorities={SUMMARIZER: SUMMARIZER_AUTHORITY},
+        strict_single_hook=True,
+    )
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        # CrewAI itself passes the SAME {} object to both hooks for this dispatch (tool_utils.py:
+        # `tool_input = tool_calling.arguments if tool_calling.arguments else {}`, evaluated once).
+        shared_empty_dict: dict = {}
+        before_ctx = ToolCallHookContext(tool_name="zero_arg_tool", tool_input=shared_empty_dict,
+                                         tool=zero_arg_tool, agent=agent)
+        bridge._before_tool_call(before_ctx)
+        after_ctx = ToolCallHookContext(tool_name="zero_arg_tool", tool_input=shared_empty_dict,
+                                        tool=zero_arg_tool, agent=agent,
+                                        tool_result="ok", raw_tool_result="ok")
+        bridge._after_tool_call(after_ctx)
+
+        entries = root.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "zero_arg_tool")
+        outcome = next((e for e in entries if e["event"] == "outcome"), None)
+        assert outcome is not None, "the zero-argument call's outcome was lost"
+        assert outcome["call_id"] == allow["call_id"]
+        assert outcome["body_state"] == BodyState.RETURNED
     finally:
         bridge.uninstall()
 
@@ -991,3 +1039,61 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome(effects, tools):
+    """Round 2 (team-lead directive): DEFAULT capture (strict_single_hook=False, the default)
+    is PRE_HOOK_ONLY -- no outcome is EVER promised or recorded, since this bridge cannot
+    guarantee it is the only thing observing a call unless the caller explicitly attests so."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root)  # strict_single_hook defaults to False
+    with bridge:
+        _build_crew(_build_llm([_act("crm_query", '{"rows": 10}'), "Thought: done.\nFinal Answer: ok."]), tools).kickoff()
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_two_dispatches_sharing_the_same_tool_input_object_correlate_fifo(tools):
+    """Codex review round 2, finding 1: two concurrent dispatches using the SAME tool_input
+    OBJECT identity (not merely equal content -- e.g. CrewAI's own argument-parse caching for
+    identical call text) must not let one overwrite the other's pending entry. A per-key FIFO
+    deque resolves this soundly: two dispatches sharing one tool+args identity are semantically
+    symmetric, so pairing them in append order is as correct as any other pairing."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root, strict_single_hook=True)
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        shared_tool_input = {"rows": 10}  # the SAME object for BOTH dispatches
+        ctx_1 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+        ctx_2 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+
+        bridge._before_tool_call(ctx_1)
+        bridge._before_tool_call(ctx_2)
+
+        after_1 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                      tool=tools[0], agent=agent,
+                                      tool_result="10 rows", raw_tool_result="10 rows")
+        after_2 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                      tool=tools[0], agent=agent,
+                                      tool_result="10 rows", raw_tool_result="10 rows")
+        bridge._after_tool_call(after_1)
+        bridge._after_tool_call(after_2)
+
+        entries = root.audit_log().entries
+        allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query"]
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        assert len(allows) == 2
+        assert len(outcomes) == 2, "one dispatch's entry was lost or overwritten by the other's"
+        # FIFO: the first-appended allow pairs with the first-consumed outcome
+        assert outcomes[0]["call_id"] == allows[0]["call_id"]
+        assert outcomes[1]["call_id"] == allows[1]["call_id"]
+    finally:
+        bridge.uninstall()

@@ -16,6 +16,32 @@ All notable changes to attenu-guard are documented here. The format follows
   vetoes a call after this bridge already authorized it no longer gets recorded as a fabricated
   `BodyState.RETURNED` -- CrewAI's own literal "blocked by hook" result is recognized and the
   outcome is left unrecorded instead.
+  **Round 2 correction (Codex review, finding 1):** three fresh defects. (a) `getattr(ctx,
+  "tool_input", None) or {}` substituted a BRAND NEW `{}` literal on every FALSEY `tool_input`
+  (a zero-argument tool call) -- CrewAI itself reuses the SAME `{}` object across its own before/
+  after hooks even then, so the `or {}` broke correlation entirely for every zero-arg tool
+  (allow, no outcome, `complete()==False`). Fixed: `getattr(ctx, "tool_input", {})`, no
+  truthiness check, preserves identity on a present-but-falsey value. (b) Two dispatches CAN
+  legitimately share one `tool_input` object identity (not just equal content -- e.g. CrewAI's
+  own argument-parse caching for identical call text); a single dict slot per key let a second
+  such dispatch overwrite the first's still-pending entry. Fixed: `self._pending[key]` is now a
+  FIFO `collections.deque`, and `_before_tool_call` passes the EXACT `_Pending` object it just
+  appended directly to `_authorize`/`_deny` (never re-looked-up by key), so there is no ambiguity
+  for the write side; `_after_tool_call` pops FIFO for the read side, sound because two
+  dispatches sharing one identity are semantically symmetric. (c) The third-party-veto path now
+  records `BodyState.ABANDONED` (this bridge's own observation was cut short by something
+  outside its control) instead of leaving the call unrecorded -- an honest, explicit record beats
+  a silently missing one, though `error_code` is NOT attached (`Guard.record_outcome` only
+  permits it together with `RAISED`).
+
+  Most importantly, per the execution-binding spec's own governing principle -- an honest
+  unobserved beats a promised outcome that can be lost -- `Capture.FRAMEWORK_POST_HOOK` is now
+  OPT-IN, not automatic: `CrewAIGuardBridge(..., strict_single_hook=True)` is an explicit
+  attestation that this bridge's hooks are the ONLY tool-call hooks registered in the process
+  (required for the third-party-veto scenario above to even be a bounded risk rather than an
+  open one). The DEFAULT (`strict_single_hook=False`) never passes `capture`/`authorized_params`
+  to `guard.check()` at all -- a v2 chain's `allow` is the Guard's own default
+  `Capture.PRE_HOOK_ONLY`, and no outcome is ever recorded by this bridge.
 - `adapters.openai_agents`: rebuilt on genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`, wrapping
   the tool's own `on_invoke_tool` directly) instead of a second, unreliable `ToolOutputGuardrail`
   that a later `tool_input_guardrails` entry could cause to never run at all (leaving an `allow`
@@ -122,13 +148,16 @@ All notable changes to attenu-guard are documented here. The format follows
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a
   `schema_version=2` chain (unchanged, byte-and-type identical to before, on `schema_version=1`),
   each choosing the most honest capture its framework's real hook surface supports:
-  - `adapters.crewai`: `Capture.FRAMEWORK_POST_HOOK` -- the bridge never calls the tool body
-    itself; the outcome is closed out from CrewAI's own `after_tool_call` post hook, which fires
-    for every dispatch path including a blocked call. `BodyState.RAISED` is never reported: CrewAI's
-    `ToolUsage.use`/`ause` catches every tool exception internally and turns it into a formatted
-    string before the post hook ever runs, so a raise and an ordinary return are indistinguishable
-    at the one hook point this adapter has. `duration_ms` is an observation window (before-hook to
-    after-hook), documented as such, not a body-only timer.
+  - `adapters.crewai`: `Capture.FRAMEWORK_POST_HOOK`, OPT-IN via `CrewAIGuardBridge(...,
+    strict_single_hook=True)` (see the "Fixed" section's round 2 entry) -- the bridge never
+    calls the tool body itself; in strict mode the outcome is closed out from CrewAI's own
+    `after_tool_call` post hook, which fires for every dispatch path including a blocked call.
+    `BodyState.RAISED` is never reported: CrewAI's `ToolUsage.use`/`ause` catches every tool
+    exception internally and turns it into a formatted string before the post hook ever runs, so
+    a raise and an ordinary return are indistinguishable at the one hook point this adapter has.
+    `duration_ms` is an observation window (before-hook to after-hook), documented as such, not a
+    body-only timer. The default (`strict_single_hook=False`) is `Capture.PRE_HOOK_ONLY` with no
+    outcome ever recorded.
   - `adapters.openai_agents`: `Capture.WRAPPER_ASYNC`, OPT-IN via `guarded_tool(..., registry=...)`
     -- `registry.root_guard.schema_version` is checked once, at build time (a whole-chain property),
     to decide whether to replace the tool's `on_invoke_tool` with a wrapper that calls the original
