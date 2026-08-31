@@ -505,3 +505,133 @@ def test_v2_third_party_cancellation_after_our_allow_records_abandoned():
     outcome = next(e for e in entries if e["event"] == "outcome")
     assert outcome["body_state"] == BodyState.ABANDONED
     assert "error_code" not in outcome
+
+
+# ==========================================================================
+# Round 2 (Codex review, batch 2, finding 6): the three lost-terminal-event
+# paths through the BEFORE-hook phase, distinct from AfterToolCallEvent's own
+# body-success/failure/cancellation axis (already covered above). Each test
+# reproduces one path directly with a throwaway sibling HookProvider, exactly
+# as verified standalone before being written up in the module docstring's
+# "ROUND 2 CORRECTION" section.
+# ==========================================================================
+def test_v2_strict_mode_a_later_before_hook_interrupt_wedges_the_pending_entry():
+    """A before_tool_call hook registered AFTER this adapter's own raises
+    InterruptException. HookRegistry.invoke_callbacks_async's per-callback loop catches
+    only InterruptException, converting it into the returned `interrupts` list;
+    ToolExecutor.stream short-circuits to ToolInterruptEvent + return BEFORE ever entering
+    the inner try/except that would call AfterToolCallEvent. This adapter's own allow
+    already stashed a pending entry -- it is never popped. agent(...) returns normally
+    (the interrupt is a legitimate framework mechanism, not an error), but the call is
+    permanently wedged: no outcome, Guard.complete() reports it pending forever."""
+    from strands.hooks import BeforeToolCallEvent, HookProvider
+    from strands.interrupt import Interrupt, InterruptException
+
+    class InterruptingSibling(HookProvider):
+        def register_hooks(self, registry, **kwargs) -> None:
+            registry.add_callback(BeforeToolCallEvent, self._interrupt)
+
+        @staticmethod
+        def _interrupt(event: BeforeToolCallEvent) -> None:
+            if event.tool_use["name"] == "crm_query":
+                raise InterruptException(
+                    Interrupt(id="int-1", name="pause_for_review", reason="human review needed")
+                )
+
+    root, agent, dg = _v2_single_agent([("tool", "crm_query", {"rows": 10}), ("text", "done")])
+    # Registered AFTER dg -> runs after dg's own before_tool_call already authorized
+    # (BeforeToolCallEvent's should_reverse_callbacks is False, same registration order
+    # as test_v2_third_party_cancellation_after_our_allow_records_abandoned above).
+    agent.hooks.add_hook(InterruptingSibling())
+
+    result = agent("go")  # returns normally -- an interrupt is not an exception path
+    assert result is not None
+
+    assert dg._pending, "the pending entry must still be there -- never popped"
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    completion = root.complete()
+    assert completion.completed is False
+    assert completion.pending_call_ids
+
+
+def test_v2_strict_mode_a_later_before_hook_ordinary_exception_wedges_the_pending_entry():
+    """A before_tool_call hook registered AFTER this adapter's own raises an ordinary
+    (non-InterruptException) exception. invoke_callbacks_async's per-callback loop does not
+    catch a plain exception at all -- it propagates straight out of the loop and out of
+    ToolExecutor.stream() itself as an unhandled exception, reaching agent(...)'s own caller
+    as EventLoopException. This adapter's own allow already stashed a pending entry -- it is
+    never popped, exactly as the InterruptException case above, but here the whole call
+    additionally never completes at all."""
+    from strands.hooks import BeforeToolCallEvent, HookProvider
+    from strands.types.exceptions import EventLoopException
+
+    class BrokenSibling(HookProvider):
+        def register_hooks(self, registry, **kwargs) -> None:
+            registry.add_callback(BeforeToolCallEvent, self._boom)
+
+        @staticmethod
+        def _boom(event: BeforeToolCallEvent) -> None:
+            if event.tool_use["name"] == "crm_query":
+                raise RuntimeError("some unrelated hook just broke")
+
+    root, agent, dg = _v2_single_agent([("tool", "crm_query", {"rows": 10}), ("text", "done")])
+    agent.hooks.add_hook(BrokenSibling())  # registered AFTER dg -> runs after dg allowed
+
+    with pytest.raises(EventLoopException):
+        agent("go")
+
+    assert dg._pending, "the pending entry must still be there -- never popped"
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    completion = root.complete()
+    assert completion.completed is False
+    assert completion.pending_call_ids
+
+
+def test_v2_strict_mode_an_earlier_before_hook_exception_means_this_adapter_never_ran():
+    """The SAME ordinary exception, from a hook registered to run BEFORE this adapter's own
+    (BeforeToolCallEvent's registration order is not reversed, so 'registered before' means
+    'runs before'). Since invoke_callbacks_async's per-callback loop stops at the first
+    uncaught exception, this adapter's own before_tool_call/evaluate_tool_call is never
+    invoked for that call at all -- no guard.check(), no allow/deny logged, no pending entry
+    created. Fail-safe for authorization (the tool body does not run either -- the same
+    uncaught exception aborts the whole dispatch before the tool-execution stage is ever
+    reached), but this adapter's ledger has NO record of the attempt at all, not even a
+    denial -- the third of the three lost-terminal paths, distinct from the two wedges above."""
+    from strands.hooks import BeforeToolCallEvent, HookProvider
+    from strands.types.exceptions import EventLoopException
+
+    class BrokenSiblingFirst(HookProvider):
+        def register_hooks(self, registry, **kwargs) -> None:
+            registry.add_callback(BeforeToolCallEvent, self._boom)
+
+        @staticmethod
+        def _boom(event: BeforeToolCallEvent) -> None:
+            if event.tool_use["name"] == "crm_query":
+                raise RuntimeError("some unrelated hook just broke, registered before dg")
+
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    agent = Agent(
+        name="orchestrator",
+        model=demo.ScriptedModel([("tool", "crm_query", {"rows": 10}), ("text", "done")]),
+        tools=[demo.crm_query, demo.crm_export],
+        callback_handler=None,
+    )
+    dg = dg_strands.DelegationGuard(
+        root_guard=root, root_agent=agent, scope_for=demo.SCOPE_FOR,
+        authority_for=demo.authority_for, strict_single_hook=True,
+    )
+    # Registered BEFORE dg -> runs FIRST, so dg's own before_tool_call is never reached.
+    agent.hooks.add_hook(BrokenSiblingFirst())
+    agent.hooks.add_hook(dg)
+
+    with pytest.raises(EventLoopException):
+        agent("go")
+
+    assert dg._pending == {}, "nothing to wedge -- this adapter never got a chance to authorize"
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "deny")] == []
+    assert ("crm_query", 10) not in demo.WORLD["executed"], "the tool body must not have run either"

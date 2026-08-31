@@ -61,15 +61,91 @@ EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`) --
 This adapter never calls the tool body itself -- Strands does -- so it cannot observe
 completion the way a wrapper that calls the body itself can. Strands' `AfterToolCallEvent`
 (`strands/hooks/events.py`) is, on pinned strands-agents 1.52.x, an unusually GOOD hook for
-this: it fires "regardless of whether the execution was successful or resulted in an error"
-(its own docstring), `HookRegistry.invoke_callbacks`/`_async` runs EVERY registered callback
-unconditionally (a plain loop, never short-circuited by another hook's return value -- unlike
-Google ADK's plugin manager), and `tool_use["toolUseId"]` is a genuinely UNIQUE identifier per
+this: ONCE DISPATCHED, it fires "regardless of whether the execution was successful or
+resulted in an error" (its own docstring) -- a raised tool body, a returned result, and a
+tool-body cancellation all reach it alike, and `HookRegistry.invoke_callbacks`/`_async`'s
+per-callback loop is never short-circuited by another hook's RETURN VALUE (unlike Google
+ADK's plugin manager) -- and `tool_use["toolUseId"]` is a genuinely UNIQUE identifier per
 dispatch (`types/tools.py`'s own docstring), not an object identity CrewAI-style collision
-risk. Despite that strength, this adapter still ships with TWO modes, controlled by
+risk.
+
+ROUND 2 CORRECTION (Codex review, batch 2, finding 6): the paragraph above, as it read before
+this correction, was read by a reviewer as claiming `AfterToolCallEvent` fires unconditionally,
+full stop -- verified against pinned 1.52.x source to be FALSE. "Fires unconditionally" was
+only ever true with respect to the TOOL BODY's own success/failure/cancellation (the axis the
+docstring quote above actually describes); it says nothing about whether the event is DISPATCHED
+AT ALL, which depends on the BEFORE-hook phase completing without incident. Three lost-terminal
+paths exist, verified directly against `strands/tools/executors/_executor.py`'s
+`ToolExecutor.stream` and `strands/hooks/registry.py`'s `HookRegistry.invoke_callbacks_async`,
+each reproduced with a throwaway `HookProvider` sibling before being documented here:
+
+  * A LATER-registered `before_tool_call` hook raises `InterruptException`. `stream()` calls
+    `_invoke_before_tool_call_hook` -> `invoke_callbacks_async`, whose per-callback loop catches
+    ONLY `InterruptException` (converting it into the returned `interrupts` list) -- back in
+    `stream()`, `if interrupts: yield ToolInterruptEvent(...); return` fires BEFORE `stream()`'s
+    own inner `try:` block that would eventually call `_invoke_after_tool_call_hook` is ever
+    entered. If this adapter's own `before_tool_call` already ran (registered earlier in
+    `BeforeToolCallEvent`'s registration-order iteration -- `should_reverse_callbacks` is
+    `False` there) and allowed, `evaluate_tool_call` already stashed a pending entry in
+    `self._pending`; `after_tool_call` never runs, so it is never popped -- a permanent wedge,
+    reproduced directly (`agent(...)` returns normally, `Guard.complete()` reports
+    `completed=False` with that call's `call_id` still pending). UNLIKE the tool-originated
+    interrupt case above, this one is not reliably self-healing on resume either: `_pending` is
+    keyed by `toolUseId`, and a fresh allow on retry OVERWRITES the same key, silently orphaning
+    the FIRST `call_id` forever rather than closing it.
+  * An ORDINARY (non-`InterruptException`) exception from a `before_tool_call` hook registered
+    to run AFTER this adapter's own. `invoke_callbacks_async`'s per-callback loop does not catch
+    a plain exception at all -- it propagates straight out of the loop, out of
+    `_invoke_before_tool_call_hook`, and out of `ToolExecutor.stream()` itself as an unhandled
+    exception (that call happens BEFORE `stream()`'s own inner `try`/`except`, so nothing in the
+    tool-execution machinery, including this adapter's own exception handling, ever runs).
+    Reproduced directly: `agent(...)` raises `EventLoopException` wrapping the sibling's
+    original exception, and this adapter's pending entry for that call is wedged exactly as
+    above -- `record_outcome()` never runs, `complete()` reports it pending forever.
+  * The SAME exception, from a hook registered to run BEFORE this adapter's own. Since the
+    per-callback loop stops at the first uncaught exception, this adapter's own
+    `before_tool_call`/`evaluate_tool_call` is never invoked for that call AT ALL -- no
+    `guard.check()`, no allow/deny logged, no pending entry created. Reproduced directly: this
+    is the one case that is NOT a wedge in `self._pending` (there is nothing to wedge, since
+    this adapter never got a chance to authorize the call), and the tool body does not run
+    either (the same uncaught exception aborts the whole dispatch before the middleware/tool-
+    execution stage is ever reached) -- fail-safe for authorization, but the attempt leaves NO
+    record in this adapter's ledger at all, not even a denial.
+
+None of these are something this adapter can code around within Strands' documented hook
+surface: `HookRegistry` gives a registered `HookProvider` no priority/ordering control over
+other callbacks beyond registration order itself, and there is no hook point between "a sibling
+before-hook is about to raise" and the raise itself for this adapter to intervene from. A related,
+narrower risk found during this same verification pass but not one of the three named above:
+`AfterToolCallEvent` DOES use `should_reverse_callbacks = True`, so if THIS adapter's own
+`after_tool_call` is registered earlier than a sibling's (making it run LAST among after-hooks),
+an ordinary exception from that EARLIER-running sibling's own `after_tool_call` would, by the
+same uncaught-exception mechanism, stop the after-hook loop before this adapter's own
+`after_tool_call` runs -- the identical wedge, one hook-type over. Documented here for
+completeness rather than given its own bullet, since it is structurally the same defect as the
+second bullet above, just on the after-hook side of the same dispatch.
+
+CONSIDERED AND REJECTED: whether strict mode should fail closed on a detectable interrupt.
+It should not, for two reasons verified above rather than assumed. First, none of these three
+paths are an AUTHORIZATION gap -- `guard.check()` already ran and its `allow`/`deny` `Decision`
+is already correctly committed to the audit log before any of this can happen; what is lost is
+only the LATER outcome-observation (did the body run, and how), which is an audit-COMPLETENESS
+concern, not an enforcement bypass. Second, there is no hook this adapter can install to detect
+"a sibling before-hook is about to raise" ahead of time, so a "fail closed" response would have
+to happen AFTER the fact -- but by then the call has already either been authorized (paths 1-2)
+or never reached this adapter at all (path 3), and Strands offers no mechanism to retroactively
+undo either. `Guard.complete()`/the offline verifier already surface a wedged `call_id` honestly
+as incomplete/`unaccounted`, never as a fabricated success -- the same "honest gap, not a lie"
+posture this file's own governing principle establishes for the tool-originated-interrupt case
+above. Building a bespoke sweep-and-close mechanism for this specific residual would trade one
+documented, honestly-surfaced gap for an ad hoc one with its own unverified edge cases, for a
+risk that is about completeness of the record, not about what was ever actually authorized.
+
+Despite that strength, this adapter still ships with TWO modes, controlled by
 `DelegationGuard(..., strict_single_hook=...)`, per this whole effort's governing principle --
 an honest unobserved beats a promised outcome that can be lost -- because pinned 1.52.x's
-retry mechanism (below) genuinely CAN lose an already-recorded outcome:
+retry mechanism (below) genuinely CAN lose an already-recorded outcome, on top of the three
+before-hook paths just documented:
 
   * DEFAULT (`strict_single_hook=False`): every `guard.check()` call passes NO `capture`/
     `authorized_params` at all. On a v2 chain the Guard itself stamps its own default, honest

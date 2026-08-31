@@ -400,6 +400,59 @@ All notable changes to attenu-guard are documented here. The format follows
   (`AfterToolCallEvent.retry`) genuinely can discard an already-recorded outcome, and a
   tool-originated interrupt skips `AfterToolCallEvent` entirely; both are documented as strict-
   mode residuals in the module docstring rather than silently promised away.
+  - **Round 2 correction (Codex review, batch 2, finding 6):** "`HookRegistry.invoke_callbacks`/
+    `_async` runs every registered callback unconditionally" was read, correctly, as claiming
+    `AfterToolCallEvent` fires unconditionally, full stop -- verified against pinned 1.52.x
+    source to be FALSE. That claim was only ever true on the axis the `AfterToolCallEvent`
+    docstring quote actually describes (the tool BODY's own success/failure/cancellation); it
+    says nothing about whether the event is DISPATCHED AT ALL, which depends on the BEFORE-hook
+    phase completing without incident. Three lost-terminal paths exist, verified directly against
+    `strands/tools/executors/_executor.py`'s `ToolExecutor.stream` and
+    `strands/hooks/registry.py`'s `HookRegistry.invoke_callbacks_async`, each reproduced with a
+    throwaway `HookProvider` sibling standalone before being written up: (1) a LATER-registered
+    `before_tool_call` hook raises `InterruptException` -- `invoke_callbacks_async`'s
+    per-callback loop catches only `InterruptException`, converting it into the returned
+    `interrupts` list; `stream()` short-circuits to `ToolInterruptEvent` + `return` BEFORE its own
+    inner `try:` that would call `_invoke_after_tool_call_hook` is ever entered, so this
+    adapter's already-stashed pending entry is never popped -- reproduced directly (`agent(...)`
+    returns normally, `Guard.complete()` reports `completed=False` with that call's `call_id`
+    still pending), and UNLIKE the tool-originated-interrupt case, not reliably self-healing on
+    resume either (`self._pending` is keyed by `toolUseId`; a fresh allow on retry OVERWRITES the
+    same key, silently orphaning the first `call_id` forever). (2) An ORDINARY (non-`Interrupt
+    Exception`) exception from a `before_tool_call` hook registered to run AFTER this adapter's
+    own -- `invoke_callbacks_async`'s loop does not catch a plain exception at all, so it
+    propagates out of `ToolExecutor.stream()` itself as an unhandled exception (that call is
+    BEFORE `stream()`'s own inner `try`/`except`); reproduced directly: `agent(...)` raises
+    `EventLoopException`, and the pending entry is wedged exactly as in (1). (3) The SAME
+    exception from a hook registered to run BEFORE this adapter's own -- the per-callback loop
+    stops at the first uncaught exception, so this adapter's own `before_tool_call`/
+    `evaluate_tool_call` never runs for that call at all: no `guard.check()`, no allow/deny
+    logged, no pending entry created; reproduced directly: fail-safe for authorization (the tool
+    body does not run either, since the same exception aborts the whole dispatch before the
+    tool-execution stage), but the attempt leaves NO record in this adapter's ledger at all, not
+    even a denial. A fourth, narrower risk found during the same verification pass but not one
+    of the three named: `AfterToolCallEvent` DOES use `should_reverse_callbacks = True`, so an
+    ordinary exception from a sibling `after_tool_call` callback that runs EARLIER than this
+    adapter's own (by virtue of being registered LATER) can wedge this adapter's own
+    `after_tool_call` by the identical uncaught-exception mechanism, one hook-type over --
+    documented, not given a separate test, since it is structurally identical to path (2).
+    **Considered and rejected: whether strict mode should fail closed on a detectable
+    interrupt.** It should not -- none of these three paths are an authorization gap
+    (`guard.check()`'s `allow`/`deny` `Decision` is already correctly committed before any of
+    this can happen; what is lost is only the later outcome-observation, an audit-completeness
+    concern, not an enforcement bypass), and there is no hook this adapter can install to detect
+    "a sibling before-hook is about to raise" ahead of time to act on. `Guard.complete()`/the
+    offline verifier already surface a wedged `call_id` honestly as incomplete, never as a
+    fabricated success -- the same posture already established for the tool-originated-interrupt
+    case. Rewrote the module docstring's "EXECUTION BINDING" intro with this correction and all
+    three paths; no code change was needed (the underlying `strict_single_hook` mechanism and
+    `after_tool_call`'s own handling were already correct -- this was a documentation-accuracy
+    finding, not a logic bug). Tests added in `tests/integrations/test_strands.py`:
+    `test_v2_strict_mode_a_later_before_hook_interrupt_wedges_the_pending_entry`,
+    `test_v2_strict_mode_a_later_before_hook_ordinary_exception_wedges_the_pending_entry`,
+    `test_v2_strict_mode_an_earlier_before_hook_exception_means_this_adapter_never_ran` -- each
+    reproduces its path with a throwaway sibling `HookProvider`, verified standalone before being
+    written up as a permanent regression test.
 - Execution binding wired into `adapters.camel` (CAMEL-AI), same terms as `adapters.langchain`/
   `llama_index`/`smolagents`: `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` from `GuardedFunctionTool.
   __call__`/`async_call`, which call the inner tool themselves. `_freeze()` snapshot of
