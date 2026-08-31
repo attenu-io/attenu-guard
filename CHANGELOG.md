@@ -6,6 +6,8 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-31
+
 ### Fixed
 - **`Guard.check()` (core, `guard.py`) — a `PRE_HOOK_ONLY` allow wedged `complete()` forever.**
   Codex review round 3, finding 1 (critical): `register_pending()` ran unconditionally for
