@@ -59,6 +59,26 @@ All notable changes to attenu-guard are documented here. The format follows
   open one). The DEFAULT (`strict_single_hook=False`) never passes `capture`/`authorized_params`
   to `guard.check()` at all -- a v2 chain's `allow` is the Guard's own default
   `Capture.PRE_HOOK_ONLY`, and no outcome is ever recorded by this bridge.
+  **Round 3 correction (Codex review, finding 2):** round 2's fix (b) above -- the per-key FIFO
+  `collections.deque` -- rested on a false theory: that two dispatches sharing one tool+args
+  identity are "semantically symmetric", so pairing completions to entries in append order is
+  as correct as any other pairing. Codex's reverse-completion repro disproved it: nothing
+  guarantees two same-key dispatches COMPLETE in the order they were AUTHORIZED (e.g. a later-
+  authorized call blocked near-instantly by an unrelated hook while an earlier one's real tool
+  body is still running), and CrewAI gives this bridge no per-dispatch token to tell two
+  completions on one key apart -- a wrong FIFO pairing silently cross-binds outcomes (the
+  earlier call's `record_outcome` receiving the LATER call's actual result, and vice versa),
+  each individually self-consistent and therefore undetectable by the offline verifier. Fixed:
+  `self._pending` is a single-slot `dict[int, _Pending]` again, not a queue -- `_before_tool_
+  call` now fails CLOSED on a second, concurrent dispatch that finds its key already occupied
+  by a still-live entry, denying it outright via `HookAborted` without ever authorizing it or
+  giving it a slot to collide with. A `collided` flag on the occupying entry additionally
+  closes the one residual this leaves: CrewAI still runs POST_TOOL_CALL for the collision-
+  denied call too, and if that fires before the first call's own real completion, it would
+  find the first call's entry still resident -- since a collision-denied call can only ever
+  itself produce a blocked-looking result, `_after_tool_call` now trusts a `collided` entry's
+  completion when it does NOT look blocked (that shape can only be the first call's own real
+  result) and leaves it unrecorded, rather than guessing, when it does.
 - `adapters.openai_agents`: rebuilt on genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`, wrapping
   the tool's own `on_invoke_tool` directly) instead of a second, unreliable `ToolOutputGuardrail`
   that a later `tool_input_guardrails` entry could cause to never run at all (leaving an `allow`

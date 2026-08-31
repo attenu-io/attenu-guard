@@ -110,17 +110,50 @@ NEVER falls back to a fresh `{}` on a falsey value (`getattr(ctx, "tool_input", 
 `getattr(ctx, "tool_input", None) or {}`): CrewAI reuses the SAME object across its own
 before/after hooks even for a ZERO-ARGUMENT tool call, where `tool_input` is `{}` -- a `... or
 {}` substitutes a BRAND NEW, unrelated `{}` literal on that falsey value, breaking correlation
-for every zero-argument tool (an earlier version of this file had exactly that bug). Distinct
-dispatches CAN still legitimately share one `id(tool_input)` -- e.g. two concurrent calls whose
-arguments were parsed from identical text, if CrewAI's own parser interns/caches the result --
-so `self._pending[key]` is a FIFO `collections.deque`, not a single slot: each `_before_tool_call`
-APPENDS its own `_Pending` object (and passes that SAME object reference directly to
-`_authorize`/`_deny`, never re-looking it up by key, so there is no ambiguity about which
-entry belongs to which in-flight call), and `_after_tool_call` POPS FROM THE LEFT for that
-key -- sound because two dispatches sharing one tool+args identity are semantically symmetric,
-so a FIFO match is as correct as any other pairing. The deque (not merely the individual
-`_Pending`) holds the strong reference to `tool_input` that keeps its `id()` from being
-reused by a different, concurrently-live object while any entry for that key is still queued.
+for every zero-argument tool (an earlier version of this file had exactly that bug).
+
+Distinct dispatches CAN still legitimately share one `id(tool_input)` -- e.g. two concurrent
+calls whose arguments were parsed from identical text, if CrewAI's own parser interns/caches
+the result. A PRIOR version of this file queued same-key entries in a FIFO `collections.deque`
+on the theory that two dispatches sharing one tool+args identity are "semantically symmetric",
+so pairing completions to entries in append order would be as correct as any other pairing --
+Codex review round 3, finding 2 proved that theory false: nothing requires two same-key
+dispatches to COMPLETE in the order they were AUTHORIZED (a later-authorized call can finish
+first, e.g. because an unrelated hook blocks it near-instantly while an earlier one's real tool
+body is still running), and CrewAI gives this bridge no per-dispatch token to tell two
+completions on the same key apart -- so a wrong FIFO pairing silently cross-binds outcomes
+(the earlier call's `record_outcome` gets the LATER call's actual result, and vice versa),
+each individually self-consistent and therefore undetectable by the offline verifier. `self.
+_pending` is now a single-slot `dict[int, _Pending]`, not a queue: `_before_tool_call` fails
+CLOSED on a second, concurrent dispatch that finds its key already occupied by a still-live
+entry -- denying the second outright, via `HookAborted`, WITHOUT ever authorizing it or giving
+it a slot to collide with -- rather than trying to correlate both. This trades a (rare, already
+adversarial) false denial for the alternative of a silently wrong, undetectable ledger record;
+per this whole round's governing principle, an honest denial beats a promised outcome that can
+be cross-bound to the wrong call. The one entry that DOES occupy a key holds the strong
+reference to `tool_input` that keeps its `id()` from being reused by a different,
+concurrently-live object while it remains live -- see `_Pending`'s own docstring.
+
+RESIDUAL: CrewAI still runs POST_TOOL_CALL for the collision-denied call too (it was blocked
+via `HookAborted`, same as any other denial), and this bridge has no way to tell, from
+`id(tool_input)` alone, whether a given `_after_tool_call` invocation is that collision-denied
+call's OWN completion or the FIRST call's genuine one -- so if the collision-denied call's
+after-hook fires before the first call's real completion, it WOULD find the first call's entry
+still resident and could consume it. `_before_tool_call` marks the occupying entry
+`collided=True` the instant a collision is detected specifically to close the ONE consequence
+of that ambiguity this file can still control: a collision-denied call, having been blocked
+via `HookAborted`, can ONLY ever produce a blocked-looking `raw_tool_result`
+(`_BLOCKED_BY_HOOK_PREFIX`) -- it can never look like a genuine `RETURNED`/deferred completion.
+So `_after_tool_call` trusts a `collided` entry's completion when it does NOT look blocked
+(that shape can only be the first call's own real result) and leaves it unrecorded -- an
+honest gap, never a fabricated value -- when it DOES look blocked, since that could genuinely
+be the first call's own third-party veto (the existing, legitimate `ABANDONED` case) OR the
+collision-denied call's phantom completion bleeding through, and this file cannot tell which.
+That is strictly narrower than the round-2 defect: it can still lose a legitimate `ABANDONED`
+record to this ambiguity, but it can no longer WRITE A WRONG one -- the offline verifier's
+`unaccounted` classification for the lost case is the least-bad failure mode CrewAI's own hook
+surface leaves available here; there is no framework signal this file could use to close it
+entirely.
 
 HONESTY NOTE on `BodyState.RAISED` (strict mode): CrewAI's own `ToolUsage.use`/`ause`
 (`crewai/tools/tool_usage.py`) catches every exception the tool body raises, internally, and
@@ -152,7 +185,6 @@ together with `BodyState.RAISED`. (A call THIS bridge itself blocks never reache
 from __future__ import annotations
 
 import asyncio
-import collections
 import concurrent.futures
 import inspect
 import threading
@@ -268,11 +300,24 @@ class _Pending:
     `_pending`, that reference keeps the object alive, so its `id()` cannot be reused by a
     different, concurrently-live object. `denial` and `outcome` are mutually exclusive (a
     denied call never gets a pending outcome).
+
+    `collided`: set True on this entry the moment a SECOND, concurrent dispatch is seen sharing
+    this same key while this entry is still live (`_before_tool_call` fails that second one
+    closed rather than queueing it -- see the module docstring's "CORRELATION"). It marks this
+    entry's own eventual `_after_tool_call` completion as no longer fully trustworthy: CrewAI
+    still runs POST_TOOL_CALL for the collision-denied call too, and if THAT fires first, it
+    would find this entry still resident and could consume it. A blocked-looking completion on
+    a `collided` entry is therefore left unrecorded rather than assumed genuine (see
+    `_after_tool_call`) -- but a genuinely RETURNED/deferred-looking one is still recorded: the
+    collision-denied call can only ever produce a blocked-looking completion (that is how it was
+    denied), never that shape, so a non-blocked completion on a `collided` entry can only be
+    this entry's own real one.
     """
 
     tool_input: Any
     denial: Optional[Denial] = None
     outcome: Optional[_PendingOutcome] = None
+    collided: bool = False
 
 
 def _is_deferred_result(result: Any) -> bool:
@@ -412,11 +457,14 @@ class CrewAIGuardBridge:
         self._strict_single_hook = strict_single_hook
         self._denials: list[Denial] = []
         self._lock = threading.Lock()
-        # Keyed by id(ctx.tool_input) -- ONE dispatch, not one thread. A deque, not a single
-        # slot: two dispatches CAN legitimately share the same tool_input object identity (see
+        # Keyed by id(ctx.tool_input) -- ONE dispatch, not one thread. A SINGLE slot, not a
+        # queue: two dispatches CAN legitimately share the same tool_input object identity (see
         # the module docstring's "CORRELATION" -- e.g. CrewAI's own argument-parse caching for
-        # identical call text), so entries for one key are consumed FIFO, not overwritten.
-        self._pending: dict[int, collections.deque] = {}
+        # identical call text), but nothing guarantees they COMPLETE in the order they were
+        # authorized, so queueing them risked cross-binding one call's outcome to another's
+        # (Codex review round 3, finding 2). A second, concurrent dispatch under a key that is
+        # already occupied is fail-closed -- denied outright -- rather than given a slot.
+        self._pending: dict[int, _Pending] = {}
         self._installed = False
 
     # ---- lifecycle -------------------------------------------------------
@@ -465,9 +513,33 @@ class CrewAIGuardBridge:
         user-supplied `context_fn` — would otherwise fail OPEN.
         """
         tool_input = getattr(ctx, "tool_input", {})
+        key = id(tool_input)
         entry = _Pending(tool_input=tool_input)
         with self._lock:
-            self._pending.setdefault(id(tool_input), collections.deque()).append(entry)
+            collided_with = self._pending.get(key)
+            if collided_with is not None:
+                collided_with.collided = True
+            else:
+                self._pending[key] = entry
+        if collided_with is not None:
+            # Codex review round 3, finding 2: a second, concurrent dispatch sharing this exact
+            # tool_input object identity while the first is still unresolved. CrewAI gives this
+            # bridge no per-dispatch token to tell the two completions apart later, so queueing
+            # both risks cross-binding one call's outcome to the other's -- fail closed instead:
+            # deny the SECOND outright, never give it a slot. See the module docstring's
+            # "CORRELATION" for the full reasoning and its documented residual.
+            self._deny(
+                entry,
+                role=_normalize_role(getattr(getattr(ctx, "agent", None), "role", "")),
+                tool_name=_sanitize_tool_name(getattr(ctx, "tool_name", "") or ""),
+                tool_input=tool_input,
+                reason_text=(
+                    "a second, concurrent tool dispatch shares this call's argument object "
+                    "identity with one still awaiting its outcome; refusing to authorize the "
+                    "second rather than risk mis-binding either call's execution-binding record"
+                ),
+            )
+            return
         try:
             self._authorize(ctx, entry)
         except HookAborted:
@@ -642,16 +714,10 @@ class CrewAIGuardBridge:
         replaced with the real attenu-guard reason."""
         tool_input = getattr(ctx, "tool_input", {})
         key = id(tool_input)
-        # FIFO: two dispatches CAN legitimately share this key (see __init__'s note on
-        # `self._pending`); the entry queued LONGEST is this one's, on the reasonable assumption
-        # that CrewAI itself dispatches same-identity calls in the order it created them.
-        entry = None
+        # Single slot, not a queue (Codex review round 3, finding 2 -- see the module
+        # docstring's "CORRELATION"): AT MOST one entry can ever be live for this key.
         with self._lock:
-            dq = self._pending.get(key)
-            if dq:
-                entry = dq.popleft()
-                if not dq:
-                    del self._pending[key]
+            entry = self._pending.pop(key, None)
         denial = entry.denial if entry is not None else None
         outcome = entry.outcome if entry is not None else None
         tool_name = _sanitize_tool_name(getattr(ctx, "tool_name", "") or "")
@@ -666,7 +732,16 @@ class CrewAIGuardBridge:
             # `_authorize` made, from CrewAI's OWN post-hook result -- see the module docstring's
             # "Execution binding" and its honesty notes on RAISED and "the body never ran at all".
             raw_result = getattr(ctx, "raw_tool_result", None)
-            if isinstance(raw_result, str) and raw_result.startswith(_BLOCKED_BY_HOOK_PREFIX):
+            blocked = isinstance(raw_result, str) and raw_result.startswith(_BLOCKED_BY_HOOK_PREFIX)
+            if blocked and entry.collided:
+                # AMBIGUOUS (Codex review round 3, finding 2's residual -- see the module
+                # docstring's "CORRELATION"): a blocked-looking completion on an entry a
+                # collision ever touched could be this entry's OWN genuine third-party veto, or
+                # a collision-denied dispatch's phantom completion bleeding through via the
+                # shared key. This bridge cannot tell which, so it leaves the call unrecorded --
+                # an honest gap the offline verifier flags -- rather than guess.
+                pass
+            elif blocked:
                 # Some OTHER before_tool_call hook vetoed it after we authorized. `ABANDONED`,
                 # not dropped and not a fabricated `RETURNED`: this bridge's own observation was
                 # cut short by something outside its control, the same way a caller-cancelled
@@ -677,6 +752,10 @@ class CrewAIGuardBridge:
                     invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),
                 )
             else:
+                # A collision-denied dispatch can ONLY ever produce a blocked-looking result
+                # (that is how it was denied) -- so a non-blocked, genuine-looking completion on
+                # a `collided` entry can only be this entry's own real one, safe to record here
+                # regardless of `entry.collided`.
                 outcome.guard.record_outcome(
                     outcome.call_id, _body_state_for(raw_result),
                     invoked_params=outcome.snapshot, duration_ms=_elapsed_ms(outcome.started_at),

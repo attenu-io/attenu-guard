@@ -34,7 +34,7 @@ os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
 
 from crewai import Agent, Crew, Process, Task  # noqa: E402
-from crewai.hooks import clear_all_global_hooks  # noqa: E402
+from crewai.hooks import HookAborted, clear_all_global_hooks  # noqa: E402
 from crewai.hooks.tool_hooks import ToolCallHookContext  # noqa: E402
 from crewai.llms.base_llm import BaseLLM  # noqa: E402
 from crewai.tools import tool  # noqa: E402
@@ -1062,12 +1062,20 @@ def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome(effects, 
     assert bridge.guard_for(SUMMARIZER).is_complete
 
 
-def test_two_dispatches_sharing_the_same_tool_input_object_correlate_fifo(tools):
-    """Codex review round 2, finding 1: two concurrent dispatches using the SAME tool_input
-    OBJECT identity (not merely equal content -- e.g. CrewAI's own argument-parse caching for
-    identical call text) must not let one overwrite the other's pending entry. A per-key FIFO
-    deque resolves this soundly: two dispatches sharing one tool+args identity are semantically
-    symmetric, so pairing them in append order is as correct as any other pairing."""
+def test_a_second_dispatch_sharing_the_same_tool_input_object_fails_closed(tools):
+    """Codex review round 3, finding 2: a round-2 fix queued same-key dispatches in a per-key
+    FIFO deque on the theory that two dispatches sharing one tool+args identity are
+    "semantically symmetric", so pairing completions to entries in append order would be as
+    correct as any other pairing. Codex's reverse-completion repro proved that false: nothing
+    guarantees two same-key dispatches COMPLETE in the order they were AUTHORIZED, and CrewAI
+    gives this bridge no per-dispatch token to tell two completions on one key apart -- a wrong
+    FIFO pairing silently cross-binds outcomes (A's RETURNED becomes B's ledger entry, and vice
+    versa), each individually self-consistent and undetectable by the offline verifier.
+
+    This reproduces exactly that setup -- authorize A, mutate the SAME shared object, then a
+    second dispatch B under the identical object identity while A is still unresolved -- and
+    asserts the bridge now fails B closed (denied outright, never authorized, never queued)
+    while A's own outcome still binds correctly."""
     root = _root_guard(schema_version=2)
     bridge = _bridge(root, strict_single_hook=True)
     bridge.install()
@@ -1075,30 +1083,74 @@ def test_two_dispatches_sharing_the_same_tool_input_object_correlate_fifo(tools)
         bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
         agent = SimpleNamespace(role=SUMMARIZER)
         shared_tool_input = {"rows": 10}  # the SAME object for BOTH dispatches
-        ctx_1 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+        ctx_a = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
                                     tool=tools[0], agent=agent)
-        ctx_2 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+        bridge._before_tool_call(ctx_a)   # A: authorized, its entry now occupies the key
+
+        shared_tool_input["rows"] = 20    # mutated in place -- CrewAI documents before-hooks may do this
+        ctx_b = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
                                     tool=tools[0], agent=agent)
-
-        bridge._before_tool_call(ctx_1)
-        bridge._before_tool_call(ctx_2)
-
-        after_1 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
-                                      tool=tools[0], agent=agent,
-                                      tool_result="10 rows", raw_tool_result="10 rows")
-        after_2 = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
-                                      tool=tools[0], agent=agent,
-                                      tool_result="10 rows", raw_tool_result="10 rows")
-        bridge._after_tool_call(after_1)
-        bridge._after_tool_call(after_2)
+        with pytest.raises(HookAborted):
+            bridge._before_tool_call(ctx_b)   # B: fails closed -- never reaches guard.check()
 
         entries = root.audit_log().entries
         allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query"]
+        assert len(allows) == 1, "the second, colliding dispatch must never be authorized at all"
+        assert bridge.denials and bridge.denials[-1].tool_name == "crm_query"
+        assert "second, concurrent" in bridge.denials[-1].reason_text
+
+        # A's own genuine completion, unaffected by B's collision, still binds correctly.
+        after_a = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                      tool=tools[0], agent=agent,
+                                      tool_result="10 rows", raw_tool_result="10 rows")
+        bridge._after_tool_call(after_a)
+
+        entries = root.audit_log().entries
         outcomes = [e for e in entries if e["event"] == "outcome"]
-        assert len(allows) == 2
-        assert len(outcomes) == 2, "one dispatch's entry was lost or overwritten by the other's"
-        # FIFO: the first-appended allow pairs with the first-consumed outcome
+        assert len(outcomes) == 1
         assert outcomes[0]["call_id"] == allows[0]["call_id"]
-        assert outcomes[1]["call_id"] == allows[1]["call_id"]
+        assert outcomes[0]["body_state"] == BodyState.RETURNED
+        assert bridge.guard_for(SUMMARIZER).complete()   # A's own Guard has no calls left pending on it
+    finally:
+        bridge.uninstall()
+
+
+def test_a_collided_entrys_blocked_looking_completion_is_left_unrecorded_not_guessed(tools):
+    """The residual documented in the module docstring's "CORRELATION": if the collision-
+    denied call's OWN after_tool_call fires and finds the first call's entry still resident
+    (this bridge cannot tell, from id(tool_input) alone, that it does not own that entry), a
+    BLOCKED-looking completion on an entry a collision ever touched is ambiguous -- it could be
+    that entry's own genuine third-party veto, or the collision-denied call's phantom
+    completion bleeding through. This bridge must never guess: it leaves the call unrecorded
+    (an honest gap) rather than write a value that might be wrong either way."""
+    root = _root_guard(schema_version=2)
+    bridge = _bridge(root, strict_single_hook=True)
+    bridge.install()
+    try:
+        bridge._guards[SUMMARIZER] = root.delegate(SUMMARIZER, SUMMARIZER_AUTHORITY, task="x")
+        agent = SimpleNamespace(role=SUMMARIZER)
+        shared_tool_input = {"rows": 10}
+        ctx_a = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+        bridge._before_tool_call(ctx_a)
+
+        ctx_b = ToolCallHookContext(tool_name="crm_query", tool_input=shared_tool_input,
+                                    tool=tools[0], agent=agent)
+        with pytest.raises(HookAborted):
+            bridge._before_tool_call(ctx_b)   # marks A's entry .collided = True
+
+        # A's own after-hook happens to see a BLOCKED-looking result too (e.g. a genuine
+        # third-party veto of A itself -- indistinguishable, from raw_tool_result alone, from
+        # B's phantom completion bleeding through).
+        blocked_after_a = ToolCallHookContext(
+            tool_name="crm_query", tool_input=shared_tool_input, tool=tools[0], agent=agent,
+            tool_result="blocked", raw_tool_result="Tool execution blocked by hook. Tool: crm_query",
+        )
+        bridge._after_tool_call(blocked_after_a)
+
+        entries = root.audit_log().entries
+        assert [e for e in entries if e["event"] == "outcome"] == [], (
+            "an ambiguous, collided, blocked-looking completion must never be recorded either way"
+        )
     finally:
         bridge.uninstall()
