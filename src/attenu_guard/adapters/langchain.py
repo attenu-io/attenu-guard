@@ -66,21 +66,74 @@ means "stop everything" rather than "try something else".
 
 Either way the tool body never executes.
 
-Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): this adapter
-calls the tool body itself (`handler(request)`/`await handler(request)`), exactly like
-`adapters.langgraph`'s reference wiring, so it genuinely observes completion --
-`Capture.WRAPPER_SYNC` from `wrap_tool_call`, `Capture.WRAPPER_ASYNC` from `awrap_tool_call`.
-`authorized_params`/`invoked_params` are both taken from ONE immutable snapshot of the tool
-call's `args` (`_freeze()`, never a copy protocol -- see its own docstring), taken BEFORE the
-handler runs and reused unchanged for both, so a handler that mutates its own inputs in place
-cannot make this adapter claim it observed two different values for one call. `duration_ms`
-covers the wrapper's own await/call of `handler`, not the tool's internal-only work outside
-that boundary (there is none here -- `handler` IS the tool body). A delegation tool call
-(`_gate_delegation`) mints the child via `guard.delegate()`, which never calls `guard.check()`
-in the first place -- there is no `Decision`/`call_id` to bind an outcome to, so a delegation
-call is unaffected by any of this and stays exactly as before. On `schema_version=1` (the
-default), nothing here changes at all -- `capture`/`adapter`/`authorized_params` are never
-passed to `check()`, and `record_outcome()` is never called.
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`) -- TWO MODES
+-----------------------------------------------------------------------------------------
+`handler(request)`/`await handler(request)` is the argument this adapter's own
+`wrap_tool_call`/`awrap_tool_call` receives -- and whether it is genuinely the raw tool body
+depends on WHICH entry point installed this adapter. Verified directly against pinned
+`langgraph` 1.2.x / `langchain` 1.3.x:
+
+  * `ToolNode(tools, wrap_tool_call=guarded.wrap_tool_call)` -- `ToolNode.__init__` accepts
+    exactly ONE `wrap_tool_call` (`langgraph/prebuilt/tool_node.py`), so `execute` (what it
+    passes as `handler`) is `self._execute_tool_sync(req, ...)` -- the tool's real invocation,
+    nothing else composed in front of it. This path is structurally safe.
+  * `create_agent(middleware=[..., guarded.middleware(), ...])` -- `langchain/agents/factory.py`
+    chains EVERY registered `AgentMiddleware.wrap_tool_call` into ONE composed handler via
+    `_chain_tool_call_wrappers` ("first = outermost" -- its own docstring), so `handler` this
+    adapter receives can be ANOTHER middleware's `wrap_tool_call`, not the raw body, if any
+    OTHER `wrap_tool_call`-implementing middleware is listed. LangChain ships several built in
+    (`agents/middleware/tool_retry.py`, `tool_emulator.py`, `human_in_the_loop.py`) that are
+    EXPLICITLY designed to call the inner handler zero, one, or several times, or substitute a
+    result without ever reaching the body -- from this adapter's own `handler(request)` call,
+    that is indistinguishable from "the body ran once".
+
+Per this whole effort's governing principle -- an honest unobserved beats a promised outcome
+that can be lost -- this adapter therefore ships with TWO modes, controlled by
+`GuardedDelegation(..., strict_single_hook=...)`, uniformly across BOTH entry points (this
+adapter cannot tell, from inside `wrap_tool_call` itself, which one installed it):
+
+  * DEFAULT (`strict_single_hook=False`): every `guard.check()` call passes NO `capture`/
+    `authorized_params` at all. On a v2 chain the Guard itself stamps its own default, honest
+    `Capture.PRE_HOOK_ONLY`; this adapter never calls `record_outcome()`. This is the only mode
+    that requires no attestation about which entry point is in use or what else is registered.
+  * STRICT (`strict_single_hook=True`): an explicit attestation that `handler`/`await handler`
+    genuinely IS the raw tool body for every call this adapter authorizes -- true by
+    construction on the `ToolNode(wrap_tool_call=...)` path, and true on the `create_agent`
+    path ONLY if this adapter's `middleware()` is the ONLY `wrap_tool_call`/`awrap_tool_call`-
+    implementing middleware in the list. `_gate` then passes `Capture.WRAPPER_SYNC`/
+    `WRAPPER_ASYNC` to `guard.check()`, and `_run_sync`/`_run_async` close the outcome out from
+    `handler`'s own return/raise, a genuine observation under that attestation.
+    `authorized_params`/`invoked_params` are one immutable snapshot of the tool call's `args`
+    (`_freeze()`, never a copy protocol -- see its own docstring), taken BEFORE `handler` runs
+    and reused unchanged for both. `duration_ms` covers the wrapper's own await/call of
+    `handler`. This file cannot verify the attestation itself -- there is no hook exposing the
+    full `middleware=[...]` list to an individual middleware instance the way
+    `AbstractCapability.for_agent()` does in `adapters.pydantic_ai` -- so a caller who lists
+    ANOTHER `wrap_tool_call`-implementing middleware alongside this one and still sets
+    `strict_single_hook=True` gets exactly the residual pydantic_ai-round-3 uncovered, verified
+    directly against pinned `langchain.agents.factory._chain_tool_call_wrappers` (both
+    compositions):
+
+      * a sibling listed AFTER this adapter (this adapter is OUTER, calling the sibling as its
+        own `handler`) that never reaches the real body -- e.g. `tool_emulator.py`'s mock
+        responses -- IS misreported as `BodyState.RETURNED`: this adapter cannot tell the
+        sibling's substituted `ToolMessage` apart from a genuine one.
+      * a sibling listed AFTER this adapter that calls the real body MORE THAN ONCE inside its
+        own single `handler()` response -- e.g. `tool_retry.py` -- does NOT corrupt the record
+        (this adapter's own `guard.check()` still ran exactly once, matching its own single
+        `handler()` call, so exactly one honest allow/outcome pair is recorded, reflecting the
+        FINAL attempt) -- but it silently under-reports that the real body ran more than once.
+      * a sibling listed BEFORE this adapter (this adapter is INNER) that never calls it at all
+        is the SAFE direction: this adapter's own `wrap_tool_call` simply never runs, so nothing
+        is authorized and nothing is fabricated -- the call is invisible to this adapter, not
+        misrepresented by it.
+
+A delegation tool call (`_gate_delegation`) mints the child via `guard.delegate()`, which never
+calls `guard.check()` in the first place -- there is no `Decision`/`call_id` to bind an outcome
+to, so a delegation call is unaffected by any of this and stays exactly as before, on either
+mode or schema version. On `schema_version=1` (the default), nothing here changes at all --
+`capture`/`adapter`/`authorized_params` are never passed to `check()`, and `record_outcome()`
+is never called.
 """
 from __future__ import annotations
 
@@ -248,6 +301,7 @@ class GuardedDelegation:
         allow_unlisted: bool = False,
         default_policy: Optional[Callable[[str], ToolPolicy]] = None,
         default_subagent_authority: Optional[Callable[[str], Authority]] = None,
+        strict_single_hook: bool = False,
     ) -> None:
         """
         default_policy / default_subagent_authority — OBSERVE-MODE hooks for
@@ -257,6 +311,15 @@ class GuardedDelegation:
         audit log with the generated scope/context, instead of denied
         (the fail-closed default) or silently passed through (`allow_unlisted`).
         `default_policy` takes precedence over `allow_unlisted`.
+        strict_single_hook: execution-binding (0.9.0) mode switch -- see the module docstring's
+                          "EXECUTION BINDING ... TWO MODES". `False` (default): every
+                          `guard.check()` call is left to the Guard's own honest
+                          `Capture.PRE_HOOK_ONLY` default; no outcome is ever recorded. `True`:
+                          an explicit attestation that `handler` genuinely is the raw tool body
+                          for every call -- true by construction on `ToolNode(wrap_tool_call=
+                          ...)`, true on `create_agent(middleware=[...])` ONLY if this is the
+                          ONLY `wrap_tool_call`-implementing middleware in that list. This file
+                          cannot verify either half of that attestation itself.
         """
         if on_deny not in ("tool_error", "raise"):
             raise ValueError("on_deny must be 'tool_error' or 'raise'")
@@ -270,6 +333,7 @@ class GuardedDelegation:
         self.allow_unlisted = allow_unlisted
         self.default_policy = default_policy
         self.default_subagent_authority = default_subagent_authority
+        self.strict_single_hook = strict_single_hook
         self.children: MutableMapping[str, Guard] = {}
         self._middleware = None
 
@@ -414,7 +478,7 @@ class GuardedDelegation:
                        message=f"no attenu-guard policy declared for tool {name!r}"),
                 tool=name, disposition=Disposition.UNRESOLVED)))
 
-        v2 = guard.schema_version == 2
+        v2 = self.strict_single_hook and guard.schema_version == 2
         snapshot = _snapshot_params(args) if v2 else None
         hook = "GuardedDelegation.awrap_tool_call" if capture == Capture.WRAPPER_ASYNC else "GuardedDelegation.wrap_tool_call"
         extra = (
