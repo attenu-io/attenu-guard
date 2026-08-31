@@ -124,10 +124,32 @@ NOTE ON SERIALIZATION
 A guarded tool is a runtime object bound to a live `Guard`, so it deliberately refuses
 `to_dict()`. Serialize your pipeline or agent with the *unguarded* tools and apply
 `guard_tools(...)` after `from_dict()`.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain — see `Guard.issue`)
+-----------------------------------------------------------------------------
+Hook 2 (`guard_tool`/`guard_tools`, `Tool.invoke`/`invoke_async`) is genuine WRAPPER capture
+(`Capture.WRAPPER_SYNC`/`Capture.WRAPPER_ASYNC`) — like `adapters.langgraph`'s reference wiring,
+`_Guarded.invoke`/`invoke_async` call `super().invoke`/`invoke_async` themselves and await/observe
+completion directly, so `BodyState.RAISED` (with `error_code`) is genuinely reachable: unlike CrewAI
+and the OpenAI Agents SDK, Haystack never swallows a tool's exception into a returned string before
+this wrapper sees it -- it re-raises (`Tool.invoke`/`invoke_async` wrap the body's own exception in a
+`ToolInvocationError` with the original as `__cause__`, which this adapter unwraps for `error_code`
+via `_underlying_error_code` -- see there). A delegation tool (`policy.delegates_to`
+set) never calls `guard.check()` for itself — it mints the child via `guard.delegate()` — so there is
+nothing to bind an outcome to; only a non-delegation, non-`UNGUARDED` policy gets execution binding.
+
+Hook 3 (`AttenuationStrategy`/`attenuation_hook`) is NOT wrapped: it sees a pending tool call and can
+veto it, but — as the module docstring above already says — "it cannot mint the child Guard" because
+it never touches the tool body either way; the framework itself calls the tool afterward, entirely
+outside this hook. Its `guard.check()` calls stay the library's own default `pre_hook_only`
+observation; no `capture`/`authorized_params` are passed here.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
+import inspect
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -138,8 +160,35 @@ from haystack.hooks.human_in_the_loop import ConfirmationHook, ToolExecutionDeci
 from haystack.tools import Tool, Toolset, flatten_tools_or_toolsets
 from haystack.tools.errors import ToolInvocationError
 
-from attenu_guard import Authority, AuthorityDenied, AuthorityError, Decision, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Decision, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}._Guarded.invoke",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    return inspect.isgenerator(result) or inspect.isasyncgen(result)
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _snapshot_params(args: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
+    try:
+        return copy.deepcopy(dict(args))
+    except Exception:
+        return dict(args)
 
 __all__ = [
     "Grant",
@@ -327,6 +376,27 @@ def authorize_tool_call(
     return guard, decision
 
 
+def _authorize_v2(
+    guard: Guard, policy: ToolPolicy, tool_name: str, args: Mapping[str, Any], *, is_async: bool,
+) -> tuple[Decision, Any]:
+    """Like `authorize_tool_call`, for a `schema_version=2` chain and a non-`UNGUARDED` policy:
+    passes `capture`/`adapter`/`authorized_params` and returns `(decision, snapshot)` on allow
+    (never `None` -- the caller only calls this when `policy.scope is not None`), so the caller
+    can bind an outcome to `decision.call_id`. Raises `_Refusal` on a denial, exactly like
+    `authorize_tool_call`, so both go through `_ToolGuard._refuse`'s shaping."""
+    snapshot = _snapshot_params(args)
+    context = dict(policy.context(args)) if policy.context is not None else {}
+    capture = Capture.WRAPPER_ASYNC if is_async else Capture.WRAPPER_SYNC
+    decision = guard.check(
+        policy.scope, context=context, metered=policy.metered, tool=tool_name,
+        disposition=policy.disposition, capture=capture, adapter=_ADAPTER_INFO,
+        authorized_params=snapshot,
+    )
+    if not decision:
+        raise _Refusal(_denial_message(tool_name, decision.explain()), tool_name, decision)
+    return decision, snapshot
+
+
 class _Refusal(Exception):
     """Internal: a refusal, before either hook has shaped it for the framework."""
 
@@ -377,21 +447,41 @@ class _ToolGuard:
         self.policy = policy
         self.on_deny = on_deny
 
-    def scope(self, args: Mapping[str, Any]) -> Any:
-        """Authorize the call, and return the `with` scope its body must run inside.
+    def scope(self, args: Mapping[str, Any], *, is_async: bool = False) -> tuple[Any, Any]:
+        """Authorize the call, and return `(with_scope, pending)`.
 
-        For a delegation point that is the child's `Guard`; for anything else a no-op.
-        Never returns on a denial.
+        `with_scope` is the child's `Guard` scope for a delegation point, `_NullScope()`
+        otherwise. `pending` is `(guard, call_id, snapshot)` -- execution binding (0.9.0) --
+        when this is a `schema_version=2` chain and a non-`UNGUARDED`, non-delegation policy;
+        `None` otherwise (v1, `UNGUARDED`, or a delegation tool, which never calls
+        `guard.check()` for itself -- see the module docstring's "EXECUTION BINDING"). Never
+        returns on a denial.
         """
-        try:
-            guard, _ = authorize_tool_call(self.tool_name, self.policy, args)
-        except _Refusal as refusal:
-            self._refuse(refusal)
-            raise  # unreachable: _refuse never returns
-
+        guard = _CURRENT.get()
         policy = self.policy
+        v2 = (
+            guard is not None and guard.schema_version == 2
+            and policy is not None and policy.scope is not None
+        )
+        pending = None
+        if v2:
+            try:
+                decision, snapshot = _authorize_v2(guard, policy, self.tool_name, args, is_async=is_async)
+            except _Refusal as refusal:
+                self._refuse(refusal)
+                raise  # unreachable: _refuse never returns
+            pending = (guard, decision.call_id, snapshot)
+        else:
+            try:
+                guard, _ = authorize_tool_call(self.tool_name, self.policy, args)
+            except _Refusal as refusal:
+                self._refuse(refusal)
+                raise  # unreachable: _refuse never returns
+
         if policy is not None and policy.delegates_to and policy.grant is not None:
-            # Mint the child now: after the check passed, before the sub-agent starts.
+            # Mint the child now: after the check passed, before the sub-agent starts. A
+            # delegation tool's own check (if any -- UNGUARDED delegation tools have none) is
+            # never bound to an outcome, so `pending` is dropped here.
             try:
                 child = guard.delegate(
                     policy.delegates_to,
@@ -405,8 +495,8 @@ class _ToolGuard:
                     ReasonCode.NO_AUTHORITY, message, tool=self.tool_name, disposition=Disposition.UNRESOLVED
                 )
                 self._refuse(_Refusal(message, self.tool_name, decision))
-            return authority(child)
-        return _NullScope()
+            return authority(child), None
+        return _NullScope(), pending
 
     def _refuse(self, refusal: _Refusal) -> None:
         """Raise the denial in the shape the caller asked for. Never returns.
@@ -442,6 +532,17 @@ def _nested_denial(exc: ToolInvocationError) -> BaseException | None:
     return None
 
 
+def _underlying_error_code(exc: ToolInvocationError) -> str:
+    """The tool BODY's own exception class name for `record_outcome(error_code=...)` --
+    unwrapped one level when `Tool.invoke`/`invoke_async` (`tool.py:296-302`,`:320-323`) has
+    already re-raised the body's exception as a `ToolInvocationError` with the original set as
+    `__cause__` (this is NOT `_nested_denial`'s case -- that is a denial from a nested
+    delegation; this is any ordinary tool failure). Reporting `ToolInvocationError` itself would
+    describe Haystack's own re-wrapping, not what the tool body actually raised."""
+    cause = exc.__cause__
+    return type(cause).__name__ if cause is not None else type(exc).__name__
+
+
 _GUARDED_CLASSES: dict[type, type] = {}
 
 
@@ -462,24 +563,74 @@ def _guarded_class(base: type) -> type:
         _attenu: _ToolGuard
 
         def invoke(self, **kwargs: Any) -> Any:
-            with self._attenu.scope(kwargs):
+            ctx_scope, pending = self._attenu.scope(kwargs, is_async=False)
+            with ctx_scope:
+                if pending is None:
+                    try:
+                        return super().invoke(**kwargs)
+                    except ToolInvocationError as exc:
+                        denial = _nested_denial(exc)
+                        if denial is None:
+                            raise
+                        raise denial from None
+                # Execution binding (0.9.0): this wrapper calls the tool body itself, so it
+                # genuinely observes completion -- see the module docstring's "EXECUTION BINDING".
+                guard, call_id, snapshot = pending
+                started_at = time.monotonic()
                 try:
-                    return super().invoke(**kwargs)
+                    result = super().invoke(**kwargs)
                 except ToolInvocationError as exc:
                     denial = _nested_denial(exc)
+                    error_code = type(denial).__name__ if denial is not None else _underlying_error_code(exc)
+                    guard.record_outcome(call_id, BodyState.RAISED, error_code=error_code,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
                     if denial is None:
                         raise
                     raise denial from None
+                except Exception as exc:
+                    guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+                    raise
+                guard.record_outcome(call_id, _body_state_for(result), invoked_params=snapshot,
+                                     duration_ms=_elapsed_ms(started_at))
+                return result
 
         async def invoke_async(self, **kwargs: Any) -> Any:
-            with self._attenu.scope(kwargs):
+            ctx_scope, pending = self._attenu.scope(kwargs, is_async=True)
+            with ctx_scope:
+                if pending is None:
+                    try:
+                        return await super().invoke_async(**kwargs)
+                    except ToolInvocationError as exc:
+                        denial = _nested_denial(exc)
+                        if denial is None:
+                            raise
+                        raise denial from None
+                guard, call_id, snapshot = pending
+                started_at = time.monotonic()
                 try:
-                    return await super().invoke_async(**kwargs)
+                    result = await super().invoke_async(**kwargs)
+                except asyncio.CancelledError:
+                    # The wrapper stopped observing while the body may still run -- `abandoned`,
+                    # not `raised`. Still re-raised: cancellation must propagate normally.
+                    guard.record_outcome(call_id, BodyState.ABANDONED, invoked_params=snapshot,
+                                         duration_ms=_elapsed_ms(started_at))
+                    raise
                 except ToolInvocationError as exc:
                     denial = _nested_denial(exc)
+                    error_code = type(denial).__name__ if denial is not None else _underlying_error_code(exc)
+                    guard.record_outcome(call_id, BodyState.RAISED, error_code=error_code,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
                     if denial is None:
                         raise
                     raise denial from None
+                except Exception as exc:
+                    guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+                    raise
+                guard.record_outcome(call_id, _body_state_for(result), invoked_params=snapshot,
+                                     duration_ms=_elapsed_ms(started_at))
+                return result
 
         def to_dict(self) -> dict[str, Any]:
             raise NotImplementedError(

@@ -43,6 +43,17 @@ All notable changes to attenu-guard are documented here. The format follows
     `self.wrapped.call_tool(...)` directly, so authorization and capture live in one method. Both
     genuinely observe and report `BodyState.RAISED` (pydantic-ai does not swallow a tool's
     exception before either hook runs) and `BodyState.ABANDONED` on `asyncio.CancelledError`.
+  - `adapters.haystack`: `Capture.WRAPPER_SYNC`/`Capture.WRAPPER_ASYNC` on hook 2
+    (`guard_tool`/`guard_tools`) -- `_Guarded.invoke`/`invoke_async` call `super().invoke`/
+    `invoke_async` themselves, exactly like `adapters.langgraph`'s reference wiring. Haystack's
+    `Tool.invoke`/`invoke_async` re-raise the body's own exception as a `ToolInvocationError`
+    with the original set as `__cause__`, which this adapter unwraps for an honest `error_code`
+    (`_underlying_error_code`) rather than reporting `ToolInvocationError` itself, an artifact of
+    Haystack's own plumbing. A delegation tool mints via `guard.delegate()`, never calls
+    `guard.check()` for itself, so it never binds an outcome. Hook 3 (`AttenuationStrategy`) is
+    NOT wrapped -- it can veto a pending call but never touches the tool body, which the
+    framework calls afterward entirely outside the hook -- so its checks stay the library's
+    default `pre_hook_only`, unchanged.
 
 ## [0.9.0] — 2026-08-31
 

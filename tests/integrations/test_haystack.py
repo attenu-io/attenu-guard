@@ -34,6 +34,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Load the example module by path.
@@ -518,3 +519,139 @@ def test_an_ordinary_tool_failure_is_left_exactly_as_haystack_raised_it():
     assert isinstance(exc.value.__cause__, ZeroDivisionError), "the original cause was suppressed"
     # The call WAS authorized — the failure is the tool's, not the Guard's.
     assert [e["event"] for e in root.audit_log().entries] == ["root", "allow"]
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# Genuine WRAPPER capture -- `_Guarded.invoke`/`invoke_async` call the tool
+# body themselves, so BodyState.RAISED is honestly reachable here.
+# ==========================================================================
+
+def _crm_query_tool(fn) -> Tool:
+    return Tool(
+        name="crm_query",
+        description="Read rows from the CRM.",
+        parameters={"type": "object", "properties": {"rows": {"type": "integer"}}, "required": ["rows"]},
+        function=fn,
+    )
+
+
+def test_v2_allowed_sync_call_records_a_returned_outcome_with_wrapper_sync_capture():
+    root = Guard.issue("solo", demo.RESEARCHER_AUTHORITY, task="root", schema_version=2)
+    tool = dg_hs.guard_tool(_crm_query_tool(lambda rows: f"{rows} rows"), demo.RESEARCHER_POLICIES["crm_query"])
+
+    with dg_hs.authority(root):
+        result = tool.invoke(rows=10)
+
+    assert result == "10 rows"
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.haystack"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_v2_allowed_async_call_records_a_returned_outcome_with_wrapper_async_capture():
+    root = Guard.issue("solo", demo.RESEARCHER_AUTHORITY, task="root", schema_version=2)
+
+    async def crm_query_async(rows: int) -> str:
+        return f"{rows} rows"
+
+    raw_tool = Tool(
+        name="crm_query",
+        description="Read rows from the CRM.",
+        parameters={"type": "object", "properties": {"rows": {"type": "integer"}}, "required": ["rows"]},
+        function=lambda rows: f"{rows} rows",
+        async_function=crm_query_async,
+    )
+    tool = dg_hs.guard_tool(raw_tool, demo.RESEARCHER_POLICIES["crm_query"])
+
+    async def go():
+        with dg_hs.authority(root):
+            return await tool.invoke_async(rows=10)
+
+    result = asyncio.run(go())
+    assert result == "10 rows"
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome_with_error_code():
+    from haystack.tools.errors import ToolInvocationError
+
+    def boom(rows: int) -> str:
+        raise ValueError("boom")
+
+    root = Guard.issue("solo", demo.RESEARCHER_AUTHORITY, task="root", schema_version=2)
+    tool = dg_hs.guard_tool(_crm_query_tool(boom), demo.RESEARCHER_POLICIES["crm_query"])
+
+    with dg_hs.authority(root), pytest.raises(ToolInvocationError):
+        tool.invoke(rows=10)
+
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes and outcomes[-1]["body_state"] == BodyState.RAISED
+    assert outcomes[-1]["error_code"] == "ValueError"
+
+
+def test_v1_guard_gets_no_call_id_capture_or_outcome():
+    root = Guard.issue("solo", demo.RESEARCHER_AUTHORITY, task="root")  # schema_version=1, default
+    tool = dg_hs.guard_tool(_crm_query_tool(lambda rows: f"{rows} rows"), demo.RESEARCHER_POLICIES["crm_query"])
+
+    with dg_hs.authority(root):
+        tool.invoke(rows=10)
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "call_id" not in allow and "capture" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    root = Guard.issue("solo", demo.RESEARCHER_AUTHORITY, task="root", schema_version=2)
+    tool = dg_hs.guard_tool(_crm_query_tool(lambda rows: f"{rows} rows"), demo.RESEARCHER_POLICIES["crm_query"])
+
+    with dg_hs.authority(root), pytest.raises(dg_hs.AuthorityDeniedTool):
+        tool.invoke(rows=90_000)  # > RESEARCHER_AUTHORITY's RowLimit
+
+    entries = root.audit_log().entries
+    assert any(e["event"] == "deny" and e.get("tool") == "crm_query" for e in entries)
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_tool_never_records_an_outcome():
+    """A delegation tool mints via guard.delegate(), never calls guard.check() for itself, so
+    there is nothing to bind an outcome to (see the module docstring's "EXECUTION BINDING") --
+    even though it too runs through `_Guarded.invoke`, the same wrapper capture path."""
+    ops = demo.Ops()
+    researcher = Agent(
+        chat_generator=demo.ScriptedChatGenerator(demo.SMALL_READ),
+        tools=dg_hs.guard_tools(demo.build_tools(ops), demo.RESEARCHER_POLICIES),
+        system_prompt="Research.",
+    )
+    ask_tool = dg_hs.guard_tool(
+        AgentTool(agent=researcher, name="ask_researcher", description="Delegate research."),
+        dg_hs.ToolPolicy(None, delegates_to="researcher", grant=dg_hs.Grant(demo.RESEARCHER_AUTHORITY)),
+    )
+    root = Guard.issue("coordinator", demo.COORDINATOR_AUTHORITY, task="root", schema_version=2)
+
+    with dg_hs.authority(root):
+        ask_tool.invoke(messages=[{"role": "user", "content": "Research Q3"}])
+
+    assert ops.rows_returned == 120  # the sub-agent's own crm_query call DID get an outcome
+    entries = root.audit_log().entries
+    assert any(e["event"] == "spawn" for e in entries)  # the delegation itself happened
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    allow_call_ids = {e["call_id"] for e in entries if e["event"] == "allow"}
+    # every outcome recorded belongs to an allowed check() -- none was fabricated for the
+    # delegation tool's own (check()-less) call
+    assert outcomes and all(o["call_id"] in allow_call_ids for o in outcomes)
+    # and there are exactly as many outcomes as non-delegation allows (crm_query only)
+    non_delegation_allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query"]
+    assert len(outcomes) == len(non_delegation_allows)
