@@ -25,6 +25,15 @@ All notable changes to attenu-guard are documented here. The format follows
     that call's outcome is simply never recorded (the hook structurally never fires for it).
     `guarded_agent_tool()`'s delegation-scope check and `guarded_handoff()`/`DelegationGuardHooks`
     mint via `Guard.delegate()`, not a tool body, so they stay the library's default `pre_hook_only`.
+  - `adapters.google_adk`: `Capture.FRAMEWORK_POST_HOOK`, and the richest of the six -- ADK's
+    `BasePlugin` offers a real error hook (`on_tool_error_callback`) alongside the success one
+    (`after_tool_callback`), and does NOT swallow a tool's exception before it runs, so this is
+    the one adapter of the six that genuinely observes and reports `BodyState.RAISED` (with
+    `error_code`), no honesty caveat needed. The two hooks correlate their pending state with
+    `_authorize()`'s `check()` via `id(tool_context)` -- ADK threads one `ToolContext` per call
+    through before/after/error uniformly. Applies uniformly to both the tool check and the
+    delegation-scope check (`delegation_scope=...`), since both go through `_authorize()` and
+    both are real ADK tool calls with the same before/after/error lifecycle.
 
 ## [0.9.0] — 2026-08-31
 

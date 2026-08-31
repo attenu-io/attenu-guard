@@ -79,9 +79,39 @@ attenu-guard deliberately does not decide what authority a task needs — you
 write the `Authority` for each delegation and the `ToolAuthority` for each tool.
 An agent with no entry in `delegations`, and a tool with no entry in `tools`,
 both fail CLOSED.
+
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain — see `Guard.issue`)
+-----------------------------------------------------------------------------
+`_authorize` (the single choke point both the tool check and the delegation-scope
+check go through) passes `capture=Capture.FRAMEWORK_POST_HOOK` to `guard.check()`.
+The plugin never calls the tool body itself — ADK does, via `__call_tool_async` in
+`flows/llm_flows/functions.py` — so the outcome is closed out from TWO of ADK's own
+post-invocation hooks, whichever one actually fires for a given call:
+
+  * `after_tool_callback(tool, tool_args, tool_context, result)` on success —
+    `BodyState.RETURNED`;
+  * `on_tool_error_callback(tool, tool_args, tool_context, error)` on a raised
+    exception — `BodyState.RAISED`, `error_code=type(error).__name__`. Returning
+    `None` from it (as this plugin always does) means the original exception still
+    propagates exactly as it would without this plugin installed — the plugin only
+    observes, it never swallows the error.
+
+The two are mutually exclusive per call (`functions.py`'s `try: ... except Exception
+as tool_error: error_response = await _run_on_tool_error_callbacks(...)` — the error
+callback runs, then EITHER its return value stands in for the result and
+`after_tool_callback` runs too with THAT synthesized result, OR (this plugin's case:
+`on_tool_error_callback` always returns `None`) the original exception re-raises and
+`after_tool_callback` never runs at all for this call). The two hooks correlate their
+pending state with `_authorize`'s `check()` by `id(tool_context)`: ADK constructs one
+`ToolContext` per function call and threads the SAME object through
+before/after/error for it, so the id is a safe, call-scoped key. Unlike CrewAI and the
+OpenAI Agents SDK, ADK does not swallow a tool's exception before this plugin's hook
+runs, so `BodyState.RAISED` is genuinely reachable here — no honesty caveat needed.
 """
 from __future__ import annotations
 
+import copy
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -92,8 +122,38 @@ from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
-from attenu_guard import Authority, AuthorityDenied, Decision, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.DelegationGuardPlugin._authorize",
+}
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _snapshot_params(tool_args: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    ADK invokes the tool body -- and reused as both `authorized_params` and `invoked_params`."""
+    try:
+        return copy.deepcopy(dict(tool_args))
+    except Exception:
+        return dict(tool_args)
+
+
+@dataclass
+class _PendingOutcome:
+    """An allowed, v2 `check()` waiting on `after_tool_callback`/`on_tool_error_callback` to
+    close it out -- keyed by `id(tool_context)` in `DelegationGuardPlugin._pending_outcomes`."""
+
+    guard: Guard
+    call_id: str
+    snapshot: Any
+    started_at: float
 
 __all__ = ["DelegationGuardPlugin", "ToolAuthority", "TRANSFER_TOOL_NAME"]
 
@@ -202,6 +262,10 @@ class DelegationGuardPlugin(BasePlugin):
 
         self._guards: dict[str, Guard] = {}
         self._current: Optional[str] = None
+        # Execution binding (0.9.0): an allowed, v2 check() waiting on after_tool_callback /
+        # on_tool_error_callback to close it out -- keyed by id(tool_context), see the module
+        # docstring's "EXECUTION BINDING" section.
+        self._pending_outcomes: dict[int, _PendingOutcome] = {}
         if root_agent_name:
             self._guards[root_agent_name] = root_guard
             self._current = root_agent_name
@@ -262,6 +326,7 @@ class DelegationGuardPlugin(BasePlugin):
             return self._authorize(
                 guard, agent_name, tool.name or "<unnamed>",
                 f"{self._delegation_scope}.{target}", {}, metered=False,
+                tool_args=tool_args, tool_context=tool_context,
             )
 
         if tool.name in self._exempt:
@@ -279,8 +344,36 @@ class DelegationGuardPlugin(BasePlugin):
         disposition = declared.disposition if declared is not None else Disposition.UNRESOLVED
         return self._authorize(
             guard, agent_name, tool.name or "<unnamed>", scope, context, metered=metered,
-            disposition=disposition,
+            disposition=disposition, tool_args=tool_args, tool_context=tool_context,
         )
+
+    # ---- hook 2b/2c: the tool body has finished (0.9.0 execution binding) -----
+    async def after_tool_callback(
+        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
+        result: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        self._close_outcome(tool_context, BodyState.RETURNED)
+        return None  # never override the result -- purely observational
+
+    async def on_tool_error_callback(
+        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
+        error: Exception,
+    ) -> Optional[dict[str, Any]]:
+        self._close_outcome(tool_context, BodyState.RAISED, error_code=type(error).__name__)
+        return None  # never swallow the error -- it must propagate exactly as it would without us
+
+    def _close_outcome(
+        self, tool_context: ToolContext, body_state: str, *, error_code: Optional[str] = None,
+    ) -> None:
+        pending = self._pending_outcomes.pop(id(tool_context), None)
+        if pending is None:
+            return  # v1 chain, or nothing was pending for this call (e.g. it was denied)
+        kwargs: dict[str, Any] = dict(
+            invoked_params=pending.snapshot, duration_ms=_elapsed_ms(pending.started_at),
+        )
+        if error_code is not None:
+            kwargs["error_code"] = error_code
+        pending.guard.record_outcome(pending.call_id, body_state, **kwargs)
 
     # ---- internals -------------------------------------------------------
     @staticmethod
@@ -327,11 +420,27 @@ class DelegationGuardPlugin(BasePlugin):
         context: Mapping[str, Any],
         *,
         metered: bool,
+        tool_args: Mapping[str, Any],
+        tool_context: ToolContext,
         disposition: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(tool_args) if v2 else None
+        extra = (
+            dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(scope, context=context, metered=metered, tool=tool_name,
-                               disposition=disposition)
+                               disposition=disposition, **extra)
         if decision:
+            if v2:
+                # Nothing here calls the tool body -- ADK does, elsewhere -- so the outcome is
+                # closed out later by after_tool_callback/on_tool_error_callback, whichever ADK
+                # actually runs for this call. See the module docstring's "EXECUTION BINDING".
+                self._pending_outcomes[id(tool_context)] = _PendingOutcome(
+                    guard=guard, call_id=decision.call_id, snapshot=snapshot,
+                    started_at=time.monotonic(),
+                )
             return None
         if self._raise:
             raise AuthorityDenied(decision)
