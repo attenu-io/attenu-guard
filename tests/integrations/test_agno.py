@@ -13,6 +13,7 @@ does not cover that scope, so the export is denied before the tool body runs.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # The adapter lives under examples/ (not shipped in the package yet).
 from attenu_guard.adapters.agno import (  # noqa: E402
@@ -43,6 +45,7 @@ from attenu_guard.adapters.agno import (  # noqa: E402
     Grant,
     GuardRegistry,
     ToolPolicy,
+    aguarded_tool_hook,
     delegation_tool_hook,
     guarded_tool_hook,
 )
@@ -703,3 +706,195 @@ def test_sync_delegation_hook_under_arun_breaks_the_delegation():
     asyncio.run(team.arun("summarize the Q3 pipeline"))
     assert EFFECTS.rows_read == 0, "the member never ran"
     assert EFFECTS.exported_to == []
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# guarded_tool_hook/aguarded_tool_hook call function_call(**arguments)
+# themselves, exactly like adapters/langgraph.py's reference wiring, so
+# WRAPPER_SYNC/WRAPPER_ASYNC is a genuine observation with no cross-hook
+# correlation of any kind.
+# ==========================================================================
+def _v2_summarizer_registry():
+    root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root", schema_version=2)
+    registry = GuardRegistry(root, root_key="orchestrator")
+    registry.register("summarizer",
+                      root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarize"))
+    return root, registry
+
+
+def test_v2_allowed_call_records_a_returned_outcome():
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+
+    result = hook(
+        function_name="crm_query",
+        function_call=lambda **kw: crm_query(**kw),
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    )
+    assert result == "read 10 rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.agno"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert registry.guard_for("summarizer").complete()
+
+
+def test_v2_async_allowed_call_records_a_returned_outcome_wrapper_async():
+    root, registry = _v2_summarizer_registry()
+    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES)
+
+    async def acrm_query(**kw):
+        return crm_query(**kw)
+
+    result = asyncio.run(hook(
+        function_name="crm_query",
+        function_call=acrm_query,
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    ))
+    assert result == "read 10 rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+
+    def boom(**kw):
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        hook(
+            function_name="crm_query",
+            function_call=boom,
+            arguments={"rows": 10},
+            agent=_Principal("summarizer"),
+            team=None,
+        )
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    root, registry = _v2_summarizer_registry()
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+    reached = []
+
+    with pytest.raises(AuthorityDenied):
+        hook(
+            function_name="crm_export",
+            function_call=lambda **kw: reached.append(kw),
+            arguments={"destination": "attacker.example"},
+            agent=_Principal("summarizer"),
+            team=None,
+        )
+
+    assert reached == []
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root")  # v1, default
+    registry = GuardRegistry(root, root_key="orchestrator")
+    registry.register("summarizer",
+                      root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarize"))
+    hook = guarded_tool_hook(registry, SUMMARIZER_POLICIES)
+
+    hook(
+        function_name="crm_query",
+        function_call=lambda **kw: crm_query(**kw),
+        arguments={"rows": 10},
+        agent=_Principal("summarizer"),
+        team=None,
+    )
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_never_gets_capture_or_an_outcome():
+    """`parent.delegate(...)` never calls guard.check() -- no Decision/call_id exists to bind
+    an outcome to, regardless of schema version."""
+    root = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root", schema_version=2)
+    registry = GuardRegistry(root, root_key="orchestrator")
+    hook = delegation_tool_hook(
+        registry, {"summarizer": Grant(SUMMARIZER_AUTHORITY, "summarize")},
+    )
+
+    hook(
+        function_name="delegate_task_to_member",
+        function_call=lambda **kw: "delegated",
+        arguments={"member_id": "summarizer", "task": "summarize"},
+        agent=None,
+        team=_Principal("orchestrator"),
+    )
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    root, registry = _v2_summarizer_registry()
+    hook = aguarded_tool_hook(registry, SUMMARIZER_POLICIES)
+
+    async def hangs(**kw):
+        await asyncio.sleep(3600)
+        return "never"
+
+    async def scenario():
+        task = asyncio.ensure_future(hook(
+            function_name="crm_query",
+            function_call=hangs,
+            arguments={"rows": 10},
+            agent=_Principal("summarizer"),
+            team=None,
+        ))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    from attenu_guard.adapters.agno import _snapshot_params
+
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"x": AliasingList([1])}
+    snapshot = _snapshot_params(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"

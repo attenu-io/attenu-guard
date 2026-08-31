@@ -61,14 +61,34 @@ model can read and react to; the run continues. Use `on_deny="stop"` to raise
 Agno's `StopAgentRun` instead and tear the whole run down. Returning a denial
 *string* is deliberately not offered: Agno would record that as a successful
 tool result.
+
+Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `guarded_tool_
+hook`/`aguarded_tool_hook` call the tool body themselves (`function_call(**arguments)` /
+`await function_call(**arguments)`), exactly like `adapters.langgraph`'s reference wiring --
+Agno's own nested-execution-chain design (a hook that never calls `function_call` prevents the
+body from running at all) makes this a genuine observation, not a hook racing the framework's
+own dispatch. `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` accordingly. `authorized_params`/
+`invoked_params` are one immutable snapshot (`_freeze()`, never a copy protocol -- see its own
+docstring) of the model-supplied `arguments`, taken BEFORE `function_call` runs and reused
+unchanged for both. `BodyState.RAISED` (with `error_code`) is genuinely observed on both paths
+-- Agno does not swallow a tool's exception before this hook's own call returns/raises.
+`asyncio.CancelledError` on the async path is `BodyState.ABANDONED`, still re-raised.
+`delegation_tool_hook`/`adelegation_tool_hook` mint the child via `parent.delegate(...)`, which
+never calls `guard.check()` at all -- there is no `Decision`/`call_id` to bind an outcome to,
+so delegation is unaffected by any of this, on any schema version. On `schema_version=1` (the
+default), nothing here changes at all.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import inspect
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Union
 
-from attenu_guard import Authority, AuthorityDenied, Decision, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 __all__ = [
     "DELEGATION_TOOLS",
@@ -166,6 +186,58 @@ def principal_key(agent: Any, team: Any) -> Optional[str]:
     return getattr(principal, "id", None) or getattr(principal, "name", None)
 
 
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.guarded_tool_hook",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or Agno itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    `function_call` runs -- and reused as both `authorized_params` and `invoked_params`."""
+    return _freeze(dict(arguments))
+
+
 def _deny(decision: Decision, on_deny: str) -> None:
     """Turn a denied Decision into the exception the caller asked for."""
     error = AuthorityDenied(decision)
@@ -200,8 +272,11 @@ def guarded_tool_hook(
     control.
     """
 
-    def authorize(function_name, arguments, agent, team) -> None:
-        """Raise unless this call is authorized. Shared by both hook flavours."""
+    def authorize(function_name, arguments, agent, team, *,
+                  capture: str) -> "tuple[Guard, Optional[str], Any]":
+        """Raise unless this call is authorized; else return `(guard, call_id_or_None,
+        snapshot_or_None)` -- the last two set only for an ALLOWED, v2 check(), what the
+        caller needs to close the outcome out afterward. Shared by both hook flavours."""
         lookup = key or principal_key(agent, team)
         guard = registry.guard_for(lookup)
         if guard is None:
@@ -215,23 +290,43 @@ def guarded_tool_hook(
                                       f"no ToolPolicy declared for tool {function_name!r}",
                                       tool=function_name, disposition=Disposition.UNRESOLVED), on_deny)
 
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(arguments) if v2 else None
+        extra = (
+            dict(capture=capture, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(
             policy.scope,
             context=policy.context_for(arguments),
             metered=policy.metered,
             tool=function_name,
             disposition=policy.disposition,
+            **extra,
         )
         if not decision:
             _deny(decision, on_deny)
+        return guard, (decision.call_id if v2 else None), snapshot
 
     def hook(function_name, function_call, arguments, agent=None, team=None):
         # Agno's own delegation tools are the delegation hook's business.
         if function_name in DELEGATION_TOOLS:
             return function_call(**(arguments or {}))
         arguments = arguments or {}
-        authorize(function_name, arguments, agent, team)
-        return function_call(**arguments)
+        guard, call_id, snapshot = authorize(function_name, arguments, agent, team,
+                                             capture=Capture.WRAPPER_SYNC)
+        if call_id is None:
+            return function_call(**arguments)
+        start = time.monotonic()
+        try:
+            result = function_call(**arguments)
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     hook._dg_authorize = authorize  # type: ignore[attr-defined]
     return hook
@@ -262,8 +357,26 @@ def aguarded_tool_hook(
         if function_name in DELEGATION_TOOLS:
             return await function_call(**(arguments or {}))
         arguments = arguments or {}
-        authorize(function_name, arguments, agent, team)
-        return await function_call(**arguments)
+        guard, call_id, snapshot = authorize(function_name, arguments, agent, team,
+                                             capture=Capture.WRAPPER_ASYNC)
+        if call_id is None:
+            return await function_call(**arguments)
+        start = time.monotonic()
+        try:
+            result = await function_call(**arguments)
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            guard.record_outcome(call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     return hook
 

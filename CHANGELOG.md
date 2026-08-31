@@ -382,6 +382,18 @@ All notable changes to attenu-guard are documented here. The format follows
   extra's `mcp<3` pin was stale -- camel-ai 0.2.90 imports `mcp.server.FastMCP`, renamed to
   `MCPServer` in mcp 2.x (mcp's own migration guide recommends `mcp<2`), so `pip install
   'attenu-guard[camel]'` was broken on a clean install; corrected to `mcp<2`.
+- Execution binding wired into `adapters.agno`, same terms: `Capture.WRAPPER_SYNC`/
+  `WRAPPER_ASYNC` from `guarded_tool_hook`/`aguarded_tool_hook`, which call
+  `function_call(**arguments)`/`await function_call(**arguments)` themselves -- Agno's own
+  nested-execution-chain design (a hook that never calls `function_call` prevents the body from
+  running at all) makes this a genuine observation. `_freeze()` snapshot of the model-supplied
+  `arguments`, taken before `function_call` runs. `BodyState.RAISED` (with `error_code`) is
+  genuinely observed on both paths; `asyncio.CancelledError` on the async path is
+  `BodyState.ABANDONED`, still re-raised. `authorize()` (shared by both hook flavours) now
+  returns `(guard, call_id, snapshot)` instead of `None`, threading `capture=` through from
+  each hook since they share one authorization function. `delegation_tool_hook`/
+  `adelegation_tool_hook` mint via `parent.delegate(...)`, which never calls `guard.check()` --
+  unaffected.
 
 ## [0.9.0] — 2026-08-31
 
