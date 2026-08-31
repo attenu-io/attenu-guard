@@ -80,56 +80,78 @@ write the `Authority` for each delegation and the `ToolAuthority` for each tool.
 An agent with no entry in `delegations`, and a tool with no entry in `tools`,
 both fail CLOSED.
 
-EXECUTION BINDING (0.9.0, on a `schema_version=2` chain — see `Guard.issue`)
------------------------------------------------------------------------------
-`_authorize` (the single choke point both the tool check and the delegation-scope
-check go through) passes `capture=Capture.FRAMEWORK_POST_HOOK` to `guard.check()`.
+EXECUTION BINDING (0.9.0, on a `schema_version=2` chain — see `Guard.issue`) — TWO MODES
+-----------------------------------------------------------------------------------------
 The plugin never calls the tool body itself — ADK does, via `__call_tool_async` in
-`flows/llm_flows/functions.py` — so the outcome is closed out from TWO of ADK's own
-post-invocation hooks, whichever one actually fires for a given call:
+`flows/llm_flows/functions.py` — so the only way it can observe completion at all is ADK's
+own post-invocation callbacks, `after_tool_callback`/`on_tool_error_callback` — and those
+are NOT guaranteed terminal observers for every call (see HONESTY NOTES below). Per the
+execution-binding spec's own governing principle — an honest unobserved beats a promised
+outcome that can be lost — this plugin therefore ships with TWO modes, controlled by
+`DelegationGuardPlugin(..., strict_single_hook=...)`:
 
-  * `after_tool_callback(tool, tool_args, tool_context, result)` on success —
-    `BodyState.RETURNED`;
-  * `on_tool_error_callback(tool, tool_args, tool_context, error)` on a raised
-    exception — `BodyState.RAISED`, `error_code=type(error).__name__`. Returning
-    `None` from it (as this plugin always does) means the original exception still
-    propagates exactly as it would without this plugin installed — the plugin only
-    observes, it never swallows the error.
+  * DEFAULT (`strict_single_hook=False`): every `guard.check()` call passes NO `capture`/
+    `authorized_params` at all. On a v2 chain the Guard itself stamps its own default,
+    honest `Capture.PRE_HOOK_ONLY` (`Guard.check()`'s documented behavior for a bare call);
+    this plugin never stashes a pending outcome and `after_tool_callback`/
+    `on_tool_error_callback` never call `record_outcome()`. None of the HONESTY NOTES below
+    apply to this mode — there is nothing pending for a substituted response, a cancelled
+    call or a shadowing plugin to corrupt. This is the only mode that requires no
+    attestation about what else is registered on the `App`/`Runner`.
+  * STRICT (`strict_single_hook=True`): an explicit attestation — this plugin's caller is
+    telling it that `DelegationGuardPlugin` is registered first (or alone) among the
+    `App`/`Runner`'s plugins for tool callbacks, and that no agent in the tree uses a
+    canonical `before_tool_callback=` that substitutes a tool's response (see the first two
+    HONESTY NOTES below). `_authorize` (the single choke point both the tool check and the
+    delegation-scope check go through) then passes `capture=Capture.FRAMEWORK_POST_HOOK` to
+    `guard.check()`, and the outcome is closed out from TWO of ADK's own post-invocation
+    hooks, whichever one actually fires for a given call:
 
-`duration_ms` is therefore an OBSERVATION window (`_authorize`'s `check()` call to whichever
-callback fires), not a body-execution timer — matching `Guard.record_outcome`'s own documented
-contract ("observation start to observation end") — and it can include time spent in OTHER
-before-callbacks/plugins, cache lookups, and ADK's own dispatch overhead, not solely the tool
-body's own runtime.
+      * `after_tool_callback(tool, tool_args, tool_context, result)` on success —
+        `BodyState.RETURNED`;
+      * `on_tool_error_callback(tool, tool_args, tool_context, error)` on a raised
+        exception — `BodyState.RAISED`, `error_code=type(error).__name__`. Returning
+        `None` from it (as this plugin always does) means the original exception still
+        propagates exactly as it would without this plugin installed — the plugin only
+        observes, it never swallows the error.
 
-The two are mutually exclusive per call (`functions.py`'s `try: ... except Exception
-as tool_error: error_response = await _run_on_tool_error_callbacks(...)` — the error
-callback runs, then EITHER its return value stands in for the result and
-`after_tool_callback` runs too with THAT synthesized result, OR (this plugin's case:
-`on_tool_error_callback` always returns `None`) the original exception re-raises and
-`after_tool_callback` never runs at all for this call). The two hooks correlate their
-pending state with `_authorize`'s `check()` by `id(tool_context)`: ADK constructs one
-`ToolContext` per function call and threads the SAME object through
-before/after/error for it, so the id is a safe, call-scoped key (the pending entry
-holds a strong reference to `tool_context` for its whole span, so its `id()` cannot be
-reused by a different, concurrently-live object while the entry exists); insertion is
-`.setdefault`-style, so a colliding, still-unconsumed key is left alone rather than
-overwritten. Unlike CrewAI and the OpenAI Agents SDK, ADK does not swallow a tool's
-exception into a returned/formatted result before this plugin's error hook runs, so
-`BodyState.RAISED` is genuinely reachable here for calls whose error hook DOES fire —
-see the honesty notes below for when it does not.
+    `duration_ms` is therefore an OBSERVATION window (`_authorize`'s `check()` call to
+    whichever callback fires), not a body-execution timer — matching `Guard.record_outcome`'s
+    own documented contract ("observation start to observation end") — and it can include
+    time spent in OTHER before-callbacks/plugins, cache lookups, and ADK's own dispatch
+    overhead, not solely the tool body's own runtime.
 
-`BodyState.DEFERRED`: `after_tool_callback` checks `tool.is_long_running` /
-`tool._defers_response` (the SAME flags ADK's own `functions.py` checks, later, to
-decide whether `function_response` is the tool's real, final output or a placeholder
-whose true result arrives later via session injection) BEFORE deciding `RETURNED` vs
-`DEFERRED` — reporting a long-running/deferred tool's `after_tool_callback` firing as
-`RETURNED` would misrepresent it as a completed call.
+    The two are mutually exclusive per call (`functions.py`'s `try: ... except Exception
+    as tool_error: error_response = await _run_on_tool_error_callbacks(...)` — the error
+    callback runs, then EITHER its return value stands in for the result and
+    `after_tool_callback` runs too with THAT synthesized result, OR (this plugin's case:
+    `on_tool_error_callback` always returns `None`) the original exception re-raises and
+    `after_tool_callback` never runs at all for this call). The two hooks correlate their
+    pending state with `_authorize`'s `check()` by `id(tool_context)`: ADK constructs one
+    `ToolContext` per function call and threads the SAME object through before/after/error
+    for it, so the id is a safe, call-scoped key — and (strict mode) the `_PendingOutcome`
+    itself holds a strong reference to that SAME `tool_context` object (not merely a key
+    derived from its id), so its `id()` genuinely cannot be reused by a different,
+    concurrently-live object while the entry exists; insertion is `.setdefault`-style, so a
+    colliding, still-unconsumed key is left alone rather than overwritten. Unlike CrewAI and
+    the OpenAI Agents SDK, ADK does not swallow a tool's exception into a returned/formatted
+    result before this plugin's error hook runs, so `BodyState.RAISED` is genuinely reachable
+    here for calls whose error hook DOES fire — see the honesty notes below for when it does
+    not.
 
-HONESTY NOTES — ADK's `before`/`after`/error callbacks are NOT guaranteed to be this
-plugin's terminal observer for every call; each of the following is a genuine,
-structural gap in the documented plugin/callback surface, not a bug this file can code
-around without going outside that surface:
+    `BodyState.DEFERRED`: `after_tool_callback` checks `tool.is_long_running` /
+    `tool._defers_response` (the SAME flags ADK's own `functions.py` checks, later, to
+    decide whether `function_response` is the tool's real, final output or a placeholder
+    whose true result arrives later via session injection) BEFORE deciding `RETURNED` vs
+    `DEFERRED` — reporting a long-running/deferred tool's `after_tool_callback` firing as
+    `RETURNED` would misrepresent it as a completed call.
+
+HONESTY NOTES (strict mode) — ADK's `before`/`after`/error callbacks are NOT guaranteed to
+be this plugin's terminal observer for every call even when `strict_single_hook=True`; each
+of the following is a genuine, structural gap in the documented plugin/callback surface, not
+a bug this file can code around without going outside that surface. This is exactly why
+`strict_single_hook` defaults to `False`: it is a caller attestation this file cannot itself
+verify, not a guarantee this file can make on its own.
 
   * A CANONICAL `before_tool_callback` (an AGENT-level callback the caller registers,
     e.g. `LlmAgent(before_tool_callback=...)` — a *different* mechanism from THIS
@@ -139,7 +161,9 @@ around without going outside that surface:
     response, and this plugin has no signal in `after_tool_callback` to tell "the tool
     genuinely ran" apart from "a canonical before-callback supplied this instead". If a
     caller's own agents use `before_tool_callback=`, a call this plugin authorized may
-    be recorded `RETURNED` for a body that never executed.
+    be recorded `RETURNED` for a body that never executed. `strict_single_hook=True` is
+    the caller's attestation that no agent in the tree does this; this file cannot detect
+    or reject the violation itself.
   * `asyncio.CancelledError` is a `BaseException`; ADK's own `except Exception` around
     the tool call (`functions.py`) does not catch it, so NEITHER `on_tool_error_callback`
     NOR `after_tool_callback` ever fires for a cancelled call — this plugin cannot
@@ -153,16 +177,18 @@ around without going outside that surface:
     true: if a DIFFERENT plugin is registered BEFORE this one and its
     `after_tool_callback`/`on_tool_error_callback` returns non-`None`, THIS plugin's own
     callback never runs for that call, and its pending outcome is never closed out.
-    Register `DelegationGuardPlugin` FIRST (or alone) for these callbacks to be
-    guaranteed to run.
+    `strict_single_hook=True` is the caller's attestation that `DelegationGuardPlugin` is
+    registered first (or alone) so this cannot happen; this file cannot verify plugin
+    registration order itself.
 
 The second and third gaps only ever leave a call's outcome unrecorded -- the honest
 "unobserved" the execution-binding spec calls for when a path cannot guarantee
 observation. The first (a canonical before-callback substituting the response) is the
 one gap this plugin cannot even detect, let alone avoid recording wrongly: ADK gives
 `after_tool_callback` no signal distinguishing a substituted response from a genuine
-one. A caller whose agents ALSO use `before_tool_callback=` should treat this plugin's
-execution binding as informative, not load-bearing, for those specific tools.
+one. A caller whose agents ALSO use `before_tool_callback=` must NOT set
+`strict_single_hook=True` for those agents' tools, or must treat this plugin's execution
+binding as informative, not load-bearing, for those specific tools.
 """
 from __future__ import annotations
 
@@ -232,12 +258,20 @@ def _body_state_for(tool: BaseTool, result: Any) -> str:
 @dataclass
 class _PendingOutcome:
     """An allowed, v2 `check()` waiting on `after_tool_callback`/`on_tool_error_callback` to
-    close it out -- keyed by `id(tool_context)` in `DelegationGuardPlugin._pending_outcomes`."""
+    close it out -- keyed by `id(tool_context)` in `DelegationGuardPlugin._pending_outcomes`.
+
+    Holds `tool_context` itself (not just its id) as a STRONG reference for the whole span
+    this entry is pending -- that is what actually makes `id(tool_context)` safe to use as a
+    dict key here: as long as this entry exists, this field keeps the object alive, so its id
+    cannot be reassigned to a different, concurrently-live object. A dict keyed by an object's
+    id without holding the object itself would not have this property (only the caller's own
+    reference would keep the id valid, which is not this plugin's to assume)."""
 
     guard: Guard
     call_id: str
     snapshot: Any
     started_at: float
+    tool_context: ToolContext
 
 __all__ = ["DelegationGuardPlugin", "ToolAuthority", "TRANSFER_TOOL_NAME"]
 
@@ -284,6 +318,7 @@ class DelegationGuardPlugin(BasePlugin):
         name: str = "attenu_guard",
         default_tool_authority: Optional[Callable[[str], ToolAuthority]] = None,
         default_delegation: Optional[Callable[[str], Authority]] = None,
+        strict_single_hook: bool = False,
     ):
         """
         root_guard:       the Guard you issued for the root agent. You keep it —
@@ -322,6 +357,18 @@ class DelegationGuardPlugin(BasePlugin):
                           on the audit log with the generated scope/context,
                           instead of denied (the fail-closed default, which
                           stays the default without the hooks).
+        strict_single_hook: execution-binding (0.9.0) mode switch -- see the module
+                          docstring's "EXECUTION BINDING ... TWO MODES". `False`
+                          (default): every `guard.check()` call is left to the Guard's own
+                          honest `Capture.PRE_HOOK_ONLY` default; no outcome is ever
+                          recorded, and no attestation is required. `True`: an explicit
+                          attestation that `DelegationGuardPlugin` is registered first (or
+                          alone) for tool callbacks on this `App`/`Runner`, and that no
+                          agent in the tree substitutes a tool's response via a canonical
+                          `before_tool_callback=` -- restores `Capture.FRAMEWORK_POST_HOOK`
+                          and real outcome recording via `after_tool_callback`/
+                          `on_tool_error_callback`. This file cannot verify either half of
+                          that attestation itself; see the HONESTY NOTES.
         """
         super().__init__(name=name)
         self._root = root_guard
@@ -332,6 +379,7 @@ class DelegationGuardPlugin(BasePlugin):
         self._raise = raise_on_deny
         self._default_tool_authority = default_tool_authority
         self._default_delegation = default_delegation
+        self._strict_single_hook = strict_single_hook
         # The task text a pending hand-off carries (the AgentTool `request`),
         # consumed by `_ensure_guard` when the child agent starts — so the
         # spawn record says what the child was asked, not just its name.
@@ -508,7 +556,7 @@ class DelegationGuardPlugin(BasePlugin):
         tool_context: ToolContext,
         disposition: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        v2 = guard.schema_version == 2
+        v2 = self._strict_single_hook and guard.schema_version == 2
         snapshot = _snapshot_params(tool_args) if v2 else None
         extra = (
             dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO, authorized_params=snapshot)
@@ -522,11 +570,12 @@ class DelegationGuardPlugin(BasePlugin):
                 # closed out later by after_tool_callback/on_tool_error_callback, whichever ADK
                 # actually runs for this call. See the module docstring's "EXECUTION BINDING".
                 # .setdefault, not assignment: a colliding, still-unconsumed key (should not
-                # happen -- id(tool_context) is pinned alive by this dict's own reference -- but
-                # is not this plugin's to assume) is left alone rather than silently overwritten.
+                # happen -- the entry we are about to insert holds a strong reference to
+                # tool_context itself, which is what pins id(tool_context) alive -- but is not
+                # this plugin's to assume) is left alone rather than silently overwritten.
                 self._pending_outcomes.setdefault(id(tool_context), _PendingOutcome(
                     guard=guard, call_id=decision.call_id, snapshot=snapshot,
-                    started_at=time.monotonic(),
+                    started_at=time.monotonic(), tool_context=tool_context,
                 ))
             return None
         if self._raise:

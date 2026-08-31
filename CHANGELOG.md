@@ -95,6 +95,22 @@ All notable changes to attenu-guard are documented here. The format follows
   plugin's own callback -- and so its outcome close-out -- from ever running. Its module
   docstring now also documents `duration_ms` as an observation window (`check()` to whichever
   callback fires), not a body-execution timer, matching `Guard.record_outcome`'s own contract.
+  **Round 3 correction (Codex review, finding 3):** the three documented gaps above are real
+  on pinned 2.7.1, and documenting them did not make `Capture.FRAMEWORK_POST_HOOK` an honest
+  claim for every call -- the plugin still promised it unconditionally. Per the execution-
+  binding spec's own governing principle -- an honest unobserved beats a promised outcome that
+  can be lost -- `FRAMEWORK_POST_HOOK` is now OPT-IN, exactly like the round 2 fix already
+  applied to `adapters.crewai`: `DelegationGuardPlugin(..., strict_single_hook=True)` is an
+  explicit attestation that this plugin is registered first (or alone) for tool callbacks on
+  the `App`/`Runner`, and that no agent in the tree substitutes a response via a canonical
+  `before_tool_callback=`. The DEFAULT (`strict_single_hook=False`) never passes `capture`/
+  `authorized_params` to `guard.check()` at all -- a v2 chain's `allow` is the Guard's own
+  default `Capture.PRE_HOOK_ONLY`, and `_pending_outcomes` is never populated. Also fixed, in
+  strict mode: the module docstring claimed the pending entry "holds a strong reference to
+  `tool_context` for its whole span", but `_PendingOutcome` never actually stored the object --
+  only `id(tool_context)` was kept, as the dict key, which nothing referenced the object back
+  from. `_PendingOutcome` now carries a `tool_context: ToolContext` field so the pinned-alive
+  claim is genuinely true, not merely asserted in a comment.
 - `adapters.haystack`: a delegation `ToolPolicy` that declares BOTH a real `scope` and
   `delegates_to`/`grant` (unusual, but the dataclass allows it) calls `guard.check()` for itself
   first, exactly like any other guarded tool -- but `_ToolGuard.scope()` discarded that
@@ -172,17 +188,20 @@ All notable changes to attenu-guard are documented here. The format follows
     the original -- is simply never called, so nothing is fabricated for a body that never ran.
     `guarded_agent_tool()`'s delegation-scope check and `guarded_handoff()`/`DelegationGuardHooks`
     mint via `Guard.delegate()`, not a tool body, so they stay the library's default `pre_hook_only`.
-  - `adapters.google_adk`: `Capture.FRAMEWORK_POST_HOOK`, and the richest of the six -- ADK's
-    `BasePlugin` offers a real error hook (`on_tool_error_callback`) alongside the success one
-    (`after_tool_callback`), and does NOT swallow a tool's exception before it runs, so this is
-    the one adapter of the six that genuinely observes and reports `BodyState.RAISED` (with
+  - `adapters.google_adk`: `Capture.FRAMEWORK_POST_HOOK`, OPT-IN via `DelegationGuardPlugin(...,
+    strict_single_hook=True)` (see the "Fixed" section's round 3 entry) -- the plugin never
+    calls the tool body itself; in strict mode the outcome is closed out from ADK's own
+    `after_tool_callback`/`on_tool_error_callback`, and (unlike CrewAI and the OpenAI Agents
+    SDK) ADK does NOT swallow a tool's exception before its error hook runs, so this is the one
+    adapter of the six that genuinely observes and reports `BodyState.RAISED` (with
     `error_code`) for calls whose error hook fires. The two hooks correlate their pending state
-    with `_authorize()`'s `check()` via `id(tool_context)` -- ADK threads one `ToolContext` per
-    call through before/after/error uniformly. Applies uniformly to both the tool check and the
-    delegation-scope check (`delegation_scope=...`), since both go through `_authorize()` and
-    both are real ADK tool calls with the same before/after/error lifecycle. See the "Fixed"
-    section above for three documented, structural gaps in ADK's own callback surface where
-    this adapter's observation cannot be guaranteed.
+    with `_authorize()`'s `check()` via `id(tool_context)`, and (strict mode) the pending entry
+    itself holds a strong reference to that same `tool_context` object. Applies uniformly to
+    both the tool check and the delegation-scope check (`delegation_scope=...`), since both go
+    through `_authorize()` and both are real ADK tool calls with the same before/after/error
+    lifecycle. The default (`strict_single_hook=False`) is `Capture.PRE_HOOK_ONLY` with no
+    outcome ever recorded. See the "Fixed" section above for three documented, structural gaps
+    in ADK's own callback surface that strict mode's observation still cannot guarantee around.
   - `adapters.pydantic_ai`: `Capture.WRAPPER_ASYNC` at BOTH hook points -- unlike the framework-post-hook
     adapters above, this one calls the tool body itself and awaits it, like `adapters.langgraph`'s
     reference wiring. `DelegationGuard` authorizes in `before_tool_execute` (unchanged shape on

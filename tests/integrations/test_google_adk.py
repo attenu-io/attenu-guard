@@ -788,6 +788,7 @@ def test_v2_allowed_tool_call_records_a_returned_outcome():
                 "summarizer": [_fc("crm_query", rows=10), _text("done")],
             },
             issue_kwargs={"schema_version": 2},
+            plugin_kwargs={"strict_single_hook": True},
         )
         session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
         await _drive(runner, session, "go")
@@ -821,6 +822,7 @@ def test_v2_a_tool_that_raises_records_a_raised_outcome_with_error_code():
             },
             tools=[_make_crm_query_boom(), demo.make_crm_export([])],
             issue_kwargs={"schema_version": 2},
+            plugin_kwargs={"strict_single_hook": True},
         )
         session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
         try:
@@ -866,6 +868,7 @@ def test_v2_denied_tool_call_never_records_an_outcome():
                 ],
             },
             issue_kwargs={"schema_version": 2},
+            plugin_kwargs={"strict_single_hook": True},
         )
         session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
         await _drive(runner, session, "go")
@@ -881,6 +884,70 @@ def test_v2_denied_tool_call_never_records_an_outcome():
     outcomes = [e for e in entries if e["event"] == "outcome"]
     allow_call_ids = {e["call_id"] for e in entries if e["event"] == "allow"}
     assert outcomes and all(o["call_id"] in allow_call_ids for o in outcomes)
+
+
+# ==========================================================================
+# Codex review round 3, finding 3: neither `after_tool_callback` nor
+# `on_tool_error_callback` is a GUARANTEED terminal observer (a canonical
+# before-callback can substitute the response; a shadowing plugin can stop
+# dispatch before ours runs) -- so the plugin must default to the Guard's own
+# honest PRE_HOOK_ONLY and only attempt FRAMEWORK_POST_HOOK recording under
+# an explicit `strict_single_hook=True` attestation. These cover both halves:
+# the default is genuinely inert, and strict mode's correlation is genuinely
+# collision-safe (the pending entry holds tool_context itself, not just an
+# id() derived from it -- the "pinned alive" claim Codex proved false).
+# ==========================================================================
+def test_v2_default_mode_is_pre_hook_only_and_never_records_an_outcome():
+    """strict_single_hook defaults to False: every v2 allow gets the Guard's own honest
+    Capture.PRE_HOOK_ONLY, and after_tool_callback never calls record_outcome() -- not
+    merely "no outcome happens to be missing", but zero outcome events at all, and the
+    body still genuinely runs (this is authorization-only, not a broken integration)."""
+    async def scenario():
+        runner, sessions, root_guard, plugin, calls = _build(
+            {
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [_fc("crm_query", rows=10), _text("done")],
+            },
+            issue_kwargs={"schema_version": 2},
+        )
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard, calls
+
+    root_guard, calls = asyncio.run(scenario())
+    assert calls  # the body genuinely ran
+    entries = root_guard.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert allow["capture"] == Capture.PRE_HOOK_ONLY
+    assert allow["adapter"]["hook_path"] == "Guard.check"  # the Guard's own default stamp, not ours
+    assert "call_id" in allow  # still a genuine v2 chain -- just no outcome recorded against it
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_strict_mode_pending_outcome_holds_a_strong_reference_to_tool_context():
+    """The docstring's "pinned alive" claim only holds if the pending entry stores
+    tool_context ITSELF, not merely id(tool_context) -- a dict keyed by an id whose value
+    does not reference the object back cannot keep that id from being reused by a
+    different, concurrently-live object once every OTHER reference to it drops. This
+    calls _authorize directly (no live ADK ToolContext is needed -- _authorize only ever
+    threads the object through by identity) and asserts the stashed entry `is` the exact
+    object passed in."""
+    root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="t", schema_version=2)
+    plugin = dg_adk.DelegationGuardPlugin(
+        root_guard, root_agent_name="orchestrator",
+        delegations={"summarizer": SUMMARIZER_REQUEST}, tools=demo.TOOL_AUTHORITIES,
+        strict_single_hook=True,
+    )
+    sentinel_tool_context = object()
+
+    denial = plugin._authorize(
+        root_guard, "orchestrator", "crm_query", "crm.read", {"rows": 1}, metered=False,
+        tool_args={"rows": 1}, tool_context=sentinel_tool_context,
+    )
+
+    assert denial is None  # allowed
+    pending = plugin._pending_outcomes[id(sentinel_tool_context)]
+    assert pending.tool_context is sentinel_tool_context, "the entry did not hold the object itself"
 
 
 # ==========================================================================
@@ -904,9 +971,12 @@ def test_v2_long_running_tool_records_a_deferred_outcome():
                 "summarizer": [_fc("crm_query_long", rows=10), _text("done")],
             },
             tools=[long_tool],
-            plugin_kwargs={"tools": {
-                "crm_query_long": dg_adk.ToolAuthority("crm.read", lambda a: {"rows": a.get("rows", 0)}),
-            }},
+            plugin_kwargs={
+                "tools": {
+                    "crm_query_long": dg_adk.ToolAuthority("crm.read", lambda a: {"rows": a.get("rows", 0)}),
+                },
+                "strict_single_hook": True,
+            },
             issue_kwargs={"schema_version": 2},
         )
         session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
@@ -952,6 +1022,7 @@ def test_v2_a_plugin_registered_before_us_that_overrides_leaves_the_outcome_unre
         plugin = dg_adk.DelegationGuardPlugin(
             root_guard, root_agent_name="orchestrator",
             delegations={"summarizer": SUMMARIZER_REQUEST}, tools=demo.TOOL_AUTHORITIES,
+            strict_single_hook=True,
         )
         overrider = _OverridingPlugin()
         # overrider registered BEFORE plugin -- its after_tool_callback runs first and
