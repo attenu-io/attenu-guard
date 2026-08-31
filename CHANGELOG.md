@@ -324,6 +324,22 @@ All notable changes to attenu-guard are documented here. The format follows
     resumes -- every completed call is `BodyState.RETURNED`. `asyncio.CancelledError` is NOT
     caught by AutoGen's own `except Exception`, so it DOES propagate; `BodyState.ABANDONED` is
     genuinely reachable and is still re-raised.
+- Execution binding (`record_outcome`, 0.9.0) wired into `adapters.langchain` (LangGraph 1.x /
+  LangChain 1.x `create_agent` / deepagents), on a `schema_version=2` chain (unchanged, byte-
+  and-type identical to before, on `schema_version=1`): `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC`
+  from `GuardedDelegation.wrap_tool_call`/`awrap_tool_call` respectively -- both call the tool
+  body (`handler(request)`) themselves, exactly like `adapters.langgraph`'s reference wiring, so
+  this is a genuine observation with no cross-hook honesty caveat. `authorized_params`/
+  `invoked_params` are one immutable snapshot (`_freeze()`, never a copy protocol -- applying
+  every lesson from the six adapters above from the start, not retrofitted after a Codex
+  finding) taken before `handler` runs. `BodyState.RAISED`/`ABANDONED` (on
+  `asyncio.CancelledError`, re-raised) are both genuinely observed on the async path; no shared,
+  cross-call correlation state exists at all (unlike the hook-based adapters above), since the
+  decision/snapshot travel through the call stack in a local `_Gate`, not a dict keyed by object
+  identity -- so same-tool-concurrency and later-hook-block classes of defect are structurally
+  inapplicable here, not merely tested-and-passing. A delegation tool call (`task`) mints the
+  child via `guard.delegate()`, which never calls `guard.check()` at all -- no `Decision`/
+  `call_id` exists to bind an outcome to, so it is unaffected by any of this.
 
 ## [0.9.0] — 2026-08-31
 

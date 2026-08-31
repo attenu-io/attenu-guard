@@ -65,10 +65,30 @@ straight out of `graph.invoke()` and aborts the run. Use that where a denial
 means "stop everything" rather than "try something else".
 
 Either way the tool body never executes.
+
+Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): this adapter
+calls the tool body itself (`handler(request)`/`await handler(request)`), exactly like
+`adapters.langgraph`'s reference wiring, so it genuinely observes completion --
+`Capture.WRAPPER_SYNC` from `wrap_tool_call`, `Capture.WRAPPER_ASYNC` from `awrap_tool_call`.
+`authorized_params`/`invoked_params` are both taken from ONE immutable snapshot of the tool
+call's `args` (`_freeze()`, never a copy protocol -- see its own docstring), taken BEFORE the
+handler runs and reused unchanged for both, so a handler that mutates its own inputs in place
+cannot make this adapter claim it observed two different values for one call. `duration_ms`
+covers the wrapper's own await/call of `handler`, not the tool's internal-only work outside
+that boundary (there is none here -- `handler` IS the tool body). A delegation tool call
+(`_gate_delegation`) mints the child via `guard.delegate()`, which never calls `guard.check()`
+in the first place -- there is no `Decision`/`call_id` to bind an outcome to, so a delegation
+call is unaffected by any of this and stays exactly as before. On `schema_version=1` (the
+default), nothing here changes at all -- `capture`/`adapter`/`authorized_params` are never
+passed to `check()`, and `record_outcome()` is never called.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextvars
+import inspect
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional
@@ -76,9 +96,9 @@ from typing import Any, Callable, Mapping, MutableMapping, Optional
 from langchain_core.messages import ToolMessage
 
 from attenu_guard import (
-    Authority, AuthorityDenied, AuthorityError, Decision, Guard, Reason,
+    Authority, AuthorityDenied, AuthorityError, Decision, Guard, Reason, __version__,
 )
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 __all__ = [
     "ToolPolicy",
@@ -86,6 +106,55 @@ __all__ = [
     "current_guard",
     "use_guard",
 ]
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or LangChain itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(args: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    the handler runs -- and reused for both `authorized_params` and `invoked_params`."""
+    return _freeze(dict(args))
+
+
+def _adapter_info(hook: str) -> dict:
+    return {"module": __name__, "version": __version__, "hook_path": f"{__name__}.{hook}"}
 
 
 # ---------------------------------------------------------------------------
@@ -225,29 +294,66 @@ class GuardedDelegation:
     # -- the hook ------------------------------------------------------------
     def wrap_tool_call(self, request, handler):
         """`ToolNode(wrap_tool_call=...)` / `AgentMiddleware.wrap_tool_call`."""
-        gate = self._gate(request)
+        gate = self._gate(request, capture=Capture.WRAPPER_SYNC)
         if gate.denial is not None:
             return gate.denial
         if gate.child is None:
-            return handler(request)
+            return self._run_sync(gate, lambda: handler(request))
         try:
             with use_guard(gate.child):
-                return handler(request)
+                return self._run_sync(gate, lambda: handler(request))
         finally:
             gate.child.complete()               # the delegation returned: lifecycle end on the ledger (informational)
 
     async def awrap_tool_call(self, request, handler):
         """Async twin of `wrap_tool_call`."""
-        gate = self._gate(request)
+        gate = self._gate(request, capture=Capture.WRAPPER_ASYNC)
         if gate.denial is not None:
             return gate.denial
         if gate.child is None:
-            return await handler(request)
+            return await self._run_async(gate, lambda: handler(request))
         try:
             with use_guard(gate.child):
-                return await handler(request)
+                return await self._run_async(gate, lambda: handler(request))
         finally:
             gate.child.complete()
+
+    # -- execution binding (0.9.0): runs the handler and closes out the outcome, on v2 only ----
+    def _run_sync(self, gate: "GuardedDelegation._Gate", call: Callable[[], Any]) -> Any:
+        if gate.decision is None:
+            return call()
+        start = time.monotonic()
+        try:
+            result = call()
+        except Exception as exc:
+            gate.guard.record_outcome(gate.decision.call_id, BodyState.RAISED,
+                                      error_code=type(exc).__name__,
+                                      invoked_params=gate.snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        gate.guard.record_outcome(gate.decision.call_id, _body_state_for(result),
+                                  invoked_params=gate.snapshot, duration_ms=_elapsed_ms(start))
+        return result
+
+    async def _run_async(self, gate: "GuardedDelegation._Gate", call: Callable[[], Any]) -> Any:
+        if gate.decision is None:
+            return await call()
+        start = time.monotonic()
+        try:
+            result = await call()
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            gate.guard.record_outcome(gate.decision.call_id, BodyState.ABANDONED,
+                                      invoked_params=gate.snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        except Exception as exc:
+            gate.guard.record_outcome(gate.decision.call_id, BodyState.RAISED,
+                                      error_code=type(exc).__name__,
+                                      invoked_params=gate.snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        gate.guard.record_outcome(gate.decision.call_id, _body_state_for(result),
+                                  invoked_params=gate.snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     def middleware(self):
         """An `AgentMiddleware` wrapping this gate, for `create_agent` /
@@ -276,8 +382,15 @@ class GuardedDelegation:
     class _Gate:
         denial: Any = None
         child: Optional[Guard] = None
+        # Execution binding (0.9.0): set only for an ALLOWED, v2, non-delegation check -- the
+        # decision to close out via record_outcome() once the wrapper's own handler() call
+        # returns/raises. `guard`/`snapshot` travel alongside since `_run_sync`/`_run_async`
+        # don't otherwise have access to the Guard instance the decision came from.
+        decision: Optional[Decision] = None
+        guard: Optional[Guard] = None
+        snapshot: Any = None
 
-    def _gate(self, request) -> "GuardedDelegation._Gate":
+    def _gate(self, request, *, capture: str) -> "GuardedDelegation._Gate":
         """Decide, without running anything: deny / delegate / pass through."""
         call = request.tool_call
         name = call["name"]
@@ -301,16 +414,24 @@ class GuardedDelegation:
                        message=f"no attenu-guard policy declared for tool {name!r}"),
                 tool=name, disposition=Disposition.UNRESOLVED)))
 
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(args) if v2 else None
+        hook = "GuardedDelegation.awrap_tool_call" if capture == Capture.WRAPPER_ASYNC else "GuardedDelegation.wrap_tool_call"
+        extra = (
+            dict(capture=capture, adapter=_adapter_info(hook), authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(
             policy.scope,
             context=policy.context_for(args),
             metered=policy.metered,
             tool=name,
             disposition=policy.disposition,
+            **extra,
         )
         if not decision:
             return self._Gate(denial=self._deny(request, decision))
-        return self._Gate()
+        return self._Gate(decision=decision if v2 else None, guard=guard, snapshot=snapshot)
 
     def _gate_delegation(self, request, guard: Guard, args: Mapping[str, Any]) -> "GuardedDelegation._Gate":
         subagent = args.get(self.subagent_arg)
