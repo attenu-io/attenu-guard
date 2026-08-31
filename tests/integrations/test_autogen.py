@@ -41,6 +41,7 @@ from attenu_guard import (  # noqa: E402
     Guard,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # The adapter lives under examples/ (not shipped in the package yet).
 from attenu_guard.adapters.autogen import (  # noqa: E402
@@ -464,7 +465,7 @@ def test_stream_path_is_guarded_too():
     assert effects.crm_export == 0
 
 
-def _agent_as_tool_setup(scope: str):
+def _agent_as_tool_setup(scope: str, *, issue_kwargs=None):
     """Orchestrator whose only tool is a real `AgentTool` wrapping a sub-agent."""
     ran: list[str] = []
 
@@ -483,7 +484,7 @@ def _agent_as_tool_setup(scope: str):
     )
     tool = AgentTool(sub_agent)  # tool name == agent name == "summarizer"
 
-    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, **(issue_kwargs or {}))
     registry = GuardRegistry(root, "orchestrator")
     orchestrator = guarded_agent(
         name="orchestrator",
@@ -525,3 +526,133 @@ def test_agent_as_tool_denied_never_starts_the_sub_agent():
     assert ran == [], "sub-agent ran despite the denial"
     assert registry.get("summarizer") is None, "child minted despite the denial"
     assert "scope_not_granted" in str(result.messages[-1].content)
+
+
+# ==========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# Genuine WRAPPER capture -- GuardedWorkbench.call_tool/call_tool_stream call
+# the tool body themselves, so BodyState.RAISED is honestly reachable.
+# ==========================================================================
+
+def _boom_tool() -> FunctionTool:
+    async def crm_query(rows: int) -> str:
+        raise ValueError("boom")
+
+    return FunctionTool(crm_query, description="Raises instead of returning.")
+
+
+def test_v2_allowed_call_records_a_returned_outcome_with_wrapper_async_capture():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        _summarizer_tools(effects), agent_name="summarizer", registry=registry, policies=POLICIES,
+    )
+
+    result = asyncio.run(wb.call_tool("crm_query", {"rows": 10}))
+
+    assert not result.is_error and effects.crm_query == 1
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.autogen"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+
+
+def test_v2_a_tool_that_raises_is_still_recorded_returned_not_raised():
+    """Honesty check for the module docstring's claim: AutoGen's own StaticWorkbench.call_tool
+    catches every tool exception internally and returns a ToolResult(is_error=True) instead of
+    letting it propagate, so this adapter cannot -- and must not claim to -- observe
+    BodyState.RAISED here."""
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        [_boom_tool()], agent_name="summarizer", registry=registry,
+        policies={"crm_query": ToolPolicy(scope="crm.read", context=lambda a: {"rows": a.get("rows", 0)})},
+    )
+
+    result = asyncio.run(wb.call_tool("crm_query", {"rows": 10}))
+
+    assert result.is_error  # the tool's own failure is visible in the ToolResult...
+    entries = root.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    # ...but the wrapper's own observation is an honest RETURNED, not a fabricated RAISED
+    assert outcomes and outcomes[-1]["body_state"] == BodyState.RETURNED
+    assert "error_code" not in outcomes[-1]
+
+
+def test_v1_guard_gets_no_call_id_capture_or_outcome():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY)  # schema_version=1, default
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        _summarizer_tools(effects), agent_name="summarizer", registry=registry, policies=POLICIES,
+    )
+
+    asyncio.run(wb.call_tool("crm_query", {"rows": 10}))
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "call_id" not in allow and "capture" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        _summarizer_tools(effects), agent_name="summarizer", registry=registry, policies=POLICIES,
+    )
+
+    result = asyncio.run(wb.call_tool("crm_export", {"destination": "s3://exfil"}))
+
+    assert result.is_error and effects.crm_export == 0
+    entries = root.audit_log().entries
+    assert any(e["event"] == "deny" and e.get("tool") == "crm_export" for e in entries)
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_stream_path_allowed_call_records_a_returned_outcome():
+    effects = Effects()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, schema_version=2)
+    registry = GuardRegistry(root, "orchestrator")
+    registry.delegate("orchestrator", "summarizer", SUMMARIZER_GRANT)
+    wb = GuardedWorkbench(
+        _summarizer_tools(effects), agent_name="summarizer", registry=registry, policies=POLICIES,
+    )
+
+    async def run():
+        out = []
+        async for ev in wb.call_tool_stream("crm_query", {"rows": 10}):
+            out.append(ev)
+        return out
+
+    events = asyncio.run(run())
+    assert not events[-1].is_error and effects.crm_query == 1
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_delegation_tool_also_records_an_outcome():
+    """Unlike every other adapter, a delegation-marked tool here STILL gets execution binding:
+    its body (the nested run) genuinely executes through call_tool() -- see the module
+    docstring's "Execution binding"."""
+    orchestrator, registry, root, ran = _agent_as_tool_setup("crm.read", issue_kwargs={"schema_version": 2})
+
+    asyncio.run(orchestrator.run(task="summarize Q3"))
+
+    assert ran == ["summarizer"]
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "summarizer")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert outcome["body_state"] == BodyState.RETURNED

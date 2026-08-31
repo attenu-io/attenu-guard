@@ -41,9 +41,39 @@ Denials are returned to the model as an error `ToolResult` by default
 exception raised from `call_tool` propagates out of `_execute_tool_call`
 uncaught and tears down the whole `team.run()`. Use `on_deny="raise"` when you
 want that hard stop (it raises `attenu_guard.AuthorityDenied`).
+
+Execution binding (0.9.0, on a `schema_version=2` chain — see `Guard.issue`): both
+`GuardedWorkbench.call_tool` and `call_tool_stream` are genuine WRAPPER capture
+(`Capture.WRAPPER_ASYNC`) — like `adapters.langgraph`'s reference wiring, both call
+`super().call_tool(...)`/`super().call_tool_stream(...)` themselves and observe
+completion directly. Unlike every other adapter in this package, a delegation-marked
+tool here (`policy.delegates_to` set — the agents-as-tools pattern, `AgentTool`/
+`TeamTool`) STILL gets execution binding: its body (the nested run) genuinely
+executes through THIS same `super().call_tool(...)` call, so there is something real
+to bind an outcome to — unlike a `Swarm` handoff (`GuardedHandoff`), which AutoGen
+executes entirely outside the workbench and so never calls `guard.check()` at all,
+and so never binds one either.
+
+HONESTY NOTE on `BodyState.RAISED`: AutoGen's own `StaticWorkbench.call_tool` /
+`StaticStreamWorkbench.call_tool_stream` (`autogen_core/tools/_static_workbench.py`) --
+the base class `super()` calls into -- catch every `Exception` the tool body raises,
+internally, and return/yield a `ToolResult(is_error=True, ...)` instead of letting it
+propagate. By the time this wrapper's `try` block resumes, a raised exception and an
+ordinary return are the same shape (a `ToolResult`, `is_error` set either way), so
+`BodyState.RAISED` is never reported by this adapter on that path -- every completed
+call is `BodyState.RETURNED`, whatever `is_error` says. `asyncio.CancelledError` is
+NOT caught by AutoGen's own `except Exception` (it is a `BaseException`), so it DOES
+propagate past both layers -- `BodyState.ABANDONED` is genuinely reachable, and is
+still re-raised so cancellation propagates normally.
+`call_tool_stream` records the outcome once the underlying stream is exhausted (every
+event forwarded via `yield` first); an early `aclose()` before exhaustion leaves that
+call's outcome simply unrecorded, the honest reflection of never having observed completion.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
+import time
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Callable, Dict, List, Mapping, Optional
 
@@ -60,8 +90,27 @@ from autogen_core.tools import (
 )
 from pydantic import BaseModel, ConfigDict
 
-from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard
-from attenu_guard.reasons import Disposition, ReasonCode
+from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.GuardedWorkbench.call_tool",
+}
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
+    """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
+    the tool body runs -- and reused for both `authorized_params` and `invoked_params`."""
+    try:
+        return copy.deepcopy(dict(arguments))
+    except Exception:
+        return dict(arguments)
 
 __all__ = [
     "Grant",
@@ -196,10 +245,12 @@ class GuardedWorkbench(StaticStreamWorkbench):
     # -- the gate ----------------------------------------------------------
     def _authorize(
         self, name: str, arguments: Mapping[str, Any]
-    ) -> Optional[ToolResult]:
-        """Return a denial `ToolResult`, or None when the call may proceed.
+    ) -> tuple[Optional[ToolResult], Optional[tuple]]:
+        """Return `(denial, pending)`. `denial` is a `ToolResult` (or None when the call may
+        proceed); `pending` is `(guard, call_id, snapshot)` -- execution binding (0.9.0) -- on a
+        `schema_version=2` chain, `None` otherwise (v1, or a denial already returned).
 
-        Raises `AuthorityDenied` instead of returning when ``on_deny="raise"``.
+        Raises `AuthorityDenied` instead of returning `denial` when ``on_deny="raise"``.
         """
         original = self._override_name_to_original.get(name, name)
         policy = self._policies.get(original)
@@ -210,7 +261,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
             msg = f"attenu-guard: no ToolPolicy declared for tool {original!r} (fail-closed)."
             decision = (g.record_denial(ReasonCode.NO_AUTHORITY, msg, tool=original,
                                         disposition=Disposition.UNRESOLVED) if g is not None else None)
-            return self._deny(name, msg, decision=decision)
+            return self._deny(name, msg, decision=decision), None
 
         guard = self._registry.get(self._agent_name)
         if guard is None:
@@ -219,12 +270,18 @@ class GuardedWorkbench(StaticStreamWorkbench):
                 f"attenu-guard: agent {self._agent_name!r} holds no delegated "
                 f"authority (fail-closed).",
                 decision=None,
-            )
+            ), None
 
         context = policy.context(arguments) if policy.context else {}
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(arguments) if v2 else None
+        extra = (
+            dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(
             policy.scope, context=context, tool=original, metered=policy.metered,
-            disposition=policy.disposition,
+            disposition=policy.disposition, **extra,
         )
         if not decision:
             return self._deny(
@@ -232,10 +289,12 @@ class GuardedWorkbench(StaticStreamWorkbench):
                 f"attenu-guard: {decision.explain()} "
                 f"(agent={self._agent_name}, tool={original}, scope={policy.scope})",
                 decision=decision,
-            )
+            ), None
 
         # Allowed — and if this tool is itself a delegation point, mint the child
-        # now, before the body runs.
+        # now, before the body runs. Unlike every other adapter, the delegation tool's own
+        # check() STILL gets execution binding below: its body (the nested run) genuinely
+        # executes through THIS same call_tool()/call_tool_stream(), not a separate mechanism.
         if policy.delegates_to and policy.grant:
             try:
                 self._registry.delegate(
@@ -247,8 +306,9 @@ class GuardedWorkbench(StaticStreamWorkbench):
                     f"attenu-guard: cannot delegate to "
                     f"{policy.delegates_to!r}: {exc}",
                     decision=None,
-                )
-        return None
+                ), None
+        pending = (guard, decision.call_id, snapshot) if v2 else None
+        return None, pending
 
     def _deny(self, name: str, message: str, *, decision) -> ToolResult:
         if self._on_deny == "raise":
@@ -265,10 +325,35 @@ class GuardedWorkbench(StaticStreamWorkbench):
         cancellation_token: CancellationToken | None = None,
         call_id: str | None = None,
     ) -> ToolResult:
-        denial = self._authorize(name, arguments or {})
+        denial, pending = self._authorize(name, arguments or {})
         if denial is not None:
             return denial
-        return await super().call_tool(name, arguments, cancellation_token, call_id)
+        if pending is None:
+            return await super().call_tool(name, arguments, cancellation_token, call_id)
+        # Execution binding (0.9.0): this wrapper calls the tool body itself, so it genuinely
+        # observes completion -- see the module docstring's "Execution binding".
+        guard, oc_call_id, snapshot = pending
+        started_at = time.monotonic()
+        try:
+            result = await super().call_tool(name, arguments, cancellation_token, call_id)
+        except asyncio.CancelledError:
+            # NOT caught by AutoGen's own StaticWorkbench.call_tool (it only catches
+            # `Exception`), so this genuinely propagates -- `abandoned`, not `raised`. Still
+            # re-raised: cancellation must propagate normally.
+            guard.record_outcome(oc_call_id, BodyState.ABANDONED, invoked_params=snapshot,
+                                 duration_ms=_elapsed_ms(started_at))
+            raise
+        except Exception as exc:
+            # Rarely reached in practice: AutoGen's own StaticWorkbench.call_tool already
+            # catches every Exception the tool body raises and returns a ToolResult(is_error=
+            # True) instead -- see the module docstring's honesty note. Kept as a defensive,
+            # honest fallback in case that ever changes or a future BaseTool bypasses it.
+            guard.record_outcome(oc_call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+            raise
+        guard.record_outcome(oc_call_id, BodyState.RETURNED, invoked_params=snapshot,
+                             duration_ms=_elapsed_ms(started_at))
+        return result
 
     async def call_tool_stream(
         self,
@@ -279,14 +364,39 @@ class GuardedWorkbench(StaticStreamWorkbench):
     ) -> AsyncGenerator[Any | ToolResult, None]:
         # NOTE: AssistantAgent takes this path, not call_tool, whenever the
         # workbench is a StaticStreamWorkbench (_assistant_agent.py:1580).
-        denial = self._authorize(name, arguments or {})
+        denial, pending = self._authorize(name, arguments or {})
         if denial is not None:
             yield denial
             return
-        async for event in super().call_tool_stream(
-            name, arguments, cancellation_token, call_id
-        ):
-            yield event
+        if pending is None:
+            async for event in super().call_tool_stream(
+                name, arguments, cancellation_token, call_id
+            ):
+                yield event
+            return
+        # Execution binding (0.9.0): every event is forwarded as it arrives; the outcome is
+        # recorded once the underlying stream is exhausted (RETURNED) or raises (RAISED -- see
+        # the module docstring's honesty note: rarely reached, AutoGen's own
+        # StaticStreamWorkbench.call_tool_stream already catches every Exception the tool body
+        # raises and yields a ToolResult(is_error=True) instead). An early aclose() before
+        # exhaustion leaves this call's outcome unrecorded -- honest, since completion was
+        # never actually observed.
+        guard, oc_call_id, snapshot = pending
+        started_at = time.monotonic()
+        try:
+            async for event in super().call_tool_stream(name, arguments, cancellation_token, call_id):
+                yield event
+        except asyncio.CancelledError:
+            guard.record_outcome(oc_call_id, BodyState.ABANDONED, invoked_params=snapshot,
+                                 duration_ms=_elapsed_ms(started_at))
+            raise
+        except Exception as exc:
+            guard.record_outcome(oc_call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(started_at))
+            raise
+        else:
+            guard.record_outcome(oc_call_id, BodyState.RETURNED, invoked_params=snapshot,
+                                 duration_ms=_elapsed_ms(started_at))
 
 
 # ---------------------------------------------------------------------------

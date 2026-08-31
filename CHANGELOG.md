@@ -54,6 +54,19 @@ All notable changes to attenu-guard are documented here. The format follows
     NOT wrapped -- it can veto a pending call but never touches the tool body, which the
     framework calls afterward entirely outside the hook -- so its checks stay the library's
     default `pre_hook_only`, unchanged.
+  - `adapters.autogen`: `Capture.WRAPPER_ASYNC` on `GuardedWorkbench.call_tool`/`call_tool_stream`,
+    which call `super().call_tool(...)`/`super().call_tool_stream(...)` themselves, like the
+    langgraph reference wiring. Unlike every other adapter, a delegation-marked tool
+    (`policy.delegates_to`, the agents-as-tools pattern) STILL gets execution binding here: its
+    body (the nested run) genuinely executes through this same call, unlike a `Swarm` handoff
+    (`GuardedHandoff`), which AutoGen runs entirely outside the workbench and so never calls
+    `guard.check()` at all. `BodyState.RAISED` is never reported: AutoGen's own
+    `StaticWorkbench.call_tool`/`StaticStreamWorkbench.call_tool_stream` already catch every
+    tool exception and return/yield a `ToolResult(is_error=True)` instead of letting it
+    propagate, so a raise and an ordinary return are the same shape by the time this wrapper
+    resumes -- every completed call is `BodyState.RETURNED`. `asyncio.CancelledError` is NOT
+    caught by AutoGen's own `except Exception`, so it DOES propagate; `BodyState.ABANDONED` is
+    genuinely reachable and is still re-raised.
 
 ## [0.9.0] — 2026-08-31
 
