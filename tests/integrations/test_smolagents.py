@@ -731,3 +731,43 @@ def test_v2_a_tool_returning_a_generator_records_a_deferred_outcome():
     entries = child.audit_log().entries
     outcome = next(e for e in entries if e["event"] == "outcome")
     assert outcome["body_state"] == BodyState.DEFERRED
+
+
+def test_v2_a_tool_returning_a_coroutine_records_a_deferred_outcome():
+    """A parallel adversarial review, verified against pinned smolagents 1.26.0 source:
+    _is_deferred_result() checked isgenerator()/isasyncgen() but not a coroutine -- if the
+    inner tool's own implementation is `async def forward(...)`, GuardedTool.forward() calling
+    `self.inner(*args, **kwargs)` plainly (there is no await anywhere in this synchronous
+    wrapper) returns a coroutine object with NONE of its body run yet, the same class of gap
+    as the generator case just above, just for `async def` instead of `yield`. Currently
+    unreachable through pinned smolagents' own sync-tool contract (nothing here ever awaits
+    the result), but a caller-supplied Tool subclass can define an async forward regardless --
+    inspect.isawaitable() closes it before it can ever surface."""
+    ledger = Ledger()
+
+    class AsyncCrmQuery(Tool):
+        name = "crm_query"
+        description = "An async tool body, called plainly by this synchronous wrapper."
+        inputs = {"rows": {"type": "integer", "description": "n"}}
+        output_type = "string"
+
+        async def forward(self, rows: int) -> str:
+            # Calling this returns a coroutine object immediately -- none of this body
+            # (the ledger append included) has run until something actually awaits it.
+            ledger.effects.append(("crm_query", rows))
+            return f"read {rows} CRM rows"
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3", schema_version=2)
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarise")
+
+    guarded = GuardedTool(AsyncCrmQuery(), GuardRef(child), "crm.read",
+                          context_fn=lambda rows: {"rows": rows})
+    result = guarded(rows=10)
+
+    assert inspect.iscoroutine(result), "the tool body must not have run yet"
+    assert ledger.effects == [], "the coroutine's body must not have executed on this call"
+    result.close()  # avoid a "coroutine was never awaited" warning leaking into other tests
+
+    entries = child.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.DEFERRED

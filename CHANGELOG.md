@@ -384,6 +384,27 @@ All notable changes to attenu-guard are documented here. The format follows
     `test_metered_passthrough_under_strict_metering` already uses); asserts the returned value
     is a live, unconsumed generator, the tool's own side effect has NOT happened yet, and the
     recorded `body_state` is `DEFERRED`, not `RETURNED`.
+  - **Round 3 correction (a parallel adversarial review):** `_is_deferred_result()` checked
+    `isgenerator()`/`isasyncgen()` but not a coroutine -- the same class of gap, just for a
+    tool whose own `forward()` implementation is `async def` rather than a generator function.
+    Calling it plainly (`self.inner(*args, **kwargs)`, no `await` anywhere in this synchronous
+    wrapper) returns a coroutine object with none of its body run yet;
+    `BodyState.RETURNED` would be exactly as much of a lie as in the generator case. Currently
+    UNREACHABLE through pinned smolagents' own sync-tool contract (nothing in this adapter
+    ever awaits the result, so a caller relying on this adapter alone would never see the gap
+    trigger), but a caller-supplied `Tool` subclass is free to define an async `forward`
+    regardless of what smolagents itself calls for -- closing it costs one line and removes the
+    gap before it can ever surface, rather than leaving it live on an unstated assumption about
+    what callers will or won't hand this adapter. Added `inspect.isawaitable(result)` to
+    `_is_deferred_result()` -- a strict superset of `iscoroutine()` that also covers
+    Future-like awaitables and generator-based coroutines with the one check; the "no async
+    entry point" reasoning in the Round 2 bullet above justified skipping this check, which
+    was too narrow -- the WRAPPER has no async entry point, but a tool's own implementation
+    is not constrained by that. Test added:
+    `test_v2_a_tool_returning_a_coroutine_records_a_deferred_outcome` -- an `AsyncCrmQuery`
+    tool whose `forward()` is `async def`, driven the same way as the generator test; asserts
+    the returned value is a live, un-awaited coroutine, the tool's own side effect has NOT
+    happened yet, and the recorded `body_state` is `DEFERRED`.
 - Execution binding wired into `adapters.strands` (AWS Strands Agents), OPT-IN via
   `DelegationGuard(..., strict_single_hook=True)`: this adapter never calls the tool body
   itself, but pinned strands-agents 1.52.x's `AfterToolCallEvent` is an unusually good hook
@@ -510,12 +531,11 @@ All notable changes to attenu-guard are documented here. The format follows
     `Capture.WRAPPER_ASYNC` as an unconditional, always-genuine observation -- was wrong.
     Pinned ag2 1.0.2's `FunctionTool.register()` folds an ORDERED LIST of middleware into ONE
     composed chain around the tool body, at TWO independent composition points: agent-level
-    (`Agent(middleware=[...])`, no `reversed()` -- verified empirically, not read off the loop
-    shape alone, that the LAST-listed `on_tool_execution` ends up outermost) and, separately,
-    tool-level (`FunctionTool.with_middleware(...)` / `Toolkit(middleware=[...])`, reversed, so
-    the LAST-listed hook ends up innermost). `ag2/middleware/builtin/` ships real stackable
-    middleware (`llm_retry.py`, `token_limiter.py`, `approval.py`, `logging.py`, `metrics.py`,
-    `telemetry.py`, `history_limiter.py`), so a sibling at either point is not hypothetical. Added
+    (`Agent(middleware=[...])`) and, separately, tool-level (`FunctionTool.with_middleware(...)`
+    / `Toolkit(middleware=[...])`, reversed, so the LAST-listed hook ends up innermost).
+    `ag2/middleware/builtin/` ships real stackable middleware (`llm_retry.py`,
+    `token_limiter.py`, `approval.py`, `logging.py`, `metrics.py`, `telemetry.py`,
+    `history_limiter.py`), so a sibling at either point is not hypothetical. Added
     `strict_single_hook: bool = False` to `_Gate`, `DelegationGuard`, `guard_middleware()`,
     `guard_tool_hook()` and `guarded_tools()`. Default: `Capture.PRE_HOOK_ONLY`, no
     `record_outcome()` ever, safe regardless of what any sibling at either composition point
@@ -529,6 +549,26 @@ All notable changes to attenu-guard are documented here. The format follows
     retrying the real body underneath it (empirically confirmed first, per this project's own
     "verify, don't assume" discipline: the real body runs twice, this gate records exactly one
     honest `RETURNED` for the final attempt, silently under-reporting the retry).
+  - **Round 3 correction (a parallel adversarial review):** the agent-level ordering claim
+    just above -- "LAST-listed `on_tool_execution` ends up outermost" -- was backwards.
+    That claim tested `FunctionTool.register()`'s own `_wrap_middleware` loop IN ISOLATION,
+    against a hand-built list, never going through `agent.py`'s own turn setup at all; that
+    setup REVERSES `Agent(middleware=[...])`'s user-facing list before it ever reaches
+    `register()` (`~agent.py:1362-1366`: `for m in reversed(tuple(chain(self._middleware,
+    additional_middleware))): middleware_instances.append(mw)`). The two reversals compose:
+    at the USER-FACING `Agent(middleware=[...])` level, the FIRST-listed middleware ends up
+    OUTERMOST, the LAST-listed innermost -- the opposite of the isolated-primitive test's
+    conclusion, now confirmed end-to-end through a real `Agent` (`middleware=[A, B]`
+    dispatches `A-enter, B-enter, body, B-exit, A-exit`). The tool-level claim (reversed, so
+    the LAST-listed hook ends up innermost, via `FunctionTool.with_middleware(...)` /
+    `Toolkit(middleware=[...])`) was independently re-verified and is correct as written --
+    only the agent-level ordering direction was wrong. Safety/tests are unaffected: the
+    residual behaviors themselves (a false `RETURNED`, an under-reported retry, safety when
+    inner) are properties of WHICH PHYSICAL POSITION in the composed chain a hook occupies,
+    not of how a caller's list order maps to that position, and the existing tests construct
+    the composed chain directly via `_wrap_middleware` rather than asserting anything about
+    `Agent(middleware=[...])`'s own list-order-to-position mapping -- only the module
+    docstring's and this CHANGELOG entry's PROSE needed correcting, no test or code change.
 - Execution binding wired into `adapters.agent_framework` (Microsoft Agent Framework):
   `Capture.WRAPPER_ASYNC` from `DelegationGuard.process`, which awaits `call_next()` itself.
   `_freeze()` snapshot of the tool call's arguments, taken at authorization time before

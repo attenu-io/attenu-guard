@@ -124,14 +124,20 @@ see the "Round 2 correction" below for why this is no longer a bare, uncondition
 Pinned ag2 1.0.2's `FunctionTool.register()` (`function_tool.py`) folds an ORDERED LIST of
 middleware into ONE composed chain around the tool body, at TWO INDEPENDENT points:
 
-* Agent-level: ``for mw in middleware: execution = _wrap_middleware(mw.on_tool_execution,
-  execution)`` -- iterated in the list's original order WITHOUT reversal, so each successive
-  middleware wraps AROUND whatever came before it and the LAST-listed ``on_tool_execution``
-  ends up OUTERMOST (closest to the caller); the FIRST-listed ends up innermost, closest to the
-  tool-level chain below (empirically confirmed against pinned ag2 1.0.2, not read off the
-  loop shape alone -- the absence of a `reversed()` here does not by itself say which end is
-  outer). This is what `Agent(middleware=[...])` -> `guard_middleware()` / `DelegationGuard`
-  sits in.
+* Agent-level: `FunctionTool.register()`'s own `execution = _wrap_middleware(mw.
+  on_tool_execution, execution)` loop iterates its `middleware` PARAMETER in that
+  parameter's own order WITHOUT reversal -- but that parameter is NOT `Agent(middleware=
+  [...])`'s list unchanged: `agent.py`'s own turn setup (`~agent.py:1362-1366`) builds it as
+  `for m in reversed(tuple(chain(self._middleware, additional_middleware))):
+  middleware_instances.append(mw)`, i.e. `Agent(middleware=[...])`'s user-facing list
+  REVERSED, before ever reaching `register()`. The two reversals compose: at the
+  USER-FACING `Agent(middleware=[...])` level, the FIRST-listed middleware ends up
+  OUTERMOST (closest to the caller), the LAST-listed ends up innermost, closest to the
+  tool-level chain below -- empirically confirmed end-to-end through a real `Agent`
+  (`middleware=[A, B]` dispatches `A-enter, B-enter, body, B-exit, A-exit`), not inferred
+  from either loop's shape in isolation -- a bare read of `register()`'s own loop alone
+  (no `reversed()`) is NOT sufficient to conclude the user-facing ordering, since the
+  caller upstream of it already reverses once.
 * Tool-level: ``for hook in reversed(self._middleware): execution = _wrap_middleware(hook,
   execution)`` -- reversed, so the LAST-listed hook ends up INNERMOST, closest to the raw
   ``execution: ToolExecution = self``. This is what `FunctionTool.with_middleware(...)` /
@@ -210,6 +216,18 @@ composition points -- verified against pinned ag2 1.0.2 source as documented abo
 around the body, at the agent level AND independently at the tool level. `strict_single_hook`
 (default `False`) is the fix: genuine capture is now an explicit, scoped opt-in, not a default
 claim this adapter could not actually back.
+
+ROUND 3 CORRECTION (a parallel adversarial review, verified against pinned ag2 1.0.2 source):
+the "Agent-level" bullet above previously claimed the LAST-listed `Agent(middleware=[...])`
+entry ends up outermost -- backwards. That earlier claim was checked by testing
+`FunctionTool.register()`'s own `_wrap_middleware` loop IN ISOLATION, against a hand-built
+list, which never went through `agent.py`'s own turn setup at all -- and that setup reverses
+`Agent(middleware=[...])`'s user list BEFORE it ever reaches `register()`
+(`~agent.py:1362-1366`). Testing the internal primitive alone, with an arbitrarily-ordered
+list I constructed myself, was not the same claim as testing what a caller actually observes
+from `Agent(middleware=[...])` -- the fix above corrects that gap by tracing (and then
+confirming end-to-end through a real `Agent`) the FULL path a caller's list travels, not just
+the one function closest to the tool body.
 
 On `schema_version=1` (the default), nothing in this whole section applies -- `capture`/
 `adapter`/`authorized_params` are never passed to `check()`, and `record_outcome()` is never

@@ -125,8 +125,15 @@ def _is_deferred_result(result: Any) -> bool:
     generator's body has run at all (ordinary Python generator semantics -- smolagents
     itself does nothing special with the return value here, pinned 1.26.0 `Tool.__call__`
     returns unknown result types unchanged). `BodyState.RETURNED` would be a lie in that
-    case: `DEFERRED` is the honest read."""
-    return inspect.isgenerator(result) or inspect.isasyncgen(result)
+    case: `DEFERRED` is the honest read. `inspect.isawaitable()` closes the same class of
+    gap for a coroutine (`async def forward(...)` called plainly here returns a coroutine
+    object with none of its body run yet, exactly the same shape as the generator case --
+    currently unreachable through pinned smolagents' own sync-tool contract, since nothing
+    in this adapter awaits it, but a caller-supplied `Tool` subclass is free to define an
+    `async def forward` regardless; catching it here costs nothing and closes the gap before
+    it can ever surface) -- a strict superset of `iscoroutine()` that also covers Future-like
+    awaitables and generator-based coroutines with the one check."""
+    return inspect.isgenerator(result) or inspect.isasyncgen(result) or inspect.isawaitable(result)
 
 
 def _body_state_for(result: Any) -> str:
