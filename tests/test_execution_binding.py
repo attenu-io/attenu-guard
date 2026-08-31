@@ -780,6 +780,87 @@ class TestVerifierExecutionBinding(unittest.TestCase):
         rep = evidence.verify_bundle(bundle, self.signer)
         self.assertTrue(any(f.startswith("invalid_outcome:") for f in rep["execution_binding"]["failures"]))
 
+    @staticmethod
+    def _rechain_from(entries, idx):
+        prev = entries[idx - 1]["hash"] if idx > 0 else evidence._GENESIS
+        for e in entries[idx:]:
+            e["prev_hash"] = prev
+            e["hash"] = evidence._rehash(prev, {k: v for k, v in e.items() if k != "hash"})
+            prev = e["hash"]
+
+    def test_invalid_allow_adapter_value_wrong_type(self):
+        g = _v2_root()
+        g.check("crm.read", capture=Capture.WRAPPER_SYNC, adapter=_adapter())
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+        entries[idx]["adapter"]["version"] = 123   # must be a string
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_allow:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_allow_adapter_without_capture(self):
+        g = _v2_root()
+        g.check("crm.read")
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+        entries[idx]["adapter"] = _adapter()   # adapter present, capture absent -- illegal pairing
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_allow:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_allow_explicit_null_authorized_params_hash(self):
+        g = _v2_root()
+        g.check("crm.read", authorized_params={"x": 1})
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "allow")
+        entries[idx]["authorized_params_hash"] = None   # explicit null, not absent
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_allow:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_root_missing_params_salt(self):
+        g = _v2_root()
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        del entries[0]["params_salt"]
+        self._rechain_from(entries, 0)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_root:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_kill_malformed_pending_at_kill(self):
+        g = _v2_root()
+        g.check("crm.read")
+        g.revoke()
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "kill")
+        entries[idx]["pending_at_kill"] = ["not-a-call-id"]
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_kill:") for f in rep["execution_binding"]["failures"]))
+
+    def test_invalid_outcome_malformed_receipt_digest(self):
+        g = _v2_root()
+        d = g.check("crm.read")
+        g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1,
+                         receipt={"type": "otel", "ref": "s1", "digest": _HEX64})
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        idx = next(i for i, e in enumerate(entries) if e["event"] == "outcome")
+        entries[idx]["receipt"]["digest"] = "not-hex-64"
+        self._rechain_from(entries, idx)
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertTrue(any(f.startswith("invalid_outcome:") for f in rep["execution_binding"]["failures"]))
+
     def test_verification_never_consults_current_authority_state(self):
         # a revocation that happens LATER does not retroactively invalidate an earlier allow's record
         g = _v2_root()
@@ -788,6 +869,79 @@ class TestVerifierExecutionBinding(unittest.TestCase):
         g.revoke()   # after the fact
         rep = evidence.verify_bundle(_bundle_for(g, self.signer), self.signer)
         self.assertEqual(rep["execution_binding"]["per_call"][d.call_id], "observed")
+
+    def test_cross_ref_outcome_does_not_count_as_observed(self):
+        # Codex review item 5: "observed" requires an outcome that exists AND is bound correctly
+        # (right node, right order) -- a cross_ref'd outcome must not count, even though a
+        # call_id-matching outcome record technically exists somewhere in the ledger.
+        g = _v2_root()
+        d = g.check("crm.read", capture=Capture.WRAPPER_SYNC, adapter=_adapter())
+        child = g.delegate("summarizer", Authority({"crm.read"}, [], ttl=60), task="t")
+        bundle = _bundle_for(g, self.signer)
+        entries = bundle["entries"]
+        entries.append({"v": 2, "c14n": "JCS", "seq": len(entries), "ts": 99, "event": "outcome",
+                        "chain_id": g.chain_id, "node": child.node_id, "call_id": d.call_id,
+                        "body_state": "returned", "duration_ms": 1, "prev_hash": entries[-1]["hash"]})
+        entries[-1]["hash"] = evidence._rehash(entries[-1]["prev_hash"], {k: v for k, v in entries[-1].items() if k != "hash"})
+        bundle["anchor"] = evidence._anchor_for(entries, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer)
+        eb = rep["execution_binding"]
+        self.assertNotEqual(eb["per_call"][d.call_id], "observed")
+        self.assertEqual(eb["per_call"][d.call_id], "unaccounted")   # capture was WRAPPER_SYNC: promised, absent
+
+    def test_params_coverage_a_pending_hashed_call_makes_it_partial_not_complete(self):
+        # Codex's exact repro: one fully hashed COMPLETED call plus one hashed PENDING call must
+        # report partial, not complete -- the pending call has no invoked_params_hash yet.
+        g = _v2_root()
+        d1 = g.check("crm.read", authorized_params={"x": 1})
+        g.record_outcome(d1.call_id, BodyState.RETURNED, invoked_params={"x": 1}, duration_ms=1)
+        g.check("crm.read", authorized_params={"x": 2})   # still pending, no outcome
+        rep = evidence.verify_bundle(_bundle_for(g, self.signer), self.signer)
+        self.assertEqual(rep["execution_binding"]["params_coverage"], "partial")
+
+    def test_missing_root_is_rejected(self):
+        g = _v2_root()
+        g.check("crm.read")
+        bundle = _bundle_for(g, self.signer)
+        bundle["entries"] = [e for e in bundle["entries"] if e["event"] != "root"]
+        rep = evidence.verify_bundle(bundle, self.signer)
+        self.assertFalse(rep["checks"]["root"])
+        self.assertTrue(any(f.startswith("missing_root:") for f in rep["failures"]))
+        self.assertFalse(rep["ok"])
+
+    def test_expected_head_mismatch_is_caught_even_with_a_self_consistent_forged_anchor(self):
+        # The scenario spec section 5 calls out: an attacker who controls (or can re-sign) the
+        # bundle's OWN anchor cannot fool a verifier holding an independently retained expected
+        # head from an earlier, trusted export.
+        g = _v2_root()
+        g.check("crm.read")
+        true_bundle = _bundle_for(g, self.signer)
+        true_head = (len(true_bundle["entries"]) - 1, true_bundle["entries"][-1]["hash"])
+
+        # Attacker rewrites the ledger (drops the last entry) and re-anchors it self-consistently.
+        forged = copy.deepcopy(true_bundle)
+        forged["entries"] = forged["entries"][:-1]
+        forged["anchor"] = evidence._anchor_for(forged["entries"], self.signer)
+
+        # Verified against ONLY the bundle's own (self-consistent, honestly re-signed) anchor: passes.
+        rep_bundle_only = evidence.verify_bundle(forged, self.signer)
+        self.assertTrue(rep_bundle_only["ok"])
+        self.assertEqual(rep_bundle_only["verified_against"], "bundle_anchor")
+
+        # Verified against the INDEPENDENTLY RETAINED true head: caught.
+        rep_expected = evidence.verify_bundle(forged, self.signer, expected_head=true_head)
+        self.assertFalse(rep_expected["ok"])
+        self.assertEqual(rep_expected["checks"]["expected_anchor"], "FAILED")
+        self.assertTrue(any(f.startswith("expected_head_mismatch:") for f in rep_expected["failures"]))
+        self.assertEqual(rep_expected["verified_against"], "expected_anchor")
+
+    def test_expected_anchor_matches_a_genuine_bundle(self):
+        g = _v2_root()
+        g.check("crm.read")
+        bundle = _bundle_for(g, self.signer)
+        rep = evidence.verify_bundle(bundle, self.signer, expected_anchor=bundle["anchor"])
+        self.assertTrue(rep["ok"])
+        self.assertEqual(rep["checks"]["expected_anchor"], "verified")
 
 
 if __name__ == "__main__":
