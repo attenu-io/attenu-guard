@@ -68,21 +68,34 @@ executes on a denial.
 Execution binding (0.9.0, reference wiring for this adapter): when `guard`'s
 chain was issued with `schema_version=2` (see `Guard.issue`), `guard_node`
 also passes `capture`/`adapter`/`authorized_params` to `check()` and calls
-`guard.record_outcome()` once the wrapped callable finishes — `wrapper_sync`
-for a plain callable, `wrapper_async` when `fn` is a coroutine function
-(`await`ed by this wrapper, so it observes the body directly either way).
-`authorized_params`/`invoked_params` are `{"args": [...], "kwargs": {...}}`
-built from exactly what the wrapped callable is called with — unchanged
-between the two observations here, since this decorator itself never
-mutates them; a framework that DOES mutate arguments between authorization
-and invocation is where a real substitution would become visible. On a
-`schema_version=1` chain (the default), this adapter behaves exactly as it
-did before 0.9.0: no `capture`/`authorized_params`, no `record_outcome`
-call. Every other framework adapter is unchanged in this release — this is
-the one reference wiring; see CHANGELOG.md.
+`guard.record_outcome()` once the wrapped callable's observation ends —
+`wrapper_sync` for a plain callable, `wrapper_async` for an async one
+(`await`ed by this wrapper's own async variant, so it observes completion
+directly). `authorized_params`/`invoked_params` are BOTH taken from ONE
+immutable snapshot of `{"args": [...], "kwargs": {...}}`, deep-copied
+BEFORE the wrapped callable runs and never re-read from `args`/`kwargs`
+afterward — so a callable that mutates its own inputs in place cannot make
+this adapter claim it observed two different values for what was actually
+one call's arguments. A generator/async-generator/future/task return value
+is reported `deferred`, not `returned` (this wrapper does not consume it);
+an `asyncio.CancelledError` on the async path is reported `abandoned`, not
+`raised`, and still re-raised so cancellation propagates normally.
+
+On a `schema_version=1` chain (the default), this adapter is BYTE-AND-TYPE
+IDENTICAL to every release before 0.9.0 — including for an async callable:
+`wrapped` stays a plain SYNC function that returns `fn(*args, **kwargs)`
+UNAWAITED (the caller awaits the result, as it always has); only on a
+`schema_version=2` chain does wrapping an async callable change `wrapped`
+itself into an async function, which is required to observe the callable's
+actual completion for `record_outcome()`. Every other framework adapter is
+unchanged in this release — this is the one reference wiring; see
+CHANGELOG.md.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import copy
 import functools
 import inspect
 import time
@@ -92,6 +105,50 @@ from .. import AuthorityDenied, __version__
 from ..reasons import Capture, BodyState
 
 __all__ = ["guard_node", "DelegatedToolNode", "add_guarded_node", "is_langgraph_available"]
+
+
+def _is_async_callable(fn) -> bool:
+    """True for an `async def` function/method AND for an object whose `__call__` is one — a
+    plain `inspect.iscoroutinefunction(fn)` misses the second case (an async callable OBJECT),
+    which then gets driven synchronously and returns an unawaited coroutine instead of a result."""
+    if inspect.iscoroutinefunction(fn):
+        return True
+    call = getattr(fn, "__call__", None)
+    return call is not None and inspect.iscoroutinefunction(call)
+
+
+def _is_deferred_result(result) -> bool:
+    """True if `result` is a generator/async-generator/future/task whose consumption this
+    wrapper does not itself observe — spec's `deferred`: "the record covers the call, not the
+    eventual exhaustion." """
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(start: float) -> int:
+    return int((time.monotonic() - start) * 1000)
+
+
+def _snapshot_params(args, kwargs) -> dict:
+    """An IMMUTABLE snapshot of the call's arguments, taken BEFORE the wrapped callable runs and
+    reused for BOTH authorized_params (check()) and invoked_params (record_outcome()) — so a
+    callable that mutates its own inputs in place cannot make this adapter observe two different
+    values for what was actually one call's arguments."""
+    raw = {"args": list(args), "kwargs": dict(kwargs)}
+    try:
+        return copy.deepcopy(raw)
+    except Exception:
+        # Best-effort: something in here isn't deepcopy-able (a live socket, a lock, ...). Fall
+        # back to the shallow copy — a residual risk only if THAT specific object is later
+        # mutated in place, a rare edge case documented here rather than silently claimed away.
+        return raw
 
 
 # =========================================================================
@@ -138,64 +195,74 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
     """
     def decorator(fn):
         resolved_tool = tool if tool is not None else getattr(fn, "__name__", None)
-        is_async = inspect.iscoroutinefunction(fn)
-        capture = Capture.WRAPPER_ASYNC if is_async else Capture.WRAPPER_SYNC
+        is_async_fn = _is_async_callable(fn)
+        # guard.schema_version never changes for a guard's lifetime, so it's safe (and correct:
+        # a wrapper's sync-vs-async SHAPE must be fixed at definition time, not per-call) to
+        # decide it once, here, at decoration time.
+        v2 = guard.schema_version == 2
+        capture = Capture.WRAPPER_ASYNC if is_async_fn else Capture.WRAPPER_SYNC
         adapter_info = {"module": __name__, "version": __version__,
                         "hook_path": f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', resolved_tool)}"}
 
-        def _params(args, kwargs) -> dict:
-            # The exact tool-call arguments this wrapper is called with — see the module
-            # docstring: unchanged between authorization and invocation in THIS decorator
-            # (nothing here mutates them), so a mismatch would mean a framework did.
-            return {"args": list(args), "kwargs": dict(kwargs)}
-
-        def _check(args, kwargs):
+        def _authorize(args, kwargs, snapshot):
             context: Mapping = context_fn(*args, **kwargs) if context_fn else {}
-            v2 = guard.schema_version == 2
-            extra = dict(capture=capture, adapter=adapter_info, authorized_params=_params(args, kwargs)) if v2 else {}
+            extra = dict(capture=capture, adapter=adapter_info, authorized_params=snapshot) if v2 else {}
             decision = guard.check(tool_scope, context=context, tool=resolved_tool,
                                    disposition=disposition, **extra)
             if not decision:
                 raise AuthorityDenied(decision)
-            return decision, v2
+            return decision
 
-        if is_async:
+        if is_async_fn and v2:
             @functools.wraps(fn)
             async def wrapped(*args, **kwargs):
-                decision, v2 = _check(args, kwargs)
+                snapshot = _snapshot_params(args, kwargs)
+                decision = _authorize(args, kwargs, snapshot)
                 start = time.monotonic()
                 try:
                     result = await fn(*args, **kwargs)
-                except Exception as exc:
-                    if v2:
-                        guard.record_outcome(decision.call_id, BodyState.RAISED,
-                                             error_code=type(exc).__name__,
-                                             invoked_params=_params(args, kwargs),
-                                             duration_ms=int((time.monotonic() - start) * 1000))
+                except asyncio.CancelledError:
+                    # The wrapper stopped observing while the body may still run -- exactly
+                    # spec's `abandoned`, not `raised`. Still re-raised: cancellation must
+                    # propagate normally.
+                    guard.record_outcome(decision.call_id, BodyState.ABANDONED,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(start))
                     raise
-                if v2:
-                    guard.record_outcome(decision.call_id, BodyState.RETURNED,
-                                         invoked_params=_params(args, kwargs),
-                                         duration_ms=int((time.monotonic() - start) * 1000))
+                except Exception as exc:
+                    guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                         error_code=type(exc).__name__,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+                    raise
+                guard.record_outcome(decision.call_id, _body_state_for(result),
+                                     invoked_params=snapshot, duration_ms=_elapsed_ms(start))
                 return result
+        elif is_async_fn:
+            # v1 (schema_version=1, the default): EXACTLY the pre-0.9.0 shape -- a plain SYNC
+            # wrapper that authorizes, then returns fn(*args, **kwargs) UNAWAITED. The caller
+            # awaits the returned coroutine itself, as it always has; `wrapped` is never itself
+            # a coroutine function on v1, even when `fn` is async.
+            @functools.wraps(fn)
+            def wrapped(*args, **kwargs):
+                _authorize(args, kwargs, None)
+                return fn(*args, **kwargs)
         else:
             @functools.wraps(fn)
             def wrapped(*args, **kwargs):
-                decision, v2 = _check(args, kwargs)
+                if not v2:
+                    _authorize(args, kwargs, None)
+                    return fn(*args, **kwargs)
+                snapshot = _snapshot_params(args, kwargs)
+                decision = _authorize(args, kwargs, snapshot)
                 start = time.monotonic()
                 try:
                     result = fn(*args, **kwargs)
                 except Exception as exc:
-                    if v2:
-                        guard.record_outcome(decision.call_id, BodyState.RAISED,
-                                             error_code=type(exc).__name__,
-                                             invoked_params=_params(args, kwargs),
-                                             duration_ms=int((time.monotonic() - start) * 1000))
+                    guard.record_outcome(decision.call_id, BodyState.RAISED,
+                                         error_code=type(exc).__name__,
+                                         invoked_params=snapshot, duration_ms=_elapsed_ms(start))
                     raise
-                if v2:
-                    guard.record_outcome(decision.call_id, BodyState.RETURNED,
-                                         invoked_params=_params(args, kwargs),
-                                         duration_ms=int((time.monotonic() - start) * 1000))
+                guard.record_outcome(decision.call_id, _body_state_for(result),
+                                     invoked_params=snapshot, duration_ms=_elapsed_ms(start))
                 return result
 
         # Introspection hooks -- useful for tooling/tests, harmless otherwise.

@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))        # so adapters/langgraph.py's 
                                                     # `from attenu_guard import ...` resolves
 
 import asyncio
+import inspect
 
 from attenu_guard import Authority, AuthorityDenied, Guard, RowLimit
 from attenu_guard.reasons import BodyState, Capture
@@ -384,6 +385,91 @@ class TestExecutionBindingWiring(unittest.TestCase):
         node(rows=1)
         outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
         self.assertEqual(outcome["body_state"], BodyState.RETURNED)
+
+    def test_a_callable_that_mutates_its_own_input_does_not_cause_a_params_mismatch(self):
+        # Codex review item 3: invoked_params used to be computed AFTER the body ran, from the
+        # SAME args/kwargs the body could have mutated in place -- a false substitution signal.
+        received = {}
+
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        def summarize(payload, rows=0):
+            received["seen"] = dict(payload)
+            payload["mutated"] = True   # mutate the wrapper's own input in place
+            return {"ok": True}
+
+        arg = {"original": True}
+        summarize(arg, rows=1)
+        self.assertEqual(received["seen"], {"original": True})   # the body saw it BEFORE mutation
+        self.assertTrue(arg["mutated"])                          # the mutation still happened
+        entries = self.guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        # both hashes come from the SAME pre-invocation snapshot -- no false mismatch
+        self.assertEqual(allow["authorized_params_hash"], outcome["invoked_params_hash"])
+
+    def test_a_generator_return_value_is_reported_deferred_not_returned(self):
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        def summarize(**kwargs):
+            def gen():
+                yield 1
+                yield 2
+            return gen()
+
+        result = summarize(rows=1)
+        self.assertEqual(list(result), [1, 2])   # the generator itself still works
+        outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
+        self.assertEqual(outcome["body_state"], BodyState.DEFERRED)
+
+    def test_an_async_callable_object_is_detected_and_uses_wrapper_async_capture(self):
+        class AsyncTool:
+            async def __call__(self, **kwargs):
+                return {"ok": True}
+
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        async def summarize(**kwargs):
+            return await AsyncTool()(**kwargs)
+
+        result = asyncio.run(summarize(rows=1))
+        self.assertTrue(result["ok"])
+        allow = next(e for e in self.guard.audit_log().entries if e["event"] == "allow")
+        self.assertEqual(allow["capture"], Capture.WRAPPER_ASYNC)
+
+    def test_async_cancellation_is_reported_abandoned_and_still_propagates(self):
+        @guard_node(self.guard, "crm.read", context_fn=_rows_context)
+        async def summarize(**kwargs):
+            await asyncio.sleep(10)
+            return {"ok": True}   # never reached
+
+        async def run():
+            task = asyncio.ensure_future(summarize(rows=1))
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(run())
+        outcome = next(e for e in self.guard.audit_log().entries if e["event"] == "outcome")
+        self.assertEqual(outcome["body_state"], BodyState.ABANDONED)
+        self.assertNotIn("error_code", outcome)
+
+    def test_v1_async_wrapper_stays_sync_and_returns_an_unawaited_coroutine(self):
+        # Codex review item 3/8: on v1 (the default), wrapping an async callable must NOT turn
+        # `wrapped` itself into a coroutine function -- the pre-0.9.0 shape returned the raw
+        # coroutine from a SYNC wrapper call, and the caller awaited the RESULT.
+        guard = _make_tool_guard()   # schema_version=1
+
+        @guard_node(guard, "crm.read", context_fn=_rows_context)
+        async def summarize(**kwargs):
+            return {"ok": True}
+
+        self.assertFalse(inspect.iscoroutinefunction(summarize))
+        result = summarize(rows=1)             # a plain (sync) call
+        self.assertTrue(inspect.iscoroutine(result))   # ...that returned an unawaited coroutine
+        self.assertEqual(asyncio.run(_await_it(result)), {"ok": True})
+
+
+async def _await_it(coro):
+    return await coro
 
 
 if __name__ == "__main__":
