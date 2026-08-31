@@ -88,17 +88,37 @@ explanation as ordinary tool output instead of an error.
 This module imports `camel` (it subclasses `FunctionTool` and `AgentToolkit`)
 and nothing from `attenu_guard` beyond the public API -- no library changes are
 needed on either side.
+
+Execution binding (0.9.0, on a `schema_version=2` chain -- see `Guard.issue`): `GuardedFunction
+Tool.__call__`/`async_call` call the inner tool themselves (`super().__call__(...)` /
+`self._inner_async_call(...)`/`super().async_call(...)`), exactly like `adapters.langgraph`'s
+reference wiring, so `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` is a genuine observation. `authorized
+_params`/`invoked_params` are one immutable snapshot (`_freeze()`, never a copy protocol -- see
+its own docstring) of `{"args": [...], "kwargs": {...}}`, taken BEFORE the inner tool runs and
+reused unchanged for both. `BodyState.RAISED` (with `error_code`) is genuinely observed on both
+paths -- CAMEL does not swallow a tool's exception before this wrapper's own call returns/raises
+(`ChatAgent._execute_tool`'s own `except` runs OUTSIDE this wrapper, around the whole call).
+`asyncio.CancelledError` on the async path is `BodyState.ABANDONED`, still re-raised. Minting a
+child Guard (`GuardedAgentToolkit.mint`) goes through `parent_guard.enforce(...)`, which never
+returns a `Decision`/`call_id` (it raises on deny, returns `None` on allow) -- there is nothing
+to bind an outcome to, so delegation is unaffected by any of this, on any schema version. On
+`schema_version=1` (the default), nothing here changes at all.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import copy
 import functools
+import inspect
+import time
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Union
 
 from camel.toolkits import FunctionTool
 from camel.toolkits.agent_toolkit import AgentToolkit
 
-from attenu_guard import Authority, AuthorityDenied, Guard
+from attenu_guard import Authority, AuthorityDenied, Guard, __version__
+from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
     "GuardRef",
@@ -108,6 +128,58 @@ __all__ = [
     "guard_toolkit",
     "GuardedAgentToolkit",
 ]
+
+
+_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.GuardedFunctionTool._authorize",
+}
+
+
+def _is_deferred_result(result: Any) -> bool:
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if isinstance(result, (asyncio.Future, concurrent.futures.Future)):
+        return True
+    return False
+
+
+def _body_state_for(result: Any) -> str:
+    return BodyState.DEFERRED if _is_deferred_result(result) else BodyState.RETURNED
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return int((time.monotonic() - started_at) * 1000)
+
+
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
+    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
+    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
+    of the live object graph, so a "snapshot" built that way can silently change out from under
+    the commitment when the tool body (or CAMEL itself) later mutates the original in place.
+    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
+    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
+    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
+    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
+    -- rather than being handed through any copy protocol that could return a live reference."""
+    if value is None or isinstance(value, (str, int, float, bool, bytes)):
+        return value
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_freeze(v) for v in value]
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
+def _snapshot_params(args, kwargs) -> Any:
+    """An immutable snapshot of the call's arguments, taken BEFORE the inner tool runs and
+    reused for both `authorized_params` and `invoked_params`."""
+    return _freeze({"args": list(args), "kwargs": dict(kwargs)})
 
 
 class UnboundGuard(RuntimeError):
@@ -260,36 +332,79 @@ class GuardedFunctionTool(FunctionTool):
         self.disposition = disposition
 
     # -- the authorization core --------------------------------------------
-    def _authorize(self, args: tuple, kwargs: dict) -> Optional[str]:
-        """Return `None` to proceed, or the text to hand back to the model.
+    def _authorize(self, args: tuple, kwargs: dict, *,
+                   capture: str) -> "tuple[Optional[str], Optional[Guard], Any, Any]":
+        """Return `(denial_text_or_None, guard, call_id_or_None, snapshot_or_None)`.
 
-        Never returns normally on a denial unless `on_denied="return"`: the
-        caller has no way to accidentally continue into the tool body.
+        Never returns a denial normally unless `on_denied="return"`: the
+        caller has no way to accidentally continue into the tool body. The
+        last two fields are set only for an ALLOWED, v2 check() -- what the
+        caller needs to close the outcome out afterward. `capture` is
+        `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` depending on which of `__call__`/
+        `async_call` is authorizing.
         """
         guard = _resolve(self.guard)
         context: Mapping = self.context_fn(*args, **kwargs) if self.context_fn else {}
+        v2 = guard.schema_version == 2
+        snapshot = _snapshot_params(args, kwargs) if v2 else None
+        extra = (
+            dict(capture=capture, adapter=_ADAPTER_INFO, authorized_params=snapshot)
+            if v2 else {}
+        )
         decision = guard.check(self.scope, context=context, metered=self.metered,
                                tool=self.get_function_name(),
-                               disposition=self.disposition)
+                               disposition=self.disposition, **extra)
         if decision:
-            return None
+            return None, guard, (decision.call_id if v2 else None), snapshot
         if self.on_denied == "return":
-            return f"AUTHORITY DENIED: {decision.explain()}"
+            return f"AUTHORITY DENIED: {decision.explain()}", None, None, None
         raise AuthorityDenied(decision)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        denied = self._authorize(args, kwargs)
+        denied, guard, call_id, snapshot = self._authorize(args, kwargs, capture=Capture.WRAPPER_SYNC)
         if denied is not None:
             return denied
-        return super().__call__(*args, **kwargs)
+        if call_id is None:
+            return super().__call__(*args, **kwargs)
+        start = time.monotonic()
+        try:
+            result = super().__call__(*args, **kwargs)
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     async def async_call(self, *args: Any, **kwargs: Any) -> Any:
-        denied = self._authorize(args, kwargs)
+        denied, guard, call_id, snapshot = self._authorize(args, kwargs, capture=Capture.WRAPPER_ASYNC)
         if denied is not None:
             return denied
-        if self._inner_async_call is not None:
-            return await self._inner_async_call(*args, **kwargs)
-        return await super().async_call(*args, **kwargs)
+
+        async def _invoke():
+            if self._inner_async_call is not None:
+                return await self._inner_async_call(*args, **kwargs)
+            return await super(GuardedFunctionTool, self).async_call(*args, **kwargs)
+
+        if call_id is None:
+            return await _invoke()
+        start = time.monotonic()
+        try:
+            result = await _invoke()
+        except asyncio.CancelledError:
+            # The wrapper stopped observing while the body may still run -- `abandoned`, not
+            # `raised`; still re-raised so cancellation propagates normally.
+            guard.record_outcome(call_id, BodyState.ABANDONED,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        except Exception as exc:
+            guard.record_outcome(call_id, BodyState.RAISED, error_code=type(exc).__name__,
+                                 invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+            raise
+        guard.record_outcome(call_id, _body_state_for(result),
+                             invoked_params=snapshot, duration_ms=_elapsed_ms(start))
+        return result
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (f"GuardedFunctionTool(name={self.get_function_name()!r}, "

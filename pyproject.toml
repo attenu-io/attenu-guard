@@ -50,7 +50,7 @@ llama-index = ["llama-index-core>=0.14"]
 semantic-kernel = ["semantic-kernel>=1.36"]
 agno = ["agno>=2.9"]
 haystack = ["haystack-ai>=3.1"]
-camel = ["camel-ai>=0.2.90", "mcp<3"]      # adapters.camel; camel-ai 0.2.90 imports mcp.server.FastMCP, absent in mcp 2.x
+camel = ["camel-ai>=0.2.90", "mcp<2"]      # adapters.camel; camel-ai 0.2.90 imports mcp.server.FastMCP, renamed to MCPServer in mcp 2.x (mcp's own migration guide: pin mcp<2 to keep v1 code running)
 omnigent = ["omnigent>=0.10"]         # examples/integrations/omnigent (policy handler); no adapter module
 mcp = ["mcp>=1.28"]                   # examples/integrations/mcp (server-side chain verifier)
 a2a = ["a2a-sdk>=1.1"]                # adapters.a2a: Agent2Agent protocol (client interceptor + guarded AgentExecutor)

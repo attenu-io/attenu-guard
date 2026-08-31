@@ -371,6 +371,17 @@ All notable changes to attenu-guard are documented here. The format follows
   (`AfterToolCallEvent.retry`) genuinely can discard an already-recorded outcome, and a
   tool-originated interrupt skips `AfterToolCallEvent` entirely; both are documented as strict-
   mode residuals in the module docstring rather than silently promised away.
+- Execution binding wired into `adapters.camel` (CAMEL-AI), same terms as `adapters.langchain`/
+  `llama_index`/`smolagents`: `Capture.WRAPPER_SYNC`/`WRAPPER_ASYNC` from `GuardedFunctionTool.
+  __call__`/`async_call`, which call the inner tool themselves. `_freeze()` snapshot of
+  `{"args": [...], "kwargs": {...}}`, taken before the inner tool runs. `BodyState.RAISED`
+  (with `error_code`) is genuinely observed on both paths; `asyncio.CancelledError` on the
+  async path is `BodyState.ABANDONED`, still re-raised. `GuardedAgentToolkit.mint()` goes
+  through `parent_guard.enforce(...)`, which never returns a `Decision`/`call_id` -- delegation
+  is unaffected by any of this. **Also fixed**, unrelated to execution binding: the `camel`
+  extra's `mcp<3` pin was stale -- camel-ai 0.2.90 imports `mcp.server.FastMCP`, renamed to
+  `MCPServer` in mcp 2.x (mcp's own migration guide recommends `mcp<2`), so `pip install
+  'attenu-guard[camel]'` was broken on a clean install; corrected to `mcp<2`.
 
 ## [0.9.0] — 2026-08-31
 

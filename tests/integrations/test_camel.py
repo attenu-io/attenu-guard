@@ -40,6 +40,7 @@ from attenu_guard import (  # noqa: E402
     ReasonCode,
     RowLimit,
 )
+from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 from attenu_guard.adapters.camel import (  # noqa: E402
     GuardedAgentToolkit,
     GuardedFunctionTool,
@@ -641,3 +642,165 @@ def test_the_tools_actually_execute_when_authority_is_held():
     assert by_name["crm_export"](destination="s3://reports") == (
         "exported CRM to s3://reports")
     assert ledger.effects == [("crm_query", 10), ("crm_export", "s3://reports")]
+
+
+# ===========================================================================
+# Execution binding (0.9.0): record_outcome() on a schema_version=2 chain.
+# GuardedFunctionTool.__call__/async_call call the inner tool themselves,
+# exactly like adapters/langgraph.py's reference wiring, so
+# WRAPPER_SYNC/WRAPPER_ASYNC is a genuine observation with no cross-hook
+# correlation of any kind.
+# ===========================================================================
+def _v2_child(authority=SUMMARIZER_AUTHORITY):
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    return root, root.delegate("summarizer", authority, task=TASK)
+
+
+def test_v2_allowed_sync_call_records_a_returned_outcome():
+    ledger = Ledger()
+    root, child = _v2_child()
+    crm_query, _ = make_tools(ledger)
+    guarded = GuardedFunctionTool(crm_query, GuardRef(child), "crm.read",
+                                  context_fn=lambda rows: {"rows": rows})
+
+    assert guarded(rows=10) == "read 10 CRM rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_SYNC
+    assert allow["adapter"]["module"] == "attenu_guard.adapters.camel"
+    assert outcome["body_state"] == BodyState.RETURNED
+    assert allow["authorized_params_hash"] == outcome["invoked_params_hash"]
+    assert isinstance(outcome["duration_ms"], int) and outcome["duration_ms"] >= 0
+    assert child.complete()
+
+
+def test_v2_allowed_async_call_records_a_returned_outcome_wrapper_async():
+    ledger = Ledger()
+    root, child = _v2_child()
+    crm_query, _ = make_tools(ledger)
+    guarded = GuardedFunctionTool(crm_query, GuardRef(child), "crm.read",
+                                  context_fn=lambda rows: {"rows": rows})
+
+    assert asyncio.run(guarded.async_call(rows=10)) == "read 10 CRM rows"
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_v2_a_tool_that_raises_records_a_raised_outcome():
+    def boom(rows: int) -> str:
+        """Raises instead of returning.
+
+        Args:
+            rows: n.
+        """
+        raise ValueError("boom")
+
+    root, child = _v2_child()
+    guarded = GuardedFunctionTool(boom, GuardRef(child), "crm.read",
+                                  context_fn=lambda rows: {"rows": rows})
+
+    with pytest.raises(ValueError):
+        guarded(rows=10)
+
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.RAISED
+    assert outcome["error_code"] == "ValueError"
+
+
+def test_v2_denied_call_never_records_an_outcome():
+    ledger = Ledger()
+    root, child = _v2_child()
+    _, crm_export = make_tools(ledger)
+    guarded = GuardedFunctionTool(crm_export, GuardRef(child), "crm.export",
+                                  context_fn=lambda destination: {"egress": "any"})
+
+    with pytest.raises(AuthorityDenied):
+        guarded(destination="https://exfil.example.com")
+
+    assert ledger.effects == []
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] == "allow"] == []
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v1_chain_gets_no_capture_adapter_or_outcome():
+    ledger = Ledger()
+    root = root_guard()  # v1, default
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task=TASK)
+    crm_query, _ = make_tools(ledger)
+    guarded = GuardedFunctionTool(crm_query, GuardRef(child), "crm.read",
+                                  context_fn=lambda rows: {"rows": rows})
+
+    guarded(rows=10)
+
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    assert "capture" not in allow and "adapter" not in allow and "call_id" not in allow
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_v2_async_cancelled_call_records_abandoned_and_still_propagates():
+    async def hangs(rows: int) -> str:
+        """Hangs.
+
+        Args:
+            rows: n.
+        """
+        await asyncio.sleep(3600)
+        return "never"
+
+    root, child = _v2_child()
+    guarded = GuardedFunctionTool(hangs, GuardRef(child), "crm.read",
+                                  context_fn=lambda rows: {"rows": rows})
+
+    async def scenario():
+        task = asyncio.ensure_future(guarded.async_call(rows=10))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    entries = root.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.ABANDONED
+    assert "error_code" not in outcome
+
+
+def test_v2_delegation_never_gets_capture_or_an_outcome():
+    """`GuardedAgentToolkit.mint()` goes through `parent_guard.enforce(...)`, which never
+    returns a Decision/call_id -- there is nothing to bind an outcome to, on any schema
+    version."""
+    ledger = Ledger()
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3 report", schema_version=2)
+    parent, toolkit, _ = build_guarded_parent(ledger, root, POISONED_SCRIPT)
+    parent.step("Prepare the Q3 pipeline report.")
+
+    entries = root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "outcome")
+           and e.get("tool") == "agent_run_subagent"] == []
+
+
+def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
+    """Codex review (all six earlier adapters, round 2, finding 4): _freeze() must never call
+    ANY copy protocol (copy.deepcopy included) on a container -- a class free to implement
+    __deepcopy__ to return `self` would otherwise make a "snapshot" alias the live object."""
+    from attenu_guard.adapters.camel import _snapshot_params
+
+    class AliasingList(list):
+        def __deepcopy__(self, memo):
+            return self
+
+    live_kwargs = {"x": AliasingList([1])}
+    snapshot = _snapshot_params((), live_kwargs)
+
+    assert snapshot["kwargs"]["x"] is not live_kwargs["x"], "the snapshot aliased the live container"
+    live_kwargs["x"].append(2)
+    assert snapshot["kwargs"]["x"] == [1], "mutating the live container changed the snapshot"
