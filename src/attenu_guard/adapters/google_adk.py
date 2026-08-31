@@ -104,9 +104,59 @@ callback runs, then EITHER its return value stands in for the result and
 `after_tool_callback` never runs at all for this call). The two hooks correlate their
 pending state with `_authorize`'s `check()` by `id(tool_context)`: ADK constructs one
 `ToolContext` per function call and threads the SAME object through
-before/after/error for it, so the id is a safe, call-scoped key. Unlike CrewAI and the
-OpenAI Agents SDK, ADK does not swallow a tool's exception before this plugin's hook
-runs, so `BodyState.RAISED` is genuinely reachable here — no honesty caveat needed.
+before/after/error for it, so the id is a safe, call-scoped key (the pending entry
+holds a strong reference to `tool_context` for its whole span, so its `id()` cannot be
+reused by a different, concurrently-live object while the entry exists); insertion is
+`.setdefault`-style, so a colliding, still-unconsumed key is left alone rather than
+overwritten. Unlike CrewAI and the OpenAI Agents SDK, ADK does not swallow a tool's
+exception into a returned/formatted result before this plugin's error hook runs, so
+`BodyState.RAISED` is genuinely reachable here for calls whose error hook DOES fire —
+see the honesty notes below for when it does not.
+
+`BodyState.DEFERRED`: `after_tool_callback` checks `tool.is_long_running` /
+`tool._defers_response` (the SAME flags ADK's own `functions.py` checks, later, to
+decide whether `function_response` is the tool's real, final output or a placeholder
+whose true result arrives later via session injection) BEFORE deciding `RETURNED` vs
+`DEFERRED` — reporting a long-running/deferred tool's `after_tool_callback` firing as
+`RETURNED` would misrepresent it as a completed call.
+
+HONESTY NOTES — ADK's `before`/`after`/error callbacks are NOT guaranteed to be this
+plugin's terminal observer for every call; each of the following is a genuine,
+structural gap in the documented plugin/callback surface, not a bug this file can code
+around without going outside that surface:
+
+  * A CANONICAL `before_tool_callback` (an AGENT-level callback the caller registers,
+    e.g. `LlmAgent(before_tool_callback=...)` — a *different* mechanism from THIS
+    plugin, which is registered at the `App`/`Runner` level) can itself supply a
+    response and make ADK skip the tool body entirely (`functions.py`, Step 2 before
+    Step 3) — yet `after_tool_callback` (Step 4) STILL runs, with that substituted
+    response, and this plugin has no signal in `after_tool_callback` to tell "the tool
+    genuinely ran" apart from "a canonical before-callback supplied this instead". If a
+    caller's own agents use `before_tool_callback=`, a call this plugin authorized may
+    be recorded `RETURNED` for a body that never executed.
+  * `asyncio.CancelledError` is a `BaseException`; ADK's own `except Exception` around
+    the tool call (`functions.py`) does not catch it, so NEITHER `on_tool_error_callback`
+    NOR `after_tool_callback` ever fires for a cancelled call — this plugin cannot
+    record `BodyState.ABANDONED` for it (there is no hook to record it FROM). The
+    call's outcome is simply left unrecorded, which is the honest reflection of "this
+    plugin was never told what happened", not a fabricated result.
+  * Plugin dispatch (`PluginManager._run_callbacks`) stops at the FIRST plugin whose
+    callback returns non-`None`. This plugin's own `after_tool_callback`/
+    `on_tool_error_callback` always return `None` (they only observe, never override),
+    so they never block ANOTHER plugin's callback from running — but the reverse is not
+    true: if a DIFFERENT plugin is registered BEFORE this one and its
+    `after_tool_callback`/`on_tool_error_callback` returns non-`None`, THIS plugin's own
+    callback never runs for that call, and its pending outcome is never closed out.
+    Register `DelegationGuardPlugin` FIRST (or alone) for these callbacks to be
+    guaranteed to run.
+
+The second and third gaps only ever leave a call's outcome unrecorded -- the honest
+"unobserved" the execution-binding spec calls for when a path cannot guarantee
+observation. The first (a canonical before-callback substituting the response) is the
+one gap this plugin cannot even detect, let alone avoid recording wrongly: ADK gives
+`after_tool_callback` no signal distinguishing a substituted response from a genuine
+one. A caller whose agents ALSO use `before_tool_callback=` should treat this plugin's
+execution binding as informative, not load-bearing, for those specific tools.
 """
 from __future__ import annotations
 
@@ -136,13 +186,44 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
+def _freeze(value: Any) -> Any:
+    """A genuinely immutable, fully decoupled rebuild of `value` -- never shares a mutable
+    container with the live object graph, so a later in-place mutation (by the tool body, or by
+    ADK itself) cannot change what was already committed. `copy.deepcopy` alone is not enough:
+    on ANY failure deep in a nested structure, a naive `except: return dict(...)` fallback keeps
+    sharing whatever nested dicts/lists deepcopy did not reach. This never falls back to a shared
+    reference: dicts/lists are always rebuilt fresh (recursively), and a leaf that cannot itself
+    be deep-copied is replaced by its `repr()` -- a brand-new, immutable string -- rather than
+    shared as-is."""
+    try:
+        return copy.deepcopy(value)
+    except Exception:
+        pass
+    if isinstance(value, Mapping):
+        return {k: _freeze(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_freeze(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        return repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+
+
 def _snapshot_params(tool_args: Mapping[str, Any]) -> Any:
     """An immutable snapshot of the tool call's arguments, taken at authorization time -- BEFORE
     ADK invokes the tool body -- and reused as both `authorized_params` and `invoked_params`."""
-    try:
-        return copy.deepcopy(dict(tool_args))
-    except Exception:
-        return dict(tool_args)
+    return _freeze(dict(tool_args))
+
+
+def _body_state_for(tool: BaseTool, result: Any) -> str:
+    """`DEFERRED` when `tool` is declared long-running or self-deferring (the SAME flags ADK's
+    own `functions.py` checks to decide whether `result` is the tool's real, final output --
+    see the module docstring's "BodyState.DEFERRED"), `RETURNED` otherwise."""
+    if getattr(tool, "is_long_running", False) or getattr(tool, "_defers_response", False):
+        return BodyState.DEFERRED
+    return BodyState.RETURNED
 
 
 @dataclass
@@ -352,7 +433,7 @@ class DelegationGuardPlugin(BasePlugin):
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
         result: dict[str, Any],
     ) -> Optional[dict[str, Any]]:
-        self._close_outcome(tool_context, BodyState.RETURNED)
+        self._close_outcome(tool_context, _body_state_for(tool, result))
         return None  # never override the result -- purely observational
 
     async def on_tool_error_callback(
@@ -437,10 +518,13 @@ class DelegationGuardPlugin(BasePlugin):
                 # Nothing here calls the tool body -- ADK does, elsewhere -- so the outcome is
                 # closed out later by after_tool_callback/on_tool_error_callback, whichever ADK
                 # actually runs for this call. See the module docstring's "EXECUTION BINDING".
-                self._pending_outcomes[id(tool_context)] = _PendingOutcome(
+                # .setdefault, not assignment: a colliding, still-unconsumed key (should not
+                # happen -- id(tool_context) is pinned alive by this dict's own reference -- but
+                # is not this plugin's to assume) is left alone rather than silently overwritten.
+                self._pending_outcomes.setdefault(id(tool_context), _PendingOutcome(
                     guard=guard, call_id=decision.call_id, snapshot=snapshot,
                     started_at=time.monotonic(),
-                )
+                ))
             return None
         if self._raise:
             raise AuthorityDenied(decision)

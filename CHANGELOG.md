@@ -32,6 +32,19 @@ All notable changes to attenu-guard are documented here. The format follows
   rule out. Replaced with `_freeze()`/`_snapshot_params()`: dicts and lists are always rebuilt
   fresh, recursively; a leaf that cannot itself be deep-copied is replaced by its `repr()` (a new,
   immutable string) rather than shared as-is. Never raises, never shares a mutable container.
+- `adapters.google_adk`: `after_tool_callback` now checks `tool.is_long_running`/
+  `tool._defers_response` -- the SAME flags ADK's own `functions.py` checks -- before deciding
+  `RETURNED` vs `BodyState.DEFERRED`; a long-running/deferring tool's placeholder response was
+  previously always recorded `RETURNED`. Pending-outcome insertion is now `.setdefault`-style
+  (never silently overwrites a colliding, still-unconsumed key). Documents (module docstring,
+  "HONESTY NOTES") three genuine, structural gaps in ADK's plugin/callback surface that this file
+  cannot close without going outside documented hooks: a caller's own AGENT-level
+  `before_tool_callback=` substituting a response (undetectable from `after_tool_callback`, and
+  the one gap that CAN record a wrong `RETURNED` rather than merely leaving a call unobserved);
+  `asyncio.CancelledError` (a `BaseException`, so neither the error nor after callback ever fires
+  -- there is no hook to record `ABANDONED` from); and `PluginManager`'s stop-at-first-non-None
+  dispatch, where an earlier-registered THIRD-PARTY plugin overriding the result prevents this
+  plugin's own callback -- and so its outcome close-out -- from ever running.
 
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a
@@ -62,11 +75,13 @@ All notable changes to attenu-guard are documented here. The format follows
     `BasePlugin` offers a real error hook (`on_tool_error_callback`) alongside the success one
     (`after_tool_callback`), and does NOT swallow a tool's exception before it runs, so this is
     the one adapter of the six that genuinely observes and reports `BodyState.RAISED` (with
-    `error_code`), no honesty caveat needed. The two hooks correlate their pending state with
-    `_authorize()`'s `check()` via `id(tool_context)` -- ADK threads one `ToolContext` per call
-    through before/after/error uniformly. Applies uniformly to both the tool check and the
+    `error_code`) for calls whose error hook fires. The two hooks correlate their pending state
+    with `_authorize()`'s `check()` via `id(tool_context)` -- ADK threads one `ToolContext` per
+    call through before/after/error uniformly. Applies uniformly to both the tool check and the
     delegation-scope check (`delegation_scope=...`), since both go through `_authorize()` and
-    both are real ADK tool calls with the same before/after/error lifecycle.
+    both are real ADK tool calls with the same before/after/error lifecycle. See the "Fixed"
+    section above for three documented, structural gaps in ADK's own callback surface where
+    this adapter's observation cannot be guaranteed.
   - `adapters.pydantic_ai`: `Capture.WRAPPER_ASYNC` at BOTH hook points -- unlike the framework-post-hook
     adapters above, this one calls the tool body itself and awaits it, like `adapters.langgraph`'s
     reference wiring. `DelegationGuard` authorizes in `before_tool_execute` (unchanged shape on

@@ -35,7 +35,9 @@ from google.adk.runners import Runner  # noqa: E402
 from google.adk.sessions.in_memory_session_service import (  # noqa: E402
     InMemorySessionService,
 )
+from google.adk.plugins.base_plugin import BasePlugin  # noqa: E402
 from google.adk.tools.agent_tool import AgentTool  # noqa: E402
+from google.adk.tools.long_running_tool import LongRunningFunctionTool  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
@@ -879,3 +881,91 @@ def test_v2_denied_tool_call_never_records_an_outcome():
     outcomes = [e for e in entries if e["event"] == "outcome"]
     allow_call_ids = {e["call_id"] for e in entries if e["event"] == "allow"}
     assert outcomes and all(o["call_id"] in allow_call_ids for o in outcomes)
+
+
+# ==========================================================================
+# Codex review (DO NOT MERGE, finding 3, critical): callbacks are not
+# guaranteed terminal observers. These cover the fixable parts (DEFERRED
+# detection, collision-safe correlation) and pin the documented, accepted
+# residual gap (plugin dispatch short-circuit) as "leaves it unrecorded",
+# never as "records something wrong".
+# ==========================================================================
+def test_v2_long_running_tool_records_a_deferred_outcome():
+    """after_tool_callback must check tool.is_long_running BEFORE deciding RETURNED --
+    its immediate return is a placeholder, not the tool's real, final output."""
+    async def scenario():
+        def crm_query_long(rows: int) -> dict:
+            return {"rows_returned": rows}
+
+        long_tool = LongRunningFunctionTool(crm_query_long)
+        runner, sessions, root_guard, plugin, calls = _build(
+            {
+                "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+                "summarizer": [_fc("crm_query_long", rows=10), _text("done")],
+            },
+            tools=[long_tool],
+            plugin_kwargs={"tools": {
+                "crm_query_long": dg_adk.ToolAuthority("crm.read", lambda a: {"rows": a.get("rows", 0)}),
+            }},
+            issue_kwargs={"schema_version": 2},
+        )
+        session = await sessions.create_session(app_name="dg-adk-test", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard
+
+    root_guard = asyncio.run(scenario())
+    entries = root_guard.audit_log().entries
+    outcomes = [e for e in entries if e["event"] == "outcome"]
+    assert outcomes, entries
+    assert outcomes[-1]["body_state"] == BodyState.DEFERRED
+
+
+class _OverridingPlugin(BasePlugin):
+    """A THIRD-PARTY plugin (not attenu-guard's own) whose after_tool_callback always
+    overrides the result -- simulating another plugin registered ahead of
+    DelegationGuardPlugin in the App's plugin list."""
+
+    def __init__(self):
+        super().__init__(name="overrider")
+
+    async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
+        return {"overridden_by": "someone_else"}
+
+
+def test_v2_a_plugin_registered_before_us_that_overrides_leaves_the_outcome_unrecorded():
+    """PluginManager._run_callbacks stops at the first plugin whose callback returns
+    non-None -- if an EARLIER-registered plugin's after_tool_callback overrides the
+    result, DelegationGuardPlugin's own after_tool_callback never runs for that call.
+    This must never fabricate an outcome; it must simply leave the call's outcome
+    unrecorded (the honest "unobserved")."""
+    async def scenario():
+        calls: list = []
+        model = demo.ScriptedLlm(script={
+            "orchestrator": [_fc("transfer_to_agent", agent_name="summarizer")],
+            "summarizer": [_fc("crm_query", rows=10), _text("done")],
+        })
+        summarizer = LlmAgent(name="summarizer", model=model, description="S",
+                              tools=[demo.make_crm_query(calls)])
+        orchestrator = LlmAgent(name="orchestrator", model=model, description="O",
+                                sub_agents=[summarizer])
+        root_guard = Guard.issue("orchestrator", ROOT_AUTHORITY, task="root", schema_version=2)
+        plugin = dg_adk.DelegationGuardPlugin(
+            root_guard, root_agent_name="orchestrator",
+            delegations={"summarizer": SUMMARIZER_REQUEST}, tools=demo.TOOL_AUTHORITIES,
+        )
+        overrider = _OverridingPlugin()
+        # overrider registered BEFORE plugin -- its after_tool_callback runs first and
+        # short-circuits PluginManager._run_callbacks before plugin's own ever fires.
+        app = App(name="dg-adk-override", root_agent=orchestrator, plugins=[overrider, plugin])
+        sessions = InMemorySessionService()
+        runner = Runner(app=app, session_service=sessions)
+        session = await sessions.create_session(app_name="dg-adk-override", user_id="u")
+        await _drive(runner, session, "go")
+        return root_guard, calls
+
+    root_guard, calls = asyncio.run(scenario())
+    assert calls  # the body DID run
+    entries = root_guard.audit_log().entries
+    assert any(e["event"] == "allow" and e.get("tool") == "crm_query" for e in entries)
+    # no outcome was fabricated for the call THIS plugin's own after_tool_callback never saw
+    assert [e for e in entries if e["event"] == "outcome"] == []
