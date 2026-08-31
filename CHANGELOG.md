@@ -26,19 +26,35 @@ All notable changes to attenu-guard are documented here. The format follows
   `check()` gains `authorized_params`/`capture`/`adapter` and refuses further calls once the node
   is `complete()`d (`ReasonCode.NODE_FINALIZED`). `Guard.record_outcome(call_id, body_state, ...)`
   binds what a body-owning wrapper observed afterwards — `returned`/`raised`/`abandoned`/`deferred`,
-  with `error_code` required exactly when raised. `complete()` now returns a bool-coercible
-  `CompletionResult` and refuses while calls are pending; `revoke()`/`revoke_agent()` snapshot
-  still-pending call_ids onto the `kill` entry as `pending_at_kill` without clearing them, so a late
-  `record_outcome()` after a kill is still accepted. Arguments are committed via `params_c14n_v1`
-  (`attenu_guard.params`): `SHA-256(raw_salt || JCS(params))`, never the raw value — closing, for
-  this profile only, the one gap the shared JCS canonicalizer leaves open for out-of-range integral
-  floats, without changing that canonicalizer's own behaviour elsewhere. `evidence.verify_bundle`
-  gains `execution_binding`: per-call observed/unobserved/unaccounted, per-node
+  with `error_code` required exactly when raised. On a `schema_version=2` chain, `complete()`
+  returns a bool-coercible `CompletionResult` and refuses while calls are pending; on
+  `schema_version=1` it still returns a plain `bool`, byte-and-type identical to every release
+  before 0.9.0. `revoke()`/`revoke_agent()` snapshot still-pending call_ids onto the `kill` entry
+  as `pending_at_kill` — atomically, under one hold of the chain lock, together with the
+  revocation itself and (in `check()`) with `complete()`'s own check-pending-then-append sequence
+  — without clearing them, so a late `record_outcome()` after a kill is still accepted. Every
+  pre-commit `check()`/`record_outcome()` failure (not only CSPRNG exhaustion) rolls back its
+  meters/bookkeeping. Arguments are committed via `params_c14n_v1` (`attenu_guard.params`):
+  `SHA-256(raw_salt || JCS(params))`, never the raw value — closing, for this profile only, the
+  one gap the shared JCS canonicalizer leaves open for out-of-range integral floats, without
+  changing that canonicalizer's own behaviour elsewhere. `evidence.verify_bundle` gains
+  `execution_binding`: per-call observed/unobserved/unaccounted (an outcome counts as observed
+  only once it is bound correctly — right node, right order), per-node
   finalized/in_progress/revoked_with_pending, an aggregate clean/incomplete/failed, and
-  `params_coverage` as its own axis — `not applicable` for a schema-version-1 bundle. The LangGraph
+  `params_coverage` (computed over every call, not only those with an outcome) as its own axis —
+  `not applicable` for a schema-version-1 bundle. `verify_bundle` also rejects a rootless bundle
+  and accepts an optional independently retained `expected_anchor`/`expected_head`, so a rewritten
+  bundle whose own (self-consistent) anchor cannot be relied on is still caught. The LangGraph
   adapter (`adapters.langgraph`) is the reference wiring: `guard_node`/`DelegatedToolNode` call
-  `record_outcome` on a `schema_version=2` guard, sync and async. Schema
-  `schema/agent-audit.schema.json` documents version 2 alongside the unchanged version 1.
+  `record_outcome` on a `schema_version=2` guard, sync and async, from an immutable
+  pre-invocation argument snapshot (a callable that mutates its own inputs cannot cause a false
+  params mismatch), with generators/futures reported `deferred` and `asyncio.CancelledError`
+  reported `abandoned`. Schema `schema/agent-audit.schema.json` documents version 2 alongside the
+  unchanged version 1; `tests/test_execution_binding.py` runs in CI. A language-neutral
+  `params_c14n_v1` parity vector file (`tests/vectors/params_c14n/params_c14n_v1.json`, consumed
+  by `tests/test_params_c14n_vectors.py`) covers its accepted/rejected numeric boundaries and salt
+  handling — a TypeScript implementation is meant to consume the same file; that implementation
+  itself is not part of this release.
 
 ### Changed
 - Behaviour change: constructing an `AuditLog` (or `Guard.issue`) with a `path`/`audit_path` that

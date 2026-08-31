@@ -1,0 +1,124 @@
+{
+  "algorithm": "params_c14n_v1",
+  "cases": [
+    {
+      "description": "The largest safe integer (2**53-1) \u2014 the last value a binary64 double still represents exactly.",
+      "expect": "hash",
+      "hash_hex": "26e05aa50977c702e1118e07bf95c8de6088495b208b5bb5a38d210603b76901",
+      "name": "safe_integer_boundary_accept",
+      "params": {
+        "n": 9007199254740991
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "One magnitude past the safe boundary \u2014 rejected as unsupported, not silently rounded.",
+      "expect": "unsupported",
+      "name": "one_past_safe_boundary_reject",
+      "params": {
+        "n": 9007199254740992
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "9e15 as a float: below the safe-integer bound, so it is a supported integral float.",
+      "expect": "hash",
+      "hash_hex": "cf42b66eceb109866cfb0ea3dae41a23532d1a89b3cd89a9e6772ebd2c6cdc1e",
+      "name": "nine_e15_accept",
+      "params": {
+        "n": 9000000000000000.0
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "1e16 as a float: an integral value beyond the safe-integer bound. Unlike the general JCS signing surface (audit hashes, wire tokens), which tolerates this (see tests/test_canonical.py's pinned divergence-class vector), params_c14n_v1 does not: a cross-runtime consumer (JSON/JS has no int/float distinction) cannot tell an out-of-range Python int from an out-of-range float once serialized.",
+      "expect": "unsupported",
+      "name": "one_e16_reject",
+      "params": {
+        "n": 1e+16
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "The negative safe-integer boundary.",
+      "expect": "hash",
+      "hash_hex": "a99e746643ccf0ed3eba59dc4186c897fff3fd27135f39580e6f08b4b91387ea",
+      "name": "negative_integer_boundary_accept",
+      "params": {
+        "n": -9007199254740991
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "One magnitude past the negative safe boundary.",
+      "expect": "unsupported",
+      "name": "negative_one_past_boundary_reject",
+      "params": {
+        "n": -9007199254740992
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "Positive zero.",
+      "expect": "hash",
+      "hash_hex": "345045309ea699711d945e903a6e9f4b8116f332ff36603ab2a8a7896e1c84a4",
+      "name": "positive_zero_accept",
+      "params": {
+        "n": 0.0
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "Negative zero \u2014 MUST hash identically to positive_zero_accept (same params_c14n_v1 input under RFC 8785 JCS, which renders both as \"0\").",
+      "expect": "hash",
+      "hash_hex": "345045309ea699711d945e903a6e9f4b8116f332ff36603ab2a8a7896e1c84a4",
+      "name": "negative_zero_accept",
+      "params": {
+        "n": -0.0
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "A representative structured tool-call argument object: nested objects, an array, a string, a bool, and null.",
+      "expect": "hash",
+      "hash_hex": "80551bd11869e4defb0cd3c692cf744f00644c82b2bc1e88a02e74db1df9af9d",
+      "name": "ordinary_nested_object_accept",
+      "params": {
+        "filters": {
+          "active": true,
+          "region": null
+        },
+        "limit": 50,
+        "query": "customers where plan = 'pro'",
+        "tags": [
+          "billing",
+          "renewal"
+        ]
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "Same params as salt_b_accept, salt A -- the two MUST produce DIFFERENT hash_hex values (the salt is what prevents linking argument equality across chains).",
+      "expect": "hash",
+      "hash_hex": "13dadfa3fec29c5d7a425fe9e75cc639918100b30ec4af2a0662892f43c7edef",
+      "name": "salt_a_accept",
+      "params": {
+        "rows": 100,
+        "tool": "crm.read"
+      },
+      "salt_hex": "00112233445566770011223344556677"
+    },
+    {
+      "description": "Same params as salt_a_accept, salt B -- see salt_a_accept.",
+      "expect": "hash",
+      "hash_hex": "ebb5a3468a77be328eb6859b8c7d9e7025077144bbe24e371d1f3ac49a2a47d7",
+      "name": "salt_b_accept",
+      "params": {
+        "rows": 100,
+        "tool": "crm.read"
+      },
+      "salt_hex": "ffeeddccbbaa9988ffeeddccbbaa9988"
+    }
+  ],
+  "description": "Language-neutral parity vectors for params_c14n_v1 (docs/execution-binding spec section 4): SHA-256(raw_salt || UTF8(JCS(params))). salt_hex is 32 lowercase hex characters (16 raw bytes). For each case: decode salt_hex, canonicalize params per RFC 8785 JCS, and either compute the SHA-256 commitment (expect: \"hash\", compare to hash_hex) or confirm params is outside the params_c14n_v1 domain (expect: \"unsupported\"). Malformed-salt handling (wrong length) is exercised separately, in tests/test_params_c14n_vectors.py, since it is a precondition failure, not a params_c14n_v1 case."
+}
