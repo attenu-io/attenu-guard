@@ -927,3 +927,41 @@ def test_v2_strict_mode_when_guard_is_outer_and_a_sibling_retries_the_real_body(
     outcomes = [e for e in entries if e["event"] == "outcome"]
     assert len(outcomes) == 1, "exactly one honest record, not two, not a duplicate error"
     assert outcomes[0]["body_state"] == BodyState.RETURNED
+
+
+def test_agent_middleware_first_listed_is_outermost_end_to_end():
+    """Codex re-pass (low): the module docstring's earlier "Agent-level" ordering claim was
+    tested against `FunctionTool.register()`'s own `_wrap_middleware` loop IN ISOLATION, on a
+    hand-built list, never through `agent.py`'s own turn setup at all -- which REVERSES
+    `Agent(middleware=[...])`'s user-facing list before it ever reaches `register()`
+    (`~agent.py:1362-1366`). This test drives a REAL `Agent`, a real `TestConfig`-scripted
+    tool call, and two real middleware CLASSES (the factory shape `Agent(middleware=[...])`
+    actually expects -- `BaseMiddleware.__init__(self, event, context)`), rather than the
+    registration primitive alone, to settle it: the FIRST-listed middleware must observe
+    entry/exit OUTERMOST around the second-listed and the tool body."""
+    from ag2.middleware import BaseMiddleware
+
+    order = []
+
+    def make_mw(label):
+        class MW(BaseMiddleware):
+            async def on_tool_execution(self, call_next, event, context):
+                order.append(f"{label}-enter")
+                result = await call_next(event, context)
+                order.append(f"{label}-exit")
+                return result
+        return MW
+
+    @tool
+    def crm_query(rows: int) -> str:
+        order.append("body")
+        return f"read {rows} rows"
+
+    config = TestConfig(_call("crm_query", rows=10), "done")
+    agent = Agent("orchestrator", "test", config=config, tools=[crm_query],
+                  middleware=[make_mw("A"), make_mw("B")])   # A listed FIRST, B SECOND
+
+    asyncio.run(agent.ask("go"))
+
+    assert order == ["A-enter", "B-enter", "body", "B-exit", "A-exit"], \
+        "the FIRST-listed middleware (A) must be OUTERMOST end-to-end through a real Agent"

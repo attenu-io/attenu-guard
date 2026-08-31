@@ -533,7 +533,7 @@ def test_subagent_stop_revokes_by_default_and_can_be_opted_out_for_resume():
 V2_SUMMARIZER_ID = "agent_v2_summarizer_1"
 
 
-def _v2_registry(*, strict: bool):
+def _v2_registry(*, strict: bool, max_recent_verdicts: int = None):
     """A v2 mirror of demo.build_registry()'s shape: the summarizer holds
     crm.read only (no crm.export), so a denial is genuine, not contrived."""
     root = Guard.issue(
@@ -541,6 +541,9 @@ def _v2_registry(*, strict: bool):
         Authority(scopes={"crm.*", "mail.send", "agent.delegate.*"},
                   ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
         task="root", max_depth=3, schema_version=2)
+    kwargs = {}
+    if max_recent_verdicts is not None:
+        kwargs["max_recent_verdicts"] = max_recent_verdicts
     reg = dg_cs.DelegationGuardRegistry(
         root=root,
         agent_grants={
@@ -555,7 +558,7 @@ def _v2_registry(*, strict: bool):
             "mcp__crm__crm_export": dg_cs.ToolPolicy(
                 "crm.export", lambda i: {"egress": "any", "destination": i.get("destination", "")}),
         },
-        strict_single_hook=strict)
+        strict_single_hook=strict, **kwargs)
     run(reg.subagent_start(
         {"hook_event_name": "SubagentStart", "session_id": "s1", "transcript_path": "",
          "cwd": ".", "agent_id": V2_SUMMARIZER_ID, "agent_type": "summarizer"},
@@ -862,3 +865,67 @@ def test_v2_strict_authorize_fails_closed_on_a_duplicate_live_correlation_key():
     entries = reg.root.audit_log().entries
     assert len([e for e in entries if e["event"] == "allow"]) == 1
     assert [e for e in entries if e["event"] == "deny"] == []
+
+
+# ==========================================================================
+# Codex re-pass on baa695a (medium): the _recent_verdicts cache grew without
+# bound -- every PreToolUse with a tool_use_id inserted, only can_use_tool
+# removed, and pinned 0.2.139's can_use_tool fires ONLY on the "ask" path
+# (Codex's own repro: 100 non-ask calls -> 100 resident verdicts).
+# ==========================================================================
+def test_v2_recent_verdicts_cache_stays_bounded_under_sustained_non_ask_traffic():
+    """Verified with a small, explicit cap (max_recent_verdicts=10) rather than the
+    production default (2048) so the test is fast and deterministic: many more calls
+    than the cap must never grow the cache past it, and every eviction is counted, not
+    silent."""
+    reg = _v2_registry(strict=False, max_recent_verdicts=10)
+    for i in range(50):
+        v2_pre(reg, "mcp__crm__crm_query", {"rows": 1}, f"toolu_{i}")
+
+    assert len(reg._recent_verdicts) == 10
+    assert reg.recent_verdicts_evicted == 40
+
+
+def test_v2_can_use_tool_fails_closed_on_an_evicted_verdict():
+    """An evicted entry must be indistinguishable from one never cached -- eviction must
+    NEVER silently allow. The first call's own verdict is pushed out by later ones under
+    a small cap; can_use_tool replaying it is denied, the same fail-closed path as an
+    ordinary replay-miss (test_can_use_tool_fails_closed_when_no_pretooluse_verdict_was_
+    cached above) -- verified this is genuinely eviction, not a pre-existing gap, by also
+    confirming a SURVIVING entry still replays correctly."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+    from claude_agent_sdk.types import ToolPermissionContext
+
+    reg = _v2_registry(strict=False, max_recent_verdicts=2)
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 1}, "toolu_first")   # will be evicted
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 2}, "toolu_second")
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 3}, "toolu_third")   # pushes toolu_first out
+
+    assert reg.recent_verdicts_evicted == 1
+    assert (V2_SUMMARIZER_ID, "toolu_first") not in reg._recent_verdicts
+
+    ctx1 = ToolPermissionContext(tool_use_id="toolu_first", agent_id=V2_SUMMARIZER_ID)
+    res1 = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 1}, ctx1))
+    assert isinstance(res1, PermissionResultDeny)
+    assert "no PreToolUse verdict to replay" in res1.message
+
+    # A surviving (non-evicted) entry still replays correctly -- proves the cache itself
+    # still works, this is specifically about the evicted one.
+    ctx3 = ToolPermissionContext(tool_use_id="toolu_third", agent_id=V2_SUMMARIZER_ID)
+    res3 = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 3}, ctx3))
+    assert isinstance(res3, PermissionResultAllow)
+
+
+def test_v2_strict_post_tool_use_cleans_up_the_recent_verdicts_entry_too():
+    """A courtesy cleanup, strict mode only (the only mode PostToolUse is ever registered
+    for): a call reaching PostToolUse proves the tool body already ran, which can only
+    happen after can_use_tool (a pre-execution gate) would already have fired for it, if
+    it was ever going to -- so any _recent_verdicts entry still resident for that exact
+    call is provably stale. Confirms it is actually popped, not merely left to expire via
+    the size bound."""
+    reg = _v2_registry(strict=True)
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 10}, "toolu_cleanup")
+    assert (V2_SUMMARIZER_ID, "toolu_cleanup") in reg._recent_verdicts
+
+    v2_post(reg, "toolu_cleanup", tool_response={"content": [{"type": "text", "text": "ok"}]})
+    assert (V2_SUMMARIZER_ID, "toolu_cleanup") not in reg._recent_verdicts

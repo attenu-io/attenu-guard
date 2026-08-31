@@ -161,6 +161,26 @@ against pinned 0.2.139 before being fixed, in order of how they compound:
   ``can_use_tool`` -- a misconfiguration this module's USAGE section never
   recommends), it fails closed rather than silently allowing or resurrecting
   an independent decision path.
+  ROUND 2 RE-PASS CORRECTION (medium): that verdict cache (``_recent_verdicts``) grew
+  without bound -- every ``PreToolUse`` with a ``tool_use_id`` inserts, only
+  ``can_use_tool`` removes, and pinned 0.2.139's own ``can_use_tool`` docstring says it
+  fires ONLY for the "ask" permission path -- so a tool already covered by
+  ``allowed_tools``/an allow rule leaves its verdict resident forever (Codex repro: 100
+  non-ask calls -> 100 resident entries). Not an authorization gap (a call reaching
+  ``can_use_tool`` already passed its own ``PreToolUse`` check; a collision under memory
+  pressure can only cause a safe FALSE denial, never an unauthorized allow) but genuine
+  unbounded resource growth over a long session. Fixed: ``_recent_verdicts`` is now an
+  ``OrderedDict`` bounded by ``max_recent_verdicts`` (constructor parameter, default
+  2048, mirroring ``SpoolSink.max_bytes``'s own bounded-with-a-counted-drop pattern in
+  ``sinks.py``) -- the OLDEST entry is evicted once the cache would exceed the cap,
+  counted in ``self.recent_verdicts_evicted``, never silently. Replay-miss fail-closed is
+  UNCHANGED and load-bearing: an evicted entry is indistinguishable from one never
+  cached, so ``can_use_tool`` denies it the same way. ``post_tool_use``/
+  ``post_tool_use_failure`` also pop the entry as a courtesy cleanup when they fire (proof
+  the call already ran, so any lingering verdict for it is provably stale) -- this
+  reduces eviction pressure in strict mode specifically (the only mode those hooks are
+  ever registered for), but does NOT replace the bound, since neither post hook firing at
+  all is guaranteed.
 * **Finding 4 -- the correlation key.** ``ToolPermissionContext.tool_use_id``'s
   own docstring guarantees uniqueness only "within the assistant message" --
   NOT globally, so concurrent messages or concurrently-running subagents CAN
@@ -218,6 +238,7 @@ from __future__ import annotations
 
 import fnmatch
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, MutableMapping, Optional, Tuple
 
@@ -344,6 +365,7 @@ class DelegationGuardRegistry:
         delegation_tools: tuple[str, ...] = DELEGATION_TOOLS,
         revoke_on_stop: bool = True,
         strict_single_hook: bool = False,
+        max_recent_verdicts: int = 2048,
     ) -> None:
         self.root = root
         self.agent_grants = dict(agent_grants)
@@ -374,9 +396,26 @@ class DelegationGuardRegistry:
         # `ToolPermissionContext` actually exposes to can_use_tool (it carries no session_id).
         # Last-writer-wins, popped on read -- see EXECUTION BINDING for why this is NOT given
         # the same fail-closed-on-duplicate-key treatment as `_pending_outcomes` below.
-        self._recent_verdicts: MutableMapping[
-            Tuple[Optional[str], str], _RecentVerdict
-        ] = {}
+        #
+        # Round 2 re-pass correction (Codex, medium): every PreToolUse with a tool_use_id
+        # inserts here; only can_use_tool removes an entry, and pinned 0.2.139 invokes
+        # can_use_tool ONLY for the "ask" permission path (`ClaudeAgentOptions.can_use_tool`'s
+        # own docstring, `types.py:2110-2124`) -- an unclaimed entry is the COMMON case for
+        # any tool covered by `allowed_tools`/an allow rule, not a rare one, so this dict grows
+        # without bound over a long session (Codex repro: 100 non-ask calls -> 100 resident
+        # entries). Bounded by `max_recent_verdicts` (default 2048, mirroring
+        # `SpoolSink.max_bytes`'s own bounded-with-a-counted-drop pattern, `sinks.py`): an
+        # `OrderedDict`, insertion order = recency (a write-once/read-once cache has no
+        # separate "touch" step, so oldest-inserted IS least-recently-used here), evicting
+        # the OLDEST entry once the cache would exceed the cap -- `self.recent_verdicts_
+        # evicted` counts it, never silently. Eviction does NOT weaken the fail-closed
+        # replay-miss behavior in `can_use_tool`: an evicted entry is indistinguishable from
+        # one that was never cached, so a `can_use_tool` call arriving after its own verdict
+        # was evicted is denied (the SAME safe-false-denial this package already accepted for
+        # the ordinary replay-miss case), never silently allowed.
+        self._recent_verdicts: "OrderedDict[Tuple[Optional[str], str], _RecentVerdict]" = OrderedDict()
+        self.max_recent_verdicts = max(1, max_recent_verdicts)
+        self.recent_verdicts_evicted = 0
         self.denials: list[dict] = []   # everything this registry blocked, for reporting
 
     # ---- lookup ---------------------------------------------------------
@@ -585,6 +624,19 @@ class DelegationGuardRegistry:
         self.denials.append({"tool": tool_name, "agent_id": agent_id, "reason": reason})
         return False, reason
 
+    def _cache_verdict(self, key: Tuple[Optional[str], str], verdict: "_RecentVerdict") -> None:
+        """Insert into `_recent_verdicts`, bounded by `max_recent_verdicts` (see the
+        constructor's own docstring/comment for why this cache -- unlike
+        `_pending_outcomes` -- has no reliable release signal and must be size-bounded
+        rather than correctness-bounded). A key already present is re-inserted at the end
+        (recency), matching `OrderedDict.move_to_end`'s own semantics; once the cache would
+        exceed the cap, the OLDEST entry is evicted and counted, never silently."""
+        self._recent_verdicts.pop(key, None)   # re-insert at the end if already present
+        self._recent_verdicts[key] = verdict
+        while len(self._recent_verdicts) > self.max_recent_verdicts:
+            self._recent_verdicts.popitem(last=False)
+            self.recent_verdicts_evicted += 1
+
     async def pre_tool_use(self, input_data: Mapping[str, Any],
                            tool_use_id: Optional[str],
                            context: Mapping[str, Any]) -> dict:
@@ -622,8 +674,8 @@ class DelegationGuardRegistry:
         # can_use_tool -- see _RecentVerdict's own docstring for why this is deliberately NOT
         # given the same fail-closed-on-duplicate-key treatment as _pending_outcomes above.
         if tool_use_id:
-            self._recent_verdicts[(agent_id, tool_use_id)] = _RecentVerdict(
-                input_data.get("session_id"), allowed, reason)
+            self._cache_verdict((agent_id, tool_use_id),
+                                _RecentVerdict(input_data.get("session_id"), allowed, reason))
         if allowed:
             return {}
         return {
@@ -644,10 +696,21 @@ class DelegationGuardRegistry:
         Only registered (``hooks()``) when ``strict_single_hook=True``. A
         ``(session_id, agent_id, tool_use_id)`` key with no matching pending entry
         (default mode, a denied call, or ``can_use_tool``-only path) is a silent no-op.
+
+        Bonus cleanup (only reached in strict mode, since that is the only mode this hook
+        is ever registered for): a call reaching `PostToolUse` at all proves the tool body
+        already ran, which can only happen AFTER `can_use_tool` (a pre-execution gate) would
+        have already fired for it, if it was ever going to -- so any `_recent_verdicts` entry
+        still resident for this exact `(agent_id, tool_use_id)` is provably stale. Popping it
+        here is a courtesy that reduces eviction pressure on OTHER entries; it does not
+        replace `max_recent_verdicts`'s own bound, since `PostToolUse` firing at all is not
+        guaranteed (the module docstring's own honesty notes already cover that).
         """
         if input_data.get("hook_event_name") != "PostToolUse" or not tool_use_id:
             return {}
-        key = (input_data.get("session_id"), input_data.get("agent_id"), tool_use_id)
+        agent_id = input_data.get("agent_id")
+        self._recent_verdicts.pop((agent_id, tool_use_id), None)
+        key = (input_data.get("session_id"), agent_id, tool_use_id)
         pending = self._pending_outcomes.pop(key, None)
         if pending is None:
             return {}
@@ -662,11 +725,13 @@ class DelegationGuardRegistry:
         """``PostToolUseFailure`` hook — closes a pending outcome as
         ``RAISED`` (with the CLI's own error string as ``error_code``) or, if
         ``is_interrupt`` is set, as ``ABANDONED`` (no ``error_code``, per
-        ``Guard.record_outcome``'s contract). Same registration gate as
-        ``post_tool_use``."""
+        ``Guard.record_outcome``'s contract). Same registration gate -- and the same
+        `_recent_verdicts` courtesy cleanup, for the same reason -- as ``post_tool_use``."""
         if input_data.get("hook_event_name") != "PostToolUseFailure" or not tool_use_id:
             return {}
-        key = (input_data.get("session_id"), input_data.get("agent_id"), tool_use_id)
+        agent_id = input_data.get("agent_id")
+        self._recent_verdicts.pop((agent_id, tool_use_id), None)
+        key = (input_data.get("session_id"), agent_id, tool_use_id)
         pending = self._pending_outcomes.pop(key, None)
         if pending is None:
             return {}

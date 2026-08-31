@@ -405,6 +405,22 @@ All notable changes to attenu-guard are documented here. The format follows
     tool whose `forward()` is `async def`, driven the same way as the generator test; asserts
     the returned value is a live, un-awaited coroutine, the tool's own side effect has NOT
     happened yet, and the recorded `body_state` is `DEFERRED`.
+  - **Round 4 correction (Codex re-pass on the batch):** `isawaitable()` (Round 3, above)
+    covers coroutines and `asyncio.Future` (which implements `__await__`) but deliberately
+    NOT `concurrent.futures.Future` -- a thread-pool future a sync `forward()` could hand
+    back after merely SUBMITTING work, without waiting for it. Verified directly before
+    writing the fix: `inspect.isawaitable(concurrent.futures.Future())` is `False` --
+    confirming the gap was real, not assumed. Added an explicit
+    `isinstance(result, (asyncio.Future, concurrent.futures.Future))` check alongside
+    `isawaitable()` (the `asyncio.Future` half is redundant with `isawaitable()` but kept
+    for parity with every other adapter's own "fuller" `_is_deferred_result()` form).
+    `_is_deferred_result()` now covers the complete lazy-result family this package
+    checks anywhere: generators, async generators, awaitables (coroutines included), and
+    both Future families. Two tests added:
+    `test_v2_a_tool_returning_an_asyncio_future_records_a_deferred_outcome` and
+    `test_v2_a_tool_returning_a_concurrent_futures_future_records_a_deferred_outcome` --
+    the latter asserts `not inspect.isawaitable(result)` first, so the test is only
+    meaningful if `isawaitable()` genuinely misses the type it is meant to catch.
 - Execution binding wired into `adapters.strands` (AWS Strands Agents), OPT-IN via
   `DelegationGuard(..., strict_single_hook=True)`: this adapter never calls the tool body
   itself, but pinned strands-agents 1.52.x's `AfterToolCallEvent` is an unusually good hook
@@ -562,13 +578,22 @@ All notable changes to attenu-guard are documented here. The format follows
     dispatches `A-enter, B-enter, body, B-exit, A-exit`). The tool-level claim (reversed, so
     the LAST-listed hook ends up innermost, via `FunctionTool.with_middleware(...)` /
     `Toolkit(middleware=[...])`) was independently re-verified and is correct as written --
-    only the agent-level ordering direction was wrong. Safety/tests are unaffected: the
-    residual behaviors themselves (a false `RETURNED`, an under-reported retry, safety when
-    inner) are properties of WHICH PHYSICAL POSITION in the composed chain a hook occupies,
-    not of how a caller's list order maps to that position, and the existing tests construct
-    the composed chain directly via `_wrap_middleware` rather than asserting anything about
-    `Agent(middleware=[...])`'s own list-order-to-position mapping -- only the module
-    docstring's and this CHANGELOG entry's PROSE needed correcting, no test or code change.
+    only the agent-level ordering direction was wrong. Safety is unaffected: the residual
+    behaviors themselves (a false `RETURNED`, an under-reported retry, safety when inner)
+    are properties of WHICH PHYSICAL POSITION in the composed chain a hook occupies, not of
+    how a caller's list order maps to that position, and the existing finding-1 tests
+    construct the composed chain directly via `_wrap_middleware` rather than asserting
+    anything about `Agent(middleware=[...])`'s own list-order-to-position mapping -- so no
+    finding-1 test or code-logic change was needed, only the module docstring's and this
+    CHANGELOG entry's prose.
+  - **Round 4 (Codex re-pass, low):** Codex required the end-to-end ordering claim itself be
+    committed as a test, not asserted in prose alone against a probe run once and discarded.
+    Added `test_agent_middleware_first_listed_is_outermost_end_to_end` in
+    `tests/integrations/test_ag2.py`: a real `Agent`, a real `TestConfig`-scripted tool call,
+    and two real `BaseMiddleware` subclasses (the factory shape `Agent(middleware=[...])`
+    actually expects) recording their own entry/exit order -- asserts
+    `["A-enter", "B-enter", "body", "B-exit", "A-exit"]` for `middleware=[A, B]`, turning the
+    exact probe that produced the Round 3 correction into a permanent regression test.
 - Execution binding wired into `adapters.agent_framework` (Microsoft Agent Framework):
   `Capture.WRAPPER_ASYNC` from `DelegationGuard.process`, which awaits `call_next()` itself.
   `_freeze()` snapshot of the tool call's arguments, taken at authorization time before
@@ -678,7 +703,33 @@ All notable changes to attenu-guard are documented here. The format follows
     `can_use_tool` now only ever REPLAYS that cached verdict and never calls `authorize()`
     itself again, in any mode; a replay-miss (no `hooks=` wired alongside `can_use_tool`, a
     misconfiguration this module's own USAGE section never recommends) fails closed rather
-    than silently allowing or resurrecting an independent decision path. **Finding 4:**
+    than silently allowing or resurrecting an independent decision path.
+    - **Round-2-re-pass correction (Codex, medium):** that verdict cache
+      (`_recent_verdicts`) grew without bound -- every `PreToolUse` with a `tool_use_id`
+      inserts, only `can_use_tool` removes, and pinned 0.2.139's own `can_use_tool`
+      docstring says it fires ONLY for the "ask" permission path, so an unclaimed entry is
+      the COMMON case for any tool covered by `allowed_tools`/an allow rule (Codex repro:
+      100 non-ask calls -> 100 resident entries). Not an authorization gap -- a call
+      reaching `can_use_tool` already passed its own `PreToolUse` check, so a collision
+      under memory pressure can only cause a safe FALSE denial, never an unauthorized
+      allow -- but genuine unbounded resource growth over a long session. Fixed:
+      `_recent_verdicts` is now an `OrderedDict` bounded by `max_recent_verdicts`
+      (constructor parameter, default 2048, mirroring `SpoolSink.max_bytes`'s own
+      bounded-with-a-counted-drop pattern in `sinks.py`) -- the OLDEST entry is evicted
+      once the cache would exceed the cap, counted in `self.recent_verdicts_evicted`,
+      never silently. Replay-miss fail-closed is UNCHANGED: an evicted entry is
+      indistinguishable from one never cached, so `can_use_tool` denies it the same way.
+      `post_tool_use`/`post_tool_use_failure` also pop the entry as a courtesy cleanup
+      when they fire (proof the call already ran, so any lingering verdict for it is
+      provably stale) -- reduces eviction pressure in strict mode specifically (the only
+      mode those hooks are ever registered for), but does NOT replace the bound, since
+      neither post hook firing is guaranteed. Tests added:
+      `test_v2_recent_verdicts_cache_stays_bounded_under_sustained_non_ask_traffic` (50
+      calls against a cap of 10 -> exactly 10 resident, 40 evicted, verified with a small
+      explicit cap rather than the production default so the test is fast and
+      deterministic); `test_v2_can_use_tool_fails_closed_on_an_evicted_verdict` (the
+      evicted entry's own replay is denied, a SURVIVING entry still replays correctly);
+      `test_v2_strict_post_tool_use_cleans_up_the_recent_verdicts_entry_too`. **Finding 4:**
     `ToolPermissionContext.tool_use_id`'s own docstring guarantees uniqueness only "within the
     assistant message" -- NOT globally, so concurrent messages or concurrently-running
     subagents CAN collide -- but `_pending_outcomes` was keyed by bare `tool_use_id` alone, so

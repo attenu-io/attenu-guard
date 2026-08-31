@@ -12,6 +12,8 @@ flags (`Ledger`), not internal call counts, are what the assertions read.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import inspect
 import sys
 from pathlib import Path
@@ -767,6 +769,81 @@ def test_v2_a_tool_returning_a_coroutine_records_a_deferred_outcome():
     assert inspect.iscoroutine(result), "the tool body must not have run yet"
     assert ledger.effects == [], "the coroutine's body must not have executed on this call"
     result.close()  # avoid a "coroutine was never awaited" warning leaking into other tests
+
+    entries = child.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.DEFERRED
+
+
+def test_v2_a_tool_returning_an_asyncio_future_records_a_deferred_outcome():
+    """Codex re-pass (batch 2, second round): the lazy-result family is bigger than
+    generators and coroutines -- an `asyncio.Future` a tool hands back without awaiting it
+    is the same class of gap. Unlike the generator/coroutine cases, the tool's own SYNC body
+    genuinely finishes running here (its effect IS recorded) -- what is deferred is whatever
+    the Future represents, not the tool's own forward() call. `inspect.isawaitable()` alone
+    already catches this (an asyncio.Future implements `__await__`), verified directly before
+    writing this test."""
+    ledger = Ledger()
+
+    class FutureCrmQuery(Tool):
+        name = "crm_query"
+        description = "Hands back an asyncio.Future instead of the resolved result."
+        inputs = {"rows": {"type": "integer", "description": "n"}}
+        output_type = "string"
+
+        def forward(self, rows: int):
+            ledger.effects.append(("crm_query", rows))
+            return asyncio.get_running_loop().create_future()  # deliberately never resolved
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3", schema_version=2)
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarise")
+
+    guarded = GuardedTool(FutureCrmQuery(), GuardRef(child), "crm.read",
+                          context_fn=lambda rows: {"rows": rows})
+
+    async def scenario():
+        return guarded(rows=10)
+
+    result = asyncio.run(scenario())
+
+    assert isinstance(result, asyncio.Future)
+    assert not result.done(), "the future must still be pending -- nothing here resolves it"
+
+    entries = child.audit_log().entries
+    outcome = next(e for e in entries if e["event"] == "outcome")
+    assert outcome["body_state"] == BodyState.DEFERRED
+
+
+def test_v2_a_tool_returning_a_concurrent_futures_future_records_a_deferred_outcome():
+    """Codex re-pass (batch 2, second round): `concurrent.futures.Future` -- what a tool that
+    submits work to a thread pool without waiting for it would hand back -- is deliberately
+    NOT caught by `inspect.isawaitable()` (it implements no `__await__` at all, verified
+    directly: `inspect.isawaitable(concurrent.futures.Future())` is `False`), so it needs its
+    own explicit `isinstance` check in `_is_deferred_result()`. This is the check
+    `1689fc1`'s `isawaitable()` fix did NOT cover."""
+    ledger = Ledger()
+
+    class ThreadPoolCrmQuery(Tool):
+        name = "crm_query"
+        description = "Hands back a concurrent.futures.Future instead of the resolved result."
+        inputs = {"rows": {"type": "integer", "description": "n"}}
+        output_type = "string"
+
+        def forward(self, rows: int):
+            ledger.effects.append(("crm_query", rows))
+            return concurrent.futures.Future()  # deliberately never resolved
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3", schema_version=2)
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarise")
+
+    guarded = GuardedTool(ThreadPoolCrmQuery(), GuardRef(child), "crm.read",
+                          context_fn=lambda rows: {"rows": rows})
+    result = guarded(rows=10)
+
+    assert isinstance(result, concurrent.futures.Future)
+    assert not result.done(), "the future must still be pending -- nothing here resolves it"
+    assert not inspect.isawaitable(result), \
+        "this test is only meaningful if isawaitable() genuinely misses this type"
 
     entries = child.audit_log().entries
     outcome = next(e for e in entries if e["event"] == "outcome")

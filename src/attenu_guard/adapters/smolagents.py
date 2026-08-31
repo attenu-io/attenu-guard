@@ -93,6 +93,8 @@ any of this. On `schema_version=1` (the default), nothing here changes at all.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import inspect
 import time
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
@@ -125,15 +127,23 @@ def _is_deferred_result(result: Any) -> bool:
     generator's body has run at all (ordinary Python generator semantics -- smolagents
     itself does nothing special with the return value here, pinned 1.26.0 `Tool.__call__`
     returns unknown result types unchanged). `BodyState.RETURNED` would be a lie in that
-    case: `DEFERRED` is the honest read. `inspect.isawaitable()` closes the same class of
-    gap for a coroutine (`async def forward(...)` called plainly here returns a coroutine
-    object with none of its body run yet, exactly the same shape as the generator case --
-    currently unreachable through pinned smolagents' own sync-tool contract, since nothing
-    in this adapter awaits it, but a caller-supplied `Tool` subclass is free to define an
-    `async def forward` regardless; catching it here costs nothing and closes the gap before
-    it can ever surface) -- a strict superset of `iscoroutine()` that also covers Future-like
-    awaitables and generator-based coroutines with the one check."""
-    return inspect.isgenerator(result) or inspect.isasyncgen(result) or inspect.isawaitable(result)
+    case: `DEFERRED` is the honest read. The same reasoning covers the WHOLE lazy-result
+    family, not just generators: a coroutine (`async def forward(...)` called plainly here
+    returns a coroutine object with none of its body run yet), an `asyncio.Future` (has
+    `__await__`, caught by `isawaitable()`), and a `concurrent.futures.Future` -- a thread-
+    pool future a sync `forward()` could hand back after merely SUBMITTING work, without
+    waiting for it, deliberately NOT covered by `isawaitable()` (it implements no `__await__`
+    at all -- verified directly: `inspect.isawaitable(concurrent.futures.Future())` is
+    `False`), so it needs its own explicit `isinstance` check. Currently unreachable through
+    pinned smolagents' own sync-tool contract (nothing in this adapter awaits or blocks on
+    any of these), but a caller-supplied `Tool` subclass is free to return any of them
+    regardless of what smolagents itself calls for; catching every member of the family here
+    costs nothing and closes the gap before it can ever surface."""
+    if inspect.isgenerator(result) or inspect.isasyncgen(result):
+        return True
+    if inspect.isawaitable(result):
+        return True
+    return isinstance(result, (asyncio.Future, concurrent.futures.Future))
 
 
 def _body_state_for(result: Any) -> str:
