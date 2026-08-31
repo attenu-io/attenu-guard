@@ -30,12 +30,15 @@ Python callbacks the CLI invokes over its JSON control channel
    "permissionDecision": "deny", ...}}`` blocks the call **before the tool body
    runs**; ``deny`` beats every other hook's verdict.
 
-``can_use_tool`` (``ClaudeAgentOptions.can_use_tool``) is wired too, as a
-second, independent gate — see ``ClaudeAgentOptions.can_use_tool``'s own
-docstring (``types.py:2046``): it fires only for calls the CLI's permission
-rules would otherwise *prompt* on, so it is not sufficient by itself. The
-``PreToolUse`` hook is the primary enforcement point; ``can_use_tool`` catches
-the same policy again if a call reaches the prompt path.
+``can_use_tool`` (``ClaudeAgentOptions.can_use_tool``) is wired too — see
+``ClaudeAgentOptions.can_use_tool``'s own docstring (``types.py:2046``): it
+fires only for calls the CLI's permission rules would otherwise *prompt* on,
+so it is not sufficient by itself. The ``PreToolUse`` hook is the ONLY
+enforcement point (the only place ``authorize()``/``guard.check()`` ever
+runs); ``can_use_tool`` REPLAYS ``PreToolUse``'s own verdict for a call that
+reaches the prompt path rather than deciding it again — see EXECUTION
+BINDING's "Round 2 correction" (Codex batch-2 finding 2) for why it is not,
+and never should be, a second, INDEPENDENT gate.
 
 USAGE
 -----
@@ -95,25 +98,93 @@ shape either way.
 Set ``DelegationGuardRegistry(..., strict_single_hook=True)`` to also register
 ``PostToolUse``/``PostToolUseFailure`` hooks (``hooks()`` below) and bind
 execution: ``pre_tool_use``'s ``authorize()`` call stashes a pending outcome
-keyed by ``tool_use_id`` -- the SDK's own documented, wire-protocol-guaranteed
-unique-per-call correlation key (``ToolPermissionContext.tool_use_id``'s
-docstring, ``types.py:213``) -- and ``post_tool_use``/``post_tool_use_failure``
-close it out: ``PostToolUse`` -> ``BodyState.RETURNED``; ``PostToolUseFailure``
-with ``is_interrupt`` truthy -> ``BodyState.ABANDONED`` (no ``error_code``,
-per the contract); ``PostToolUseFailure`` otherwise -> ``BodyState.RAISED``.
-This applies uniformly to the delegation tool call too (``Agent``/``Task``):
-its own ``PostToolUse`` genuinely fires when the whole subagent run finishes,
-a real body-completion signal, not a fabricated one.
+keyed by ``(session_id, agent_id, tool_use_id)`` -- see the "Round 2
+correction" below for why ``tool_use_id`` alone is not enough -- and
+``post_tool_use``/``post_tool_use_failure`` close it out: ``PostToolUse`` ->
+``BodyState.RETURNED``; ``PostToolUseFailure`` with ``is_interrupt`` truthy ->
+``BodyState.ABANDONED`` (no ``error_code``, per the contract);
+``PostToolUseFailure`` otherwise -> ``BodyState.RAISED``. This applies
+uniformly to the delegation tool call too (``Agent``/``Task``): its own
+``PostToolUse`` genuinely fires when the whole subagent run finishes, a real
+body-completion signal, not a fabricated one.
 
-``can_use_tool`` never participates in execution binding, in either mode, even
-though it also calls ``authorize()``. It is a SECOND, independent gate on the
-SAME call ``PreToolUse`` already gated (see the SECOND HOOK note above); only
-one ``PostToolUse``/``PostToolUseFailure`` will ever fire per ``tool_use_id``,
-so binding both call sites would either double-count one call as two ledger
-entries or leave one of the two ``Decision``s permanently orphaned in the
-pending set. Binding only the primary enforcement point avoids both, and
-matches the existing design note that ``PreToolUse``, not ``can_use_tool``, is
-where enforcement really happens.
+``can_use_tool`` never participates in execution binding, in either mode, and
+never calls ``authorize()`` at all any more (see the "Round 2 correction"
+immediately below) -- it only ever REPLAYS ``pre_tool_use``'s own verdict for
+the SAME call. Only one ``PostToolUse``/``PostToolUseFailure`` will ever fire
+per call, so binding both call sites would either double-count one call as
+two ledger entries or leave one of the two ``Decision``s permanently orphaned
+in the pending set. Binding only the primary enforcement point avoids both,
+and matches the existing design note that ``PreToolUse``, not ``can_use_tool``,
+is where enforcement really happens.
+
+ROUND 2 CORRECTIONS (Codex review, batch 2, findings 2/3/4) -- three related
+defects in how this section's own claims held up, each verified directly
+against pinned 0.2.139 before being fixed, in order of how they compound:
+
+* **Finding 3 -- the commitment vs. enforcement snapshot.** ``authorize()``
+  used to compute ``policy.context(tool_input)`` TWICE per call: once
+  (``_freeze()``d) for the ``authorized_params`` commitment, and again,
+  independently, for ``guard.check()``'s own ``context=`` argument. If
+  ``policy.context`` is not a pure function of its input -- reads a mutable
+  external source, or ``tool_input`` itself is mutated between the two calls
+  by another concurrently-dispatched hook (this module's own docstring already
+  notes hook dispatch is concurrent) -- the two evaluations can genuinely
+  differ, so what was COMMITTED as "the exact tool-call JSON object presented
+  at authorization time" (``Guard.check``'s own contract, ``guard.py``) was
+  not provably what was actually ENFORCED against. Separately,
+  ``policy.context(tool_input)`` is itself usually a narrow, policy-chosen
+  PROJECTION of ``tool_input`` (e.g. ``lambda i: {"rows": i.get("rows", 0)}``
+  in this module's own USAGE example) -- any field ``tool_input`` carried that
+  the policy did not extract was never committed to the audit trail at all.
+  Fixed: ``pre_tool_use`` now freezes the COMPLETE, unmodified ``tool_input``
+  exactly ONCE (``raw_snapshot``), immediately after copying it from the wire
+  and BEFORE this module's own ``_tool_use_id`` injection for delegation calls
+  -- this, not ``policy.context(tool_input)``, is what ``authorize()`` commits
+  as ``authorized_params``. ``policy.context(tool_input)`` is still computed,
+  but exactly once, purely as the ``guard.check(context=...)`` enforcement
+  argument -- decoupled from the commitment, never re-evaluated.
+* **Finding 2 -- double authorization.** The recommended strict configuration
+  (``hooks=reg.hooks()`` AND ``can_use_tool=reg.can_use_tool``) ran
+  ``authorize()`` TWICE for one physical tool call whenever ``can_use_tool``
+  fired: ``PreToolUse`` wrote one ``allow``/``Capture.FRAMEWORK_POST_HOOK``
+  ledger entry, then ``can_use_tool`` wrote a SECOND, independent
+  ``allow``/``Capture.PRE_HOOK_ONLY`` entry for the SAME call -- an
+  incomplete/doubled verifier aggregate, reproduced directly against pinned
+  0.2.139. Fixed: ``pre_tool_use`` now caches its own verdict (``allowed``,
+  ``reason``) keyed by ``(agent_id, tool_use_id)`` -- the only two fields
+  ``ToolPermissionContext`` actually exposes to ``can_use_tool`` (no
+  ``session_id`` there) -- for EVERY call, not only strict/bound ones.
+  ``can_use_tool`` now only ever REPLAYS that cached verdict; it never calls
+  ``authorize()``/``guard.check()`` itself again, in any mode. If no cached
+  verdict is found (``ClaudeAgentOptions.hooks`` was not wired alongside
+  ``can_use_tool`` -- a misconfiguration this module's USAGE section never
+  recommends), it fails closed rather than silently allowing or resurrecting
+  an independent decision path.
+* **Finding 4 -- the correlation key.** ``ToolPermissionContext.tool_use_id``'s
+  own docstring guarantees uniqueness only "within the assistant message" --
+  NOT globally, so concurrent messages or concurrently-running subagents CAN
+  collide on the same ``tool_use_id``. Keying ``_pending_outcomes`` by bare
+  ``tool_use_id`` alone meant a collision would silently overwrite an
+  unclaimed entry, orphaning its ``call_id`` forever (``record_outcome()``
+  would never be called for it). Fixed: ``_pending_outcomes`` is now keyed by
+  ``(session_id, agent_id, tool_use_id)`` -- all three are on ``BaseHookInput``/
+  ``_SubagentContextMixin``, available to ``pre_tool_use``, ``post_tool_use``
+  AND ``post_tool_use_failure`` alike -- and ``authorize()`` fails closed,
+  mirroring ``adapters.crewai``'s own duplicate-live-key precedent, on a
+  ``pre_tool_use`` call whose key is ALREADY occupied by an unclaimed entry:
+  denied outright, before ``guard.check()`` ever runs for the new call, and
+  the original entry is left untouched. This fail-closed treatment is
+  deliberately NOT extended to the finding-2 verdict cache above
+  (``_recent_verdicts``, keyed by ``(agent_id, tool_use_id)`` only, no
+  ``session_id`` available): unlike ``_pending_outcomes``, that cache has no
+  reliable release signal (``can_use_tool`` is documented to fire only for
+  calls that reach the CLI's "ask" path -- a minority of calls in most
+  configurations -- so an entry sitting unclaimed because ``can_use_tool``
+  simply never fired for it is the COMMON case, not evidence of a collision).
+  Treating every pre-existing entry there as a fail-closed collision would
+  misfire on ordinary usage; last-writer-wins with pop-on-read is the honest
+  trade-off, documented as a residual on ``_RecentVerdict`` itself.
 
 Honesty notes, all specific to this adapter and worth reading before trusting
 strict mode's numbers:
@@ -148,7 +219,7 @@ from __future__ import annotations
 import fnmatch
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, MutableMapping, Optional
+from typing import Any, Callable, Mapping, MutableMapping, Optional, Tuple
 
 from attenu_guard import Authority, Guard, __version__
 from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
@@ -186,6 +257,18 @@ class _PendingOutcome:
     call_id: str
     snapshot: Any
     started_at: float
+
+
+@dataclass
+class _RecentVerdict:
+    """``pre_tool_use``'s own verdict for one call, cached for ``can_use_tool`` to replay
+    (Codex batch-2 finding 2) -- ``can_use_tool`` never calls ``authorize()`` itself, so this
+    is the ONLY way it learns what ``pre_tool_use`` already decided for the SAME correlation
+    key. ``session_id`` is carried for diagnostics only: ``ToolPermissionContext`` exposes no
+    ``session_id`` to ``can_use_tool``, so it can never be part of the lookup key itself."""
+    session_id: Optional[str]
+    allowed: bool
+    reason: str
 
 # The parent invokes a subagent through this built-in tool. Renamed from
 # "Task" to "Agent" in Claude Code v2.1.63; the old name still appears in
@@ -275,12 +358,25 @@ class DelegationGuardRegistry:
         self.revoke_on_stop = revoke_on_stop
         # See the module docstring's EXECUTION BINDING section: opt-in,
         # PreToolUse-only (never `can_use_tool`), FRAMEWORK_POST_HOOK via
-        # PostToolUse/PostToolUseFailure correlated by the SDK's own
-        # documented-unique `tool_use_id`.
+        # PostToolUse/PostToolUseFailure correlated by a (session_id, agent_id,
+        # tool_use_id) tuple -- not `tool_use_id` alone, which the SDK documents
+        # as unique only WITHIN one assistant message (Codex batch-2 finding 4;
+        # see EXECUTION BINDING's "Round 2 correction" below).
         self.strict_single_hook = strict_single_hook
         self._guards: MutableMapping[str, Guard] = {}
         self._pending: list[_Pending] = []
-        self._pending_outcomes: MutableMapping[str, _PendingOutcome] = {}
+        self._pending_outcomes: MutableMapping[
+            Tuple[Optional[str], Optional[str], str], _PendingOutcome
+        ] = {}
+        # can_use_tool's own decision cache (Codex batch-2 finding 2): pre_tool_use is the
+        # ONLY place `authorize()` ever runs for a given call; can_use_tool only ever REPLAYS
+        # the verdict stashed here, keyed by (agent_id, tool_use_id) -- the only two fields
+        # `ToolPermissionContext` actually exposes to can_use_tool (it carries no session_id).
+        # Last-writer-wins, popped on read -- see EXECUTION BINDING for why this is NOT given
+        # the same fail-closed-on-duplicate-key treatment as `_pending_outcomes` below.
+        self._recent_verdicts: MutableMapping[
+            Tuple[Optional[str], str], _RecentVerdict
+        ] = {}
         self.denials: list[dict] = []   # everything this registry blocked, for reporting
 
     # ---- lookup ---------------------------------------------------------
@@ -387,7 +483,8 @@ class DelegationGuardRegistry:
     # ---- hook point 2: tool invocation -----------------------------------
     def authorize(self, tool_name: str, tool_input: Mapping[str, Any],
                   agent_id: Optional[str], agent_type: Optional[str], *,
-                  tool_use_id: Optional[str] = None, bind: bool = False):
+                  tool_use_id: Optional[str] = None, bind: bool = False,
+                  raw_snapshot: Any = None, session_id: Optional[str] = None):
         """The whole policy decision, framework-free.
 
         Returns ``(allowed: bool, reason: str)``. Every denial is also appended
@@ -398,6 +495,21 @@ class DelegationGuardRegistry:
         is in ``strict_single_hook`` mode; only ``pre_tool_use`` ever passes
         it True — see the module docstring's EXECUTION BINDING section for
         why ``can_use_tool`` never does.
+
+        ``raw_snapshot``: a pre-computed ``_freeze()`` of the COMPLETE, unmodified
+        ``tool_input`` as ``pre_tool_use`` received it from the wire -- frozen
+        exactly once, by the caller, BEFORE any local mutation (e.g. this
+        module's own ``_tool_use_id`` injection for delegation calls) and
+        before ``policy.context()`` ever runs. This is what gets committed as
+        ``authorized_params`` when ``bind`` is honoured -- see the module
+        docstring's EXECUTION BINDING "Round 2 correction" for why it is no
+        longer ``policy.context(tool_input)``'s own (narrower, re-evaluated)
+        projection.
+
+        ``session_id``: the ``BaseHookInput.session_id`` ``pre_tool_use`` received alongside
+        ``tool_use_id`` -- part of the ``_pending_outcomes`` correlation key together with
+        ``agent_id``/``tool_use_id``, per the module docstring's EXECUTION BINDING "Round 2
+        correction" (Codex batch-2 finding 4).
         """
         guard = self.guard_for(agent_id)
         if guard is None:
@@ -410,6 +522,21 @@ class DelegationGuardRegistry:
                     f"no attenu-guard authority grant is declared for it")
 
         v2_bind = bind and self.strict_single_hook and guard.schema_version == 2 and bool(tool_use_id)
+        pending_key = (session_id, agent_id, tool_use_id) if v2_bind else None
+        if pending_key is not None and pending_key in self._pending_outcomes:
+            # Codex batch-2 finding 4: tool_use_id is documented unique only WITHIN one
+            # assistant message; a collision here means either a genuine SDK-level id reuse
+            # across messages/subagents, or the earlier call's own terminal hook never fired
+            # (see the module docstring's "the CLI process is killed" honesty note) -- either
+            # way, silently overwriting the existing entry would orphan its call_id forever
+            # (Guard.record_outcome would never be called for it). Fail closed instead, before
+            # guard.check() ever runs for this NEW call, mirroring adapters.crewai's own
+            # duplicate-live-key precedent: deny outright, leave the original entry untouched.
+            return self._deny(
+                tool_name, agent_id,
+                f"tool_use_id {tool_use_id!r} collides with an already-pending execution-"
+                f"binding entry (session={session_id!r}, agent={agent_id!r}); refusing to "
+                f"authorize a second call under the same correlation key")
 
         if tool_name in self.delegation_tools:
             subagent_type = str(tool_input.get("subagent_type") or "")
@@ -419,9 +546,8 @@ class DelegationGuardRegistry:
                     f"no authority grant declared for subagent_type "
                     f"{subagent_type!r}; refusing to delegate")
             scope = self.delegate_scope(subagent_type)
-            snapshot = _freeze({"subagent_type": subagent_type}) if v2_bind else None
             extra = dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
-                        authorized_params=snapshot) if v2_bind else {}
+                        authorized_params=raw_snapshot) if v2_bind else {}
             decision = guard.check(scope, context={"subagent_type": subagent_type},
                                    tool=tool_name, **extra)
             if not decision:
@@ -429,8 +555,8 @@ class DelegationGuardRegistry:
             self._pending.append(_Pending(agent_id, subagent_type,
                                           str(tool_input.get("_tool_use_id") or "") or None))
             if v2_bind and decision.call_id:
-                self._pending_outcomes[tool_use_id] = _PendingOutcome(
-                    guard, decision.call_id, snapshot, time.monotonic())
+                self._pending_outcomes[pending_key] = _PendingOutcome(
+                    guard, decision.call_id, raw_snapshot, time.monotonic())
             return True, f"delegation to {subagent_type!r} authorized"
 
         policy = self.policy_for(tool_name)
@@ -442,17 +568,17 @@ class DelegationGuardRegistry:
                                 disposition=Disposition.UNRESOLVED)
             return self._deny(tool_name, agent_id, msg)
 
-        snapshot = _freeze(policy.context(tool_input)) if v2_bind else None
+        ctx = policy.context(tool_input)   # evaluated exactly once -- never re-run for the commitment
         extra = dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
-                    authorized_params=snapshot) if v2_bind else {}
-        decision = guard.check(policy.scope, context=policy.context(tool_input),
+                    authorized_params=raw_snapshot) if v2_bind else {}
+        decision = guard.check(policy.scope, context=ctx,
                                metered=policy.metered, tool=tool_name,
                                disposition=policy.disposition, **extra)
         if not decision:
             return self._deny(tool_name, agent_id, decision.explain())
         if v2_bind and decision.call_id:
-            self._pending_outcomes[tool_use_id] = _PendingOutcome(
-                guard, decision.call_id, snapshot, time.monotonic())
+            self._pending_outcomes[pending_key] = _PendingOutcome(
+                guard, decision.call_id, raw_snapshot, time.monotonic())
         return True, f"{policy.scope} authorized"
 
     def _deny(self, tool_name: str, agent_id: Optional[str], reason: str):
@@ -472,13 +598,32 @@ class DelegationGuardRegistry:
             return {}
         tool_name = str(input_data.get("tool_name") or "")
         tool_input = dict(input_data.get("tool_input") or {})
+        # Freeze the COMPLETE, unmodified tool_input exactly once, before any local
+        # mutation (the `_tool_use_id` injection below) and before `policy.context()`
+        # ever runs -- this is what `authorize()` commits as `authorized_params` when
+        # binding is honoured. See the module docstring's EXECUTION BINDING "Round 2
+        # correction" for why this replaced a `policy.context(tool_input)`-derived,
+        # twice-evaluated snapshot.
+        raw_snapshot = _freeze(tool_input)
         if tool_use_id and tool_name in self.delegation_tools:
             tool_input.setdefault("_tool_use_id", tool_use_id)
 
+        agent_id = input_data.get("agent_id")
         allowed, reason = self.authorize(
-            tool_name, tool_input,
-            input_data.get("agent_id"), input_data.get("agent_type"),
-            tool_use_id=tool_use_id, bind=True)
+            tool_name, tool_input, agent_id, input_data.get("agent_type"),
+            tool_use_id=tool_use_id, bind=True, raw_snapshot=raw_snapshot,
+            session_id=input_data.get("session_id"))
+        # Codex batch-2 finding 2: this is the ONLY place authorize() ever runs for a given
+        # call. Stash the verdict for can_use_tool to REPLAY -- it must never make its own,
+        # independent decision (a second guard.check() for the same physical call, doubling
+        # the ledger). Every call is cached here, not only strict/bound ones: the
+        # double-authorization defect exists in every mode, since can_use_tool used to call
+        # authorize() itself unconditionally. Last-writer-wins, popped on read by
+        # can_use_tool -- see _RecentVerdict's own docstring for why this is deliberately NOT
+        # given the same fail-closed-on-duplicate-key treatment as _pending_outcomes above.
+        if tool_use_id:
+            self._recent_verdicts[(agent_id, tool_use_id)] = _RecentVerdict(
+                input_data.get("session_id"), allowed, reason)
         if allowed:
             return {}
         return {
@@ -497,12 +642,13 @@ class DelegationGuardRegistry:
         """``PostToolUse`` hook — closes a pending outcome as ``RETURNED``.
 
         Only registered (``hooks()``) when ``strict_single_hook=True``. A
-        ``tool_use_id`` with no matching pending entry (default mode, a
-        denied call, or ``can_use_tool``-only path) is a silent no-op.
+        ``(session_id, agent_id, tool_use_id)`` key with no matching pending entry
+        (default mode, a denied call, or ``can_use_tool``-only path) is a silent no-op.
         """
         if input_data.get("hook_event_name") != "PostToolUse" or not tool_use_id:
             return {}
-        pending = self._pending_outcomes.pop(tool_use_id, None)
+        key = (input_data.get("session_id"), input_data.get("agent_id"), tool_use_id)
+        pending = self._pending_outcomes.pop(key, None)
         if pending is None:
             return {}
         pending.guard.record_outcome(
@@ -520,7 +666,8 @@ class DelegationGuardRegistry:
         ``post_tool_use``."""
         if input_data.get("hook_event_name") != "PostToolUseFailure" or not tool_use_id:
             return {}
-        pending = self._pending_outcomes.pop(tool_use_id, None)
+        key = (input_data.get("session_id"), input_data.get("agent_id"), tool_use_id)
+        pending = self._pending_outcomes.pop(key, None)
         if pending is None:
             return {}
         duration_ms = _elapsed_ms(pending.started_at)
@@ -538,27 +685,46 @@ class DelegationGuardRegistry:
     # ---- the second gate: ClaudeAgentOptions.can_use_tool ----------------
     async def can_use_tool(self, tool_name: str, tool_input: Mapping[str, Any],
                            context: Any):
-        """``CanUseTool`` callback. Same policy, expressed as the SDK's
-        ``PermissionResult``. ``context.agent_id`` (``types.py:214``) is the
-        same correlation key the hook uses.
+        """``CanUseTool`` callback. NEVER makes an independent policy decision --
+        it only ever REPLAYS the verdict ``pre_tool_use`` already cached for this exact
+        ``(agent_id, tool_use_id)`` (``context.agent_id``/``context.tool_use_id``,
+        ``types.py:209-216``), popped on read.
 
-        Asymmetry worth knowing: ``ToolPermissionContext`` carries ``agent_id``
-        but NOT ``agent_type`` (``PreToolUseHookInput`` carries both), so this
-        path cannot lazily mint a Guard for a subagent it has never seen — it
-        denies instead. Harmless in practice because ``PreToolUse`` fires
-        first for the same call and does the minting; it is one more reason the
-        hook, not this callback, is the enforcement point.
+        ROUND 2 CORRECTION (Codex review, batch 2, finding 2): this callback used to call
+        ``self.authorize(...)`` itself -- a SECOND, independent ``guard.check()`` for the
+        SAME physical tool call ``PreToolUse`` already authorized, writing a second
+        ``allow``/``deny`` ledger entry (``Capture.PRE_HOOK_ONLY``, since this path never
+        binds) alongside ``PreToolUse``'s own (``Capture.FRAMEWORK_POST_HOOK`` in strict
+        mode) -- one physical call, two Decisions, an incomplete verifier aggregate.
+        Reproduced against pinned 0.2.139 before being fixed. Fixed by making this a pure
+        replay: no ``guard.check()``, no new ledger entry, ever, from this method.
 
-        Never binds execution (``bind`` is not passed, so it defaults False) —
-        see the module docstring's EXECUTION BINDING section.
+        If no cached verdict is found (``ClaudeAgentOptions`` was built with
+        ``can_use_tool=reg.can_use_tool`` but NOT ``hooks=reg.hooks()`` -- a misconfiguration
+        this module's own USAGE section never recommends; the docstring's own "SECOND HOOK"
+        note already says ``can_use_tool``  "is not sufficient by itself") this fails closed:
+        denied, not silently allowed and not re-authorized independently -- there is no
+        ``PreToolUse`` verdict here to replay, and re-introducing an independent decision path
+        would resurrect the exact defect just fixed.
+
+        Asymmetry worth knowing: ``ToolPermissionContext`` carries ``agent_id`` but NOT
+        ``agent_type`` (``PreToolUseHookInput`` carries both) and no ``session_id`` at all
+        -- moot now, since this callback no longer looks up or mints a Guard itself either;
+        all of that already happened inside ``pre_tool_use``.
         """
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
 
         agent_id = getattr(context, "agent_id", None)
-        allowed, reason = self.authorize(tool_name, dict(tool_input), agent_id, None)
-        if allowed:
+        tool_use_id = getattr(context, "tool_use_id", None)
+        verdict = self._recent_verdicts.pop((agent_id, tool_use_id), None) if tool_use_id else None
+        if verdict is None:
+            return PermissionResultDeny(
+                message="attenu-guard: no PreToolUse verdict to replay for this call -- "
+                        "ClaudeAgentOptions.hooks must be wired to reg.hooks() alongside "
+                        "can_use_tool (see the module docstring's USAGE section)")
+        if verdict.allowed:
             return PermissionResultAllow()
-        return PermissionResultDeny(message=f"attenu-guard: {reason}")
+        return PermissionResultDeny(message=f"attenu-guard: {verdict.reason}")
 
     # ---- wiring ---------------------------------------------------------
     def hooks(self) -> dict:

