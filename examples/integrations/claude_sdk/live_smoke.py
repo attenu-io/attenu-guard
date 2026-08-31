@@ -78,7 +78,8 @@ async def main() -> int:
             "mail": create_sdk_mcp_server("mail", tools=[send_mail]),
         },
         strict_mcp_config=True,
-        setting_sources=[],           # SDK isolation: ignore ~/.claude and .claude
+        setting_sources=[],           # SDK isolation: ignore the user's global Claude settings
+                                      # directory and any project-local .claude directory
         allowed_tools=["Agent", "mcp__crm__crm_query", "mcp__crm__crm_export",
                        "mcp__mail__send_mail"],
         agents={

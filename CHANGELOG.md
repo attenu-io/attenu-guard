@@ -24,6 +24,30 @@ All notable changes to attenu-guard are documented here. The format follows
   `FRAMEWORK_POST_HOOK` -- in both the normal path and the `CommittedAuditError` path. A bare/
   `PRE_HOOK_ONLY` allow never enters the pending set, so `complete()` finalizes immediately, and
   the verifier's `unobserved` classification for it now matches the runtime's own view.
+- **`adapters.langgraph` — the SHIPPED, hand-written-node reference-wiring adapter still had an
+  aliasing snapshot path, and its own regression test tested a different module.** Release-gate
+  finding 1 (CRITICAL). Every OTHER Python adapter went through two rounds of adversarial review
+  that closed this exact class of defect; `adapters.langgraph` was never touched by either batch
+  (it predates them, as the original reference wiring) and still used raw `copy.deepcopy()` in
+  `_snapshot_params`, falling back to the raw (live) dict on failure. A hostile `__deepcopy__`
+  reproduced `snapshot["args"][0] is live`, and a later mutation of the live argument changed
+  the "snapshot" -- the exact `authorized_params`/`invoked_params` integrity guarantee every
+  other adapter's own `_freeze()` exists to hold. Separately, `tests/integrations/
+  test_langgraph.py` -- despite its filename and its own module docstring's claim to cover "the
+  SHIPPED adapter (`attenu_guard.adapters.langgraph`)" -- imported `attenu_guard.adapters.
+  langchain` under an alias (`dg_langgraph`) that made every `GuardedDelegation`-based test in
+  the file (the large majority of it) read as testing the shipped `langgraph` module when it was
+  actually, correctly, testing `adapters.langchain`; only the NAME was wrong, but it meant this
+  regression class had no test coverage anywhere. Fixed: `adapters.langgraph`'s
+  `_snapshot_params` now routes through the same shared `attenu_guard.adapters._snapshot.
+  freeze()` sanitizer every other adapter uses (see the consolidation entry below); the
+  misleading alias in `test_langgraph.py` is renamed to `dg_langchain` with a comment explaining
+  what it actually is; and `tests/test_langgraph_adapter.py` (the zero-dependency unit suite
+  that genuinely imports `attenu_guard.adapters.langgraph` itself) gained a
+  `TestSnapshotHardening` class: the never-aliases-a-custom-`__deepcopy__` regression test every
+  other adapter's own test suite already has, a mutation-does-not-cause-a-params-mismatch test
+  through the real `guard_node` wrapper, and a circular-container test pinning the new
+  `"<circular>"` behaviour (see the consolidation entry's own correction of "never raises").
 - `adapters.crewai`: outcome correlation was keyed by a thread-local slot (one per OS thread,
   not per dispatch); two async tool calls interleaved on one thread (CrewAI's own async
   executor can do this) could let a later call's `before` hook overwrite an earlier call's still-
@@ -124,7 +148,22 @@ All notable changes to attenu-guard are documented here. The format follows
   the live, mutable call arguments -- exactly the false-substitution risk the snapshot exists to
   rule out. Replaced with `_freeze()`/`_snapshot_params()`: dicts and lists are always rebuilt
   fresh, recursively; a leaf that cannot itself be deep-copied is replaced by its `repr()` (a new,
-  immutable string) rather than shared as-is. Never raises, never shares a mutable container.
+  immutable string) rather than shared as-is. Never shares a mutable container.
+  **Release-gate correction (Codex review):** "Never raises" (the claim on the line above, as it
+  read before this correction) was false -- each of the (then 17) adapter-local `_freeze()`
+  copies recursed into a `Mapping`/`(list, tuple, set, frozenset)` value with NO cycle guard at
+  all, so a genuinely circular container (a dict containing itself, directly or through a nested
+  structure) raised `RecursionError`. Reproduced directly before fixing. Fixed as part of the
+  same release-gate pass that consolidated every adapter's own `_freeze()` into ONE shared
+  `attenu_guard.adapters._snapshot.freeze()` (see that module's own doc comment): PATH-ACTIVE
+  cycle tracking -- the set of container `id()`s on the CURRENT recursion path, passed as a new
+  set at each recursive call rather than mutated in place -- reports a genuine cycle as
+  `"<circular>"` instead of recursing forever, while correctly NOT flagging a DAG's repeated
+  reference (the same container appearing twice as sibling values, not an ancestor of itself) as
+  circular. `adapters.langgraph` -- the original, hand-written reference-wiring adapter,
+  untouched by either earlier adversarial-review batch -- was migrated onto this same shared
+  sanitizer in the same pass; it had been using raw `copy.deepcopy()` with a live-object
+  aliasing fallback the whole time (see the separate CRITICAL finding below).
   **Round 2 correction (Codex review, finding 4):** that first fix still tried `copy.deepcopy(value)`
   wholesale before falling back to the rebuild -- but a mutable class can implement `__deepcopy__`
   to hand back `self` (or another object it still owns), so `deepcopy` *succeeding* was never proof
@@ -248,6 +287,18 @@ All notable changes to attenu-guard are documented here. The format follows
   closure). Added an `except GeneratorExit` arm recording `BodyState.ABANDONED` before
   re-raising (required by Python's own generator protocol). Also fixes the snapshot fallback
   (finding 7), matching the other five adapters.
+- **Two machine-specific path leaks, release-gate finding 3.** `tools/render_demo_gif.py`'s
+  ffmpeg discovery fell back to a hardcoded absolute path to a Homebrew-installed binary when
+  `shutil.which("ffmpeg")` came up empty -- `shutil.which` already checks every directory on
+  PATH, including a Homebrew bin dir when it is actually on PATH, so the hardcoded fallback only
+  ever helped on one specific machine's non-PATH install while leaking that machine's own
+  layout into the repo; removed, with `shutil.which`'s own result used directly (and its
+  possible `None` handled explicitly, which the old code did not do either).
+  `examples/integrations/claude_sdk/live_smoke.py` had a code comment naming the user's home
+  directory's Claude settings path by its shorthand notation; reworded to describe the same
+  SDK-isolation behavior (`setting_sources=[]`) without a path-shaped string. Semantic path
+  fixtures used as test data elsewhere in the tree (`/tmp`, `/etc`, `/usr/bin`, `/opt/homebrew`)
+  and file shebangs are unaffected -- they are not machine-specific leakage.
 
 ### Added
 - Execution binding (`record_outcome`, 0.9.0) wired into six more adapters, on a

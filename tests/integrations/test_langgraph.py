@@ -43,14 +43,24 @@ from attenu_guard import (  # noqa: E402
 from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 
 # --------------------------------------------------------------------------
-# Load the example adapter by path. It deliberately lives under examples/ (it
-# is a paste-me-into-your-project reference, not shipped library code), and
-# its directory is named `langgraph`, so we must NOT put that directory on
-# sys.path — that would shadow nothing today but is a trap waiting to happen.
+# `GuardedDelegation`/`ToolPolicy` are SHIPPED library code from
+# `attenu_guard.adapters.langchain` -- the shipped adapter that wires into
+# LangGraph's own `ToolNode(wrap_tool_call=...)` and LangChain's
+# `create_agent(middleware=...)` (call paths 2 and 3 above), NOT a paste-in
+# example loaded by path. (Release-gate correction: this used to be aliased
+# `dg_langgraph`, and imported as if it were `attenu_guard.adapters.langgraph`
+# -- the SHIPPED, hand-written-node adapter path 1 above actually names. That
+# mislabeling meant every `GuardedDelegation`-based test below — the large
+# majority of this file — was, and still is, genuinely testing `adapters.
+# langchain`, correctly; only the NAME was wrong. `adapters.langgraph` itself
+# is tested directly in `test_shipped_adapter_guards_a_real_compiled_state
+# graph` below (path 1) and in `tests/test_langgraph_adapter.py` (the
+# zero-dependency unit suite, including its own execution-binding and
+# snapshot-hardening coverage).
 # --------------------------------------------------------------------------
-import attenu_guard.adapters.langchain as dg_langgraph
-GuardedDelegation = dg_langgraph.GuardedDelegation
-ToolPolicy = dg_langgraph.ToolPolicy
+import attenu_guard.adapters.langchain as dg_langchain
+GuardedDelegation = dg_langchain.GuardedDelegation
+ToolPolicy = dg_langchain.ToolPolicy
 
 
 # --------------------------------------------------------------------------
@@ -498,7 +508,7 @@ def test_default_subagent_authority_mints_children_for_undeclared_subagents(side
     from types import SimpleNamespace
     req = SimpleNamespace(tool_call={"name": "task", "args": {"subagent_type": "researcher",
                                                                 "description": "look things up"}})
-    gate = guarded._gate(req, capture=dg_langgraph.Capture.WRAPPER_SYNC)
+    gate = guarded._gate(req, capture=dg_langchain.Capture.WRAPPER_SYNC)
     assert gate.denial is None and gate.child is not None
     assert gate.child.agent_id == "researcher" and gate.child.is_narrower_than(root)
     spawn = [e for e in root.audit_log() if e["event"] == "spawn"][-1]
@@ -707,7 +717,7 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
             return self
 
     live = {"x": AliasingList([1])}
-    snapshot = dg_langgraph._snapshot_params(live)
+    snapshot = dg_langchain._snapshot_params(live)
 
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)

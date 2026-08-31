@@ -95,7 +95,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import copy
 import functools
 import inspect
 import time
@@ -103,6 +102,7 @@ from typing import Callable, Mapping, Optional
 
 from .. import AuthorityDenied, __version__
 from ..reasons import Capture, BodyState
+from ._snapshot import freeze as _freeze
 
 __all__ = ["guard_node", "DelegatedToolNode", "add_guarded_node", "is_langgraph_available"]
 
@@ -140,15 +140,16 @@ def _snapshot_params(args, kwargs) -> dict:
     """An IMMUTABLE snapshot of the call's arguments, taken BEFORE the wrapped callable runs and
     reused for BOTH authorized_params (check()) and invoked_params (record_outcome()) — so a
     callable that mutates its own inputs in place cannot make this adapter observe two different
-    values for what was actually one call's arguments."""
-    raw = {"args": list(args), "kwargs": dict(kwargs)}
-    try:
-        return copy.deepcopy(raw)
-    except Exception:
-        # Best-effort: something in here isn't deepcopy-able (a live socket, a lock, ...). Fall
-        # back to the shallow copy — a residual risk only if THAT specific object is later
-        # mutated in place, a rare edge case documented here rather than silently claimed away.
-        return raw
+    values for what was actually one call's arguments.
+
+    RELEASE-GATE CORRECTION: this used to be `copy.deepcopy(raw)`, falling back to the raw
+    (live) dict on failure -- the same aliasing gap every OTHER adapter's `_freeze()` was built
+    to close, but this file (the original reference wiring, never touched by either adversarial-
+    review batch) never got the fix. A hostile `__deepcopy__` reproduced `snapshot["args"][0] is
+    live` and a later mutation changed the "snapshot". Fixed by routing through the same shared
+    `attenu_guard.adapters._snapshot.freeze()` every other adapter now uses (see that module's
+    own doc comment for why `deepcopy` succeeding is not proof of independence)."""
+    return _freeze({"args": list(args), "kwargs": dict(kwargs)})
 
 
 # =========================================================================

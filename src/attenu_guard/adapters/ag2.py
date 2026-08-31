@@ -311,27 +311,7 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
-def _freeze(value: Any) -> Any:
-    """A genuinely immutable, fully decoupled rebuild of `value` -- NEVER calls a copy protocol
-    (`copy.deepcopy`) on it. A mutable class can implement `__deepcopy__` to hand back itself (or
-    another object it still owns) -- `deepcopy` SUCCEEDING is not proof the result is independent
-    of the live object graph, so a "snapshot" built that way can silently change out from under
-    the commitment when the tool body (or AG2 itself) later mutates the original in place.
-    Containers are always rebuilt from scratch as fresh builtins (dict/list, recursively); only
-    already-immutable leaf types (`str`/`int`/`float`/`bool`/`None`/`bytes`) are kept as-is --
-    sharing an immutable value carries no aliasing risk regardless of what protocol it does or
-    does not implement. Everything else becomes its `repr()` -- a brand-new, independent string
-    -- rather than being handed through any copy protocol that could return a live reference."""
-    if value is None or isinstance(value, (str, int, float, bool, bytes)):
-        return value
-    if isinstance(value, Mapping):
-        return {k: _freeze(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_freeze(v) for v in value]
-    try:
-        return repr(value)
-    except Exception:
-        return f"<unrepresentable {type(value).__name__}>"
+from ._snapshot import freeze as _freeze
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:

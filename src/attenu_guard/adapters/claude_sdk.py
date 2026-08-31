@@ -250,20 +250,7 @@ __all__ = ["ToolPolicy", "AgentGrant", "DelegationGuardRegistry", "DELEGATION_TO
 _ADAPTER_INFO = {"module": __name__, "version": __version__, "hook_path": f"{__name__}.pre_tool_use"}
 
 
-def _freeze(value: Any) -> Any:
-    """Snapshot ``value`` as plain, already-copied builtins -- never a copy
-    protocol (``copy.deepcopy``), which a hostile ``tool_input`` could subvert
-    by defining ``__deepcopy__`` to return itself (or anything) unchanged."""
-    if value is None or isinstance(value, (str, int, float, bool, bytes)):
-        return value
-    if isinstance(value, Mapping):
-        return {k: _freeze(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_freeze(v) for v in value]
-    try:
-        return repr(value)
-    except Exception:
-        return f"<unrepresentable {type(value).__name__}>"
+from ._snapshot import freeze as _freeze
 
 
 def _elapsed_ms(started_at: float) -> int:

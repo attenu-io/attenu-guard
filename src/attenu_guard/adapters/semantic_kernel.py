@@ -221,20 +221,7 @@ def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
 
-def _freeze(value: Any) -> Any:
-    """Snapshot `value` as plain, already-copied builtins — never a copy
-    protocol (`copy.deepcopy`), which a hostile argument could subvert by
-    defining `__deepcopy__` to return itself (or anything) unchanged."""
-    if value is None or isinstance(value, (str, int, float, bool, bytes)):
-        return value
-    if isinstance(value, Mapping):
-        return {k: _freeze(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_freeze(v) for v in value]
-    try:
-        return repr(value)
-    except Exception:
-        return f"<unrepresentable {type(value).__name__}>"
+from ._snapshot import freeze as _freeze
 
 
 __all__ = [

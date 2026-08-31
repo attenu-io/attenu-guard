@@ -468,6 +468,77 @@ class TestExecutionBindingWiring(unittest.TestCase):
         self.assertEqual(asyncio.run(_await_it(result)), {"ok": True})
 
 
+class TestSnapshotHardening(unittest.TestCase):
+    """Release-gate finding 1 (CRITICAL): `adapters.langgraph` is the SHIPPED, original
+    reference-wiring adapter -- untouched by either adversarial-review batch, which worked
+    through every OTHER adapter instead. It still used raw `copy.deepcopy()`, with a fallback
+    that returned the raw (live) dict on failure -- the exact aliasing gap every other adapter's
+    `_freeze()` was built to close. A hostile `__deepcopy__` reproduced `snapshot["args"][0] is
+    live`, and a later mutation changed the "snapshot". Separately, `tests/integrations/
+    test_langgraph.py` -- despite its name and its own module docstring's claim to cover 'the
+    SHIPPED adapter (attenu_guard.adapters.langgraph)' -- imports `attenu_guard.adapters.
+    langchain` under the alias it then tests against, so this regression class had genuinely NO
+    test coverage anywhere. Fixed by routing `_snapshot_params` through the shared
+    `attenu_guard.adapters._snapshot.freeze()` every other adapter now uses (see finding 2)."""
+
+    def test_snapshot_params_never_aliases_a_custom_deepcopy_that_returns_itself(self):
+        from attenu_guard.adapters.langgraph import _snapshot_params
+
+        class AliasingList(list):
+            def __deepcopy__(self, memo):
+                return self
+
+        live_kwargs = {"x": AliasingList([1])}
+        snapshot = _snapshot_params((), live_kwargs)
+
+        self.assertIsNot(snapshot["kwargs"]["x"], live_kwargs["x"],
+                         "the snapshot aliased the live container")
+        live_kwargs["x"].append(2)
+        self.assertEqual(snapshot["kwargs"]["x"], [1],
+                         "mutating the live container changed the snapshot")
+
+    def test_a_callable_that_mutates_its_own_input_does_not_cause_a_params_mismatch(self):
+        # End-to-end through the real guard_node wrapper, not just the snapshot helper directly
+        # -- the same class of test every other adapter's own "does not cause a params
+        # mismatch" test runs, applied to the module Codex found had none.
+        guard = _make_v2_tool_guard()
+        seen = {}
+
+        @guard_node(guard, "crm.read", context_fn=lambda payload: {"rows": payload.get("rows", 0)})
+        def summarize(payload):
+            seen["at_call_time"] = dict(payload)
+            payload["mutated"] = True  # mutate the wrapper's own input in place
+            return {"ok": True}
+
+        arg = {"rows": 1}
+        summarize(arg)
+        self.assertEqual(seen["at_call_time"], {"rows": 1})  # the body saw it BEFORE mutation
+        self.assertTrue(arg["mutated"])  # the mutation still happened
+        entries = guard.audit_log().entries
+        allow = next(e for e in entries if e["event"] == "allow")
+        outcome = next(e for e in entries if e["event"] == "outcome")
+        # both hashes come from the SAME pre-invocation snapshot -- no false mismatch
+        self.assertEqual(allow["authorized_params_hash"], outcome["invoked_params_hash"])
+
+    def test_snapshot_params_does_not_raise_on_a_circular_container(self):
+        # Finding 2's own correction: the shared sanitizer's PATH-ACTIVE cycle tracking means a
+        # self-referential argument is reported "<circular>" (a genuinely JSON-hashable string)
+        # instead of raising RecursionError or silently producing an unserializable self-
+        # referential dict. Verified directly (not assumed): stdlib copy.deepcopy has its own
+        # memo-based cycle handling, so raw deepcopy(circular) succeeds and even produces a
+        # correctly self-referential COPY -- meaning the OLD raw-deepcopy code in this exact
+        # file would NOT have raised on this input, but every OTHER adapter's pre-consolidation
+        # hand-rolled `_freeze()` (never routed through deepcopy at all) genuinely DID raise
+        # RecursionError on it -- what the CHANGELOG's old "never raises" claim was wrong about.
+        # This test pins the shared sanitizer's now-correct, now-consistent behaviour here too.
+        from attenu_guard.adapters.langgraph import _snapshot_params
+
+        circular = {"note": "before"}
+        circular["self"] = circular
+        snapshot = _snapshot_params((circular,), {})
+        self.assertEqual(snapshot["args"][0]["self"], "<circular>")
+
+
 async def _await_it(coro):
     return await coro
 

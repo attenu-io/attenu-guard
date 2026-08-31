@@ -378,8 +378,14 @@ def encode_pillow(frames, durations, out: Path, colors: int, scale: float) -> bo
 
 def encode_ffmpeg(frames, durations, out: Path, colors: int, scale: float,
                   workdir: Path) -> bool:
-    ffmpeg = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-    if not Path(ffmpeg).exists():
+    # Release-gate correction: this used to fall back to a hardcoded, machine-specific absolute
+    # path to a Homebrew-installed ffmpeg binary when `shutil.which` came up empty.
+    # `shutil.which` already checks every directory on PATH -- including a Homebrew bin dir
+    # when it's installed and actually on PATH -- so the hardcoded fallback only ever helped on
+    # ONE specific machine's non-PATH install, while leaking that machine's own layout into the
+    # repo.
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not Path(ffmpeg).exists():
         return False
     frames = _scaled(frames, scale)
     stage = workdir / "ffmpeg_frames"
