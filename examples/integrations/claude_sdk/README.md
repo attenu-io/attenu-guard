@@ -6,9 +6,11 @@ Tested against **claude-agent-sdk 0.2.139** (needs Python 3.10+; attenu-guard it
 (`tool_input.subagent_type`); `SubagentStart` (`agent_id` + `agent_type`) mints the child's
 attenuated `Guard`; `PreToolUse` on every tool call gates it, denying with
 `permissionDecision: "deny"` before the tool body runs; `SubagentStop` cascade-revokes.
-`ClaudeAgentOptions.can_use_tool` is wired as a second gate. `agent_id` on `PreToolUse` is the
-correlation key that routes each call to the right `Guard`; it is absent on the main thread,
-which is how the orchestrator's own calls are identified.
+`ClaudeAgentOptions.can_use_tool` is wired too, but it never decides anything on its own — it
+only replays the verdict `PreToolUse` already cached for that exact call (fails closed if none
+is cached), so one physical tool call never produces two independent `guard.check()`s. `agent_id`
+on `PreToolUse` is the correlation key that routes each call to the right `Guard`; it is absent
+on the main thread, which is how the orchestrator's own calls are identified.
 
 **Run it.**
 

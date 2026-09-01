@@ -13,18 +13,27 @@ HOOK POINTS USED
    child's attenuated `Guard` and passes it down as the child run's `deps`.
    `RunContext.deps` (`pydantic_ai/_run_context.py:64`) is the carrier.
 
-2. Tool invocation — `DelegationGuard.before_tool_execute(...)`, a subclass of
+2. Tool invocation — `DelegationGuard.wrap_tool_execute(...)`, a subclass of
    `pydantic_ai.capabilities.AbstractCapability`
    (`pydantic_ai/capabilities/abstract.py:846`), registered with
-   `Agent(capabilities=[...])`.
-   `ToolManager._run_execute_hooks` awaits `before_tool_execute` at
+   `Agent(capabilities=[...])`. Since 0.10.0 this is the ONLY hook `DelegationGuard`
+   overrides — it does not touch `before_tool_execute` at all, so the inherited
+   no-op passthrough runs there (see `get_ordering()`/`for_agent()`'s docstrings
+   for why authorization and outcome-recording were collapsed into one call).
+   `ToolManager._run_execute_hooks` awaits (the no-op) `before_tool_execute` at
    `pydantic_ai/tool_manager.py:459`, and only afterwards calls
    `wrap_tool_execute(..., handler=do_execute)` at
    `pydantic_ai/tool_manager.py:463`, where `do_execute` is the only path to
    `toolset.call_tool` (`pydantic_ai/tool_manager.py:1003`). Raising from
-   `before_tool_execute` therefore provably prevents the tool body from running.
-   This is agent-wide: it covers function tools, `Toolset`s, and MCP servers
-   alike, with one registration.
+   `wrap_tool_execute` (or simply never calling `handler`) therefore provably
+   prevents the tool body from running. `get_ordering()` declares `position=
+   "innermost"` so this capability's `wrap_tool_execute` sits as close to that raw
+   `handler` as pydantic-ai's ordering primitives allow; `wrap_tool_execute` itself
+   re-validates `ctx.root_capability` at runtime because a sibling `innermost`
+   capability can still land between it and the raw body in ways construction-time
+   checks cannot see (both class docstrings have the full argument). This is
+   agent-wide: it covers function tools, `Toolset`s, and MCP servers alike, with
+   one registration.
 
    `GuardedToolset` is the alternative, narrower hook: a
    `pydantic_ai.toolsets.WrapperToolset` whose `call_tool` authorizes before
@@ -49,17 +58,19 @@ its body runs, and every allow/deny lands in the chain's hash-chained audit log.
 This module is deliberately dependency-light: it imports `pydantic_ai` and
 `attenu_guard`, and nothing else. Copy it into your project as-is.
 
-Execution binding (0.9.0, on a `schema_version=2` chain — see `Guard.issue`):
+Execution binding (0.10.0, on a `schema_version=2` chain — see `Guard.issue`):
 BOTH hook points here are genuine WRAPPER capture (`Capture.WRAPPER_ASYNC`) — unlike
 most other framework adapters, this one calls the tool body itself and awaits it, the
 same way `adapters.langgraph`'s reference wiring does:
 
-  * `DelegationGuard`: `before_tool_execute` still does authorization (unchanged shape,
-    unchanged on `schema_version=1`); on a v2 chain it ALSO passes `capture`/`adapter`/
-    `authorized_params` and stashes the allowed `Decision` for `wrap_tool_execute` --
-    `AbstractCapability`'s own wrap-the-body hook -- to close out, correlated by
-    `id(call)` (the SAME `ToolCallPart` object flows through both hooks for one call
-    within `ToolManager._run_execute_hooks`).
+  * `DelegationGuard.wrap_tool_execute`: authorization and outcome-recording are ONE
+    operation, entirely inside this single hook -- there is no `before_tool_execute`
+    override and no cross-hook `_pending` map any more (an earlier version stashed the
+    allowed `Decision` there for `wrap_tool_execute` to close out, correlated by
+    `id(call)`; see the class docstring's "WHY ONE OPERATION, NOT TWO" for why that was
+    replaced). On a v2 chain it passes `capture`/`adapter`/`authorized_params` through to
+    `guard.check()` directly and records the outcome around `handler(args)` in the same
+    call; on `schema_version=1` it authorizes the same way and calls `handler` unrecorded.
   * `GuardedToolset.call_tool`: a `WrapperToolset.call_tool` override that already calls
     `self.wrapped.call_tool(...)` directly -- no cross-hook correlation needed at all;
     authorization and the wrapper capture live in the same method, exactly like
