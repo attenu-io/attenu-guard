@@ -15,23 +15,36 @@ The story it tells is the canonical "poisoned summarizer":
   4. That denial trips the kill switch: the summarizer's whole subtree is
      revoked, so its NEXT call -- a read that was legal a moment ago -- is
      denied too.
-  5. The delegation graph and the hash-chained audit log are printed and
-     verified offline.
+  5. The delegation graph, the hash-chained audit log, and an offline-
+     verifiable evidence bundle (signed, exported, and checked WITHOUT this
+     process) are printed -- "the ledger, checked without this process."
 
 Run it twice mentally: the "BASELINE" section at the end re-runs the same
 crew with the bridge uninstalled, and the export succeeds. That difference is
 the entire point.
+
+Exit code 0 if every expectation below held, 1 otherwise -- this script is
+not just a transcript, it is its own assertion.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("CREWAI_TRACING_ENABLED", "false")
+# CrewAI's own first-run tracing CONSENT flow (crewai/events/listeners/tracing/utils.py,
+# should_auto_collect_first_time_traces) is gated separately from the tracing toggle above -- on
+# a machine that has never run CrewAI before, it prints a one-time "Tracing Preference Saved"
+# panel regardless. `CREWAI_TESTING=true` is CrewAI's own documented escape hatch
+# (_is_test_environment) for exactly this: a deterministic, non-interactive run with no
+# consent banner, appropriate for an offline demo whose whole premise is determinism.
+os.environ.setdefault("CREWAI_TESTING", "true")
 
 # Make the repo's src/ importable when running straight from a checkout.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -47,7 +60,10 @@ from attenu_guard import (  # noqa: E402
     EgressRank,
     Guard,
     RowLimit,
+    evidence,
 )
+from attenu_guard.cli import main as attenu_guard_cli  # noqa: E402
+from attenu_guard.wire import Ed25519Signer  # noqa: E402
 
 # The adapter ships in the package as `attenu_guard.adapters.crewai`.
 from attenu_guard.adapters.crewai import CrewAIGuardBridge, ToolPolicy  # noqa: E402
@@ -183,6 +199,7 @@ def main() -> int:
             ttl=3600,
         ),
         task="deliver the Q3 pipeline summary",
+        schema_version=2,  # required for the execution-binding capture below
     )
     print(f"  orchestrator  {root.authority!r}")
 
@@ -222,6 +239,17 @@ def main() -> int:
         },
         delegation_authorities={SUMMARIZER: summarizer_authority},
         revoke_on_deny=True,  # one strike and the subtree is cut off
+        # strict_single_hook=True is an OPT-IN attestation, not the adapter's default: it tells
+        # the bridge it may claim Capture.FRAMEWORK_POST_HOOK execution binding (below, the
+        # allow/outcome pair whose params hashes match) because THIS bridge's before/after hooks
+        # are provably the only thing on CrewAI's global before_tool_call/after_tool_call hooks
+        # for the whole process. That is true here -- this script builds the crew and installs
+        # the bridge itself, nothing else touches those hooks -- but it is NOT something to copy
+        # into an app that might load other plugins on the same global hook: the honest default
+        # (strict_single_hook=False, Capture.PRE_HOOK_ONLY) is the safe choice there, since it
+        # makes no claim about what happens after check() returns. See adapters/crewai.py's own
+        # module docstring, "TWO modes."
+        strict_single_hook=True,
     )
 
     with bridge:
@@ -237,6 +265,9 @@ def main() -> int:
     print("\n  refusals:")
     for denial in bridge.denials:
         print(f"    DENIED  {denial.role}/{denial.tool_name}: {denial.reason_text}")
+    export_denied = any(d.tool_name == "crm_export" for d in bridge.denials)
+    revoked_denied = any("revoked" in d.reason_text for d in bridge.denials)
+    export_body_ran = any(e.startswith("crm_export") for e in EXECUTED)
 
     rule("4. Delegation graph")
     graph = root.graph()
@@ -248,7 +279,7 @@ def main() -> int:
         print(f"{indent}         scopes={sorted(node['authority']['scopes'])} "
               f"ttl={node['authority']['ttl']}")
 
-    rule("5. Audit log (hash-chained, offline-verifiable)")
+    rule("5. The ledger, checked without this process")
     entries = root.audit_log().entries
     for e in entries:
         line = f"  seq={e['seq']:>2} {e['event']:<12}"
@@ -259,8 +290,30 @@ def main() -> int:
         if e.get("reason"):
             line += f" reason={e['reason']}"
         print(line)
-    ok, err = AuditLog.verify(entries)
-    print(f"\n  AuditLog.verify -> {ok}" + (f" ({err})" if err else ""))
+    chain_ok, chain_err = AuditLog.verify(entries)
+    print(f"\n  {len(entries)} events, hash chain: {chain_ok}" + (f" ({chain_err})" if chain_err else ""))
+
+    # An offline-verifiable evidence bundle: signed, exported to a file, and checked back with
+    # the packaged `attenu-guard verify` command -- nothing here consults `root` or `bridge`
+    # again. This is the artifact a reviewer (or a regulator) gets: the public key alone is
+    # enough to catch a bundle tampered with after export.
+    workdir = Path(tempfile.mkdtemp(prefix="attenu-guard-crewai-recipe-"))
+    signer = Ed25519Signer.generate(kid="recipe-demo")
+    pubkey = signer.public_bytes_raw().hex()
+    bundle = evidence.export_bundle(root.audit_log(), signer)
+    bundle_path = workdir / "evidence-bundle.json"
+    bundle_path.write_text(json.dumps(bundle, indent=2))
+    print(f"\n  bundle: {bundle_path}")
+    print("  verifying it with the packaged command:")
+    print(f"    attenu-guard verify {bundle_path.name} --pubkey {pubkey[:16]}…")
+    try:
+        verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
+    except SystemExit as exc:
+        # A bare sys.exit() carries code=None, which Python treats as success (exit status 0)
+        # -- mirror that here so the `ok` check below agrees with process exit semantics.
+        verify_rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+    reviewer_graph = evidence.delegation_graph(bundle)  # not `graph` -- section 4 already used that name
+    print(f"  reviewer view: {len(reviewer_graph['nodes'])} nodes")
 
     rule("6. BASELINE: the same crew, bridge uninstalled")
     EXECUTED.clear()
@@ -274,7 +327,18 @@ def main() -> int:
         "  CrewAI itself carries no authority across a delegation: the coworker\n"
         "  runs its own full tool list (base_agent_tools.py:110-120)."
     )
-    return 0
+
+    ok = (
+        export_denied
+        and revoked_denied
+        and not export_body_ran
+        and child.is_narrower_than(root)
+        and chain_ok
+        and verify_rc in (0, None)
+        and exfiltrated  # the baseline's whole point: it DOES leak, unguarded
+    )
+    print("\nRESULT:", "OK" if ok else "FAILED")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
