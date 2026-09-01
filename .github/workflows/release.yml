@@ -18,13 +18,20 @@ jobs:
         with: { python-version: "3.12" }
       - name: Version tag must match the package version
         run: |
-          pip install -q build
+          pip install -q --require-hashes -r .github/workflows/requirements-build.txt
           V=$(python -c "import re,pathlib;print(re.search(r'^version = \"([^\"]+)\"', pathlib.Path('pyproject.toml').read_text(), re.M).group(1))")
           [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != pyproject $V"; exit 1; }
       - name: Build sdist + wheel
         run: python -m build
       - name: Check the distribution
-        run: pip install -q twine && twine check dist/*
+        # requirements-twine.txt is regenerated from requirements-twine.in with:
+        #   docker run --rm --platform linux/amd64 -v "$PWD/.github/workflows:/out" python:3.12-slim bash -c \
+        #     'pip install -q pip-tools && cd /out && pip-compile --generate-hashes --allow-unsafe --strip-extras -o requirements-twine.txt requirements-twine.in'
+        # (same recipe for requirements-build.txt). Run in a linux/amd64 container so the
+        # resolved hashes match ubuntu-latest, the runner this workflow actually uses.
+        run: |
+          pip install -q --require-hashes -r .github/workflows/requirements-twine.txt
+          twine check dist/*
       - name: Attest build provenance (SLSA, sigstore)
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

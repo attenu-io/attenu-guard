@@ -163,8 +163,14 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.12" }
       - name: Install attenu-guard + ${{ matrix.fw }} (pinned)
+        # requirements-pip.txt is a hash-locked pin of pip itself (regenerated the same way
+        # as .github/workflows/requirements-build.txt — see release.yml). `pytest` and the
+        # ${{ matrix.pkgs }} frameworks below stay version-pinned but not hash-pinned: they
+        # are `-e .`'s sibling args, and hash-locking twenty ML/agent-SDK dependency trees
+        # (relocked on every matrix bump) is not worth it for a test-only job that ships
+        # nothing — see the security-alerts report for the full reasoning.
         run: |
-          python -m pip install -q --upgrade pip
+          python -m pip install -q --require-hashes -r .github/workflows/requirements-pip.txt
           pip install -q -e . pytest ${{ matrix.pkgs }}
       - name: Run the ${{ matrix.fw }} integration test
         run: python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}*.py', matrix.fw) }}
@@ -209,6 +215,6 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.12" }
       - run: |
-          python -m pip install -q --upgrade pip
+          python -m pip install -q --require-hashes -r .github/workflows/requirements-pip.txt
           pip install -q -e . pytest ${{ matrix.pkgs }}
           python -m pytest -q ${{ matrix.tests || format('tests/integrations/test_{0}*.py', matrix.fw) }}
