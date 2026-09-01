@@ -170,13 +170,18 @@ def main() -> int:
           f"(it was 4200 when authorized)")
     print(f"  authorized_params_hash == invoked_params_hash: "
           f"{summarize_allow['authorized_params_hash'] == summarize_outcome['invoked_params_hash']}")
-    print("  This is NOT a tautology: the snapshot is taken BEFORE the call, and re-used for")
+    print("  This is NOT a tautology: the snapshot is taken BEFORE the call and re-used for")
     print("  BOTH hashes rather than re-read from the (now-mutated) argument afterward -- an")
     print("  adapter that instead re-read `state` post-call would commit a DIFFERENT")
-    print("  invoked_params_hash here. It proves the ARGUMENTS authorized are the arguments")
-    print("  invoked; it does not prove anything else about what summarize() did with them,")
-    print("  and it says nothing about a call path that reaches crm_query without going")
-    print("  through this node at all.")
+    print("  invoked_params_hash here.")
+    print("  What it proves: the parameters committed to the ledger are the ones captured")
+    print("  before the call, so a body that mutates its own input cannot rewrite the")
+    print("  evidence of what it was authorized to do.")
+    print("  What it does NOT prove: this is ONE observation reused twice, not two")
+    print("  independent readings compared -- it cannot detect a mutation made between the")
+    print("  snapshot and the invocation (a user-supplied `context_fn` runs in that window).")
+    print("  It says nothing about what summarize() did with the arguments, and nothing")
+    print("  about a call path that reaches crm_query without going through this node.")
     capture_is_wrapper_sync = summarize_allow["capture"] == Capture.WRAPPER_SYNC
     mutation_did_not_move_the_hash = (
         bool(STATE_AFTER_MUTATION) and STATE_AFTER_MUTATION[0] == -1

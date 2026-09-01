@@ -5,8 +5,8 @@ adapter, LangGraph 1.x's reference wiring for this library. An orchestrator
 delegates a summarization job to a summarizer, the summarizer gets a Guard
 that is strictly narrower than the orchestrator's, and a poisoned tool call
 the summarizer was never delegated is denied before its body runs — with a
-real execution-binding record proving the arguments authorized are the
-arguments invoked, a revocation that cuts off a call that was legal a
+real execution-binding record showing the parameters committed are the
+ones captured before the call, a revocation that cuts off a call that was legal a
 moment earlier, and a signed, offline-verifiable evidence bundle at the end.
 
 (LangChain 1.x's own agent-loop middleware, `attenu_guard.adapters.langchain`,
@@ -113,13 +113,18 @@ lines inside section 6 (only their count is shown below).
   summarize() mutated its OWN argument in place, after the call was authorized:
     state['expected_rows'] became -1 inside the call (it was 4200 when authorized)
   authorized_params_hash == invoked_params_hash: True
-  This is NOT a tautology: the snapshot is taken BEFORE the call, and re-used for
+  This is NOT a tautology: the snapshot is taken BEFORE the call and re-used for
   BOTH hashes rather than re-read from the (now-mutated) argument afterward -- an
   adapter that instead re-read `state` post-call would commit a DIFFERENT
-  invoked_params_hash here. It proves the ARGUMENTS authorized are the arguments
-  invoked; it does not prove anything else about what summarize() did with them,
-  and it says nothing about a call path that reaches crm_query without going
-  through this node at all.
+  invoked_params_hash here.
+  What it proves: the parameters committed to the ledger are the ones captured
+  before the call, so a body that mutates its own input cannot rewrite the
+  evidence of what it was authorized to do.
+  What it does NOT prove: this is ONE observation reused twice, not two
+  independent readings compared -- it cannot detect a mutation made between the
+  snapshot and the invocation (a user-supplied `context_fn` runs in that window).
+  It says nothing about what summarize() did with the arguments, and nothing
+  about a call path that reaches crm_query without going through this node.
 
 5. Revocation: a call that was legal a moment ago, denied
   before revoke: summarize({'expected_rows': 10}) allowed? True
@@ -181,10 +186,13 @@ whichever node function it decorates, and holds:
   the outcome directly. There is no mode-split flag to set and no weaker
   default to fall back to here.
   **What `authorized_params_hash == invoked_params_hash` proves:** the
-  arguments `Guard.check()` authorized are byte-for-byte the arguments the
-  wrapped callable was actually invoked with — a callable that mutated its
-  own inputs in place cannot make this adapter observe two different
-  values for what was actually one call.
+  parameters committed to the ledger are the ones captured before the call,
+  so a callable that mutates its own inputs in place cannot rewrite the
+  evidence of what it was authorized to do.
+  **What it does not prove:** this is one observation reused for both
+  records, not two independent readings compared, so it cannot detect a
+  mutation made between the snapshot and the invocation — a user-supplied
+  `context_fn` runs in exactly that window and receives the live arguments.
   **What it does NOT prove:** anything about what the callable's body did
   with those arguments once it ran, and nothing about a call path that
   reaches the same side effect (e.g. calling `crm_query`'s underlying
