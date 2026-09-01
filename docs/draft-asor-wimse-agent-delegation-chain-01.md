@@ -222,6 +222,9 @@ constraint value. This document defines:
 
 - "max" : a number. The value of the associated quantity MUST NOT exceed it
   (e.g. {"key": "max_rows", "max": 5000}).
+- "min" : a number. The value of the associated quantity MUST NOT be less than
+  it (e.g. {"key": "tenure_years", "min": 2}). Where "max" carries a ceiling
+  tightened downward, "min" carries a floor tightened upward.
 - "one_of" : an array. The associated value MUST be a member.
 - "not_one_of" : an array. The associated value MUST NOT be a member.
 - "prefix" : a string. The associated value MUST have it as a prefix.
@@ -240,8 +243,8 @@ of the following hold:
 1. Every scope in C's "agent_delegation" detail is covered by at least one
    scope in P's "agent_delegation" detail according to {{scopes}}, and
 2. for every constraint present in P, a corresponding constraint is present in C
-   whose admissible set is a subset of P's (e.g. C.max <= P.max; C.one_of subset
-   of P.one_of; C.rank <= P.rank), and
+   whose admissible set is a subset of P's (e.g. C.max <= P.max; C.min >= P.min;
+   C.one_of subset of P.one_of; C.rank <= P.rank), and
 3. a constraint present in P MUST NOT be absent in C (absence means unbounded,
    which is not a subset), and
 4. C.exp <= P.exp (monotonic expiry), and
@@ -367,7 +370,7 @@ with a migration path to ML-DSA {{RFC9964}}.
 This document requests registration, in the JSON Web Token Claims registry, of:
 "del_depth", "del_max_depth", and "par_hash" (with the semantics in
 {{token-format}}). It requests a new "Agent Delegation Constraint Types" registry
-(initial entries: "max", "one_of", "not_one_of", "prefix", "rank"; registration
+(initial entries: "max", "min", "one_of", "not_one_of", "prefix", "rank"; registration
 policy Specification Required; unknown types fail closed per {{constraints}}). It
 requests an "authorization_details" type value for delegated agent authority,
 coordinated with {{I-D.niyikiza-oauth-attenuating-agent-tokens}} to avoid
