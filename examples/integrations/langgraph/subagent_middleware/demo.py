@@ -323,7 +323,8 @@ def main() -> int:
             # A bare sys.exit() carries code=None, which Python treats as success (exit status
             # 0) -- mirror that here so the `ok` check below agrees with process exit semantics.
             verify_rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
-        ok = bool(ok) and chain_ok and verify_rc in (0, None)
+        # the except branch above already maps a bare sys.exit() to 0, so None is unreachable
+        ok = bool(ok) and chain_ok and verify_rc == 0
 
     print("\nRESULT:", "OK" if ok else "FAIL")
     return EXIT_OK if ok else EXIT_FAIL
