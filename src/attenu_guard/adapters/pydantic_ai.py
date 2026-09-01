@@ -1,7 +1,8 @@
 """
 attenu_guard.adapters.pydantic_ai — a thin attenu-guard integration for Pydantic AI.
 
-Tested against pydantic-ai-slim 2.31.1 (Python >= 3.10).
+Tested against pydantic-ai-slim 2.31.1 and re-verified against 2.37.0 (Python >= 3.10);
+line numbers below are as of 2.37.0.
 
 HOOK POINTS USED
 ----------------
@@ -15,16 +16,16 @@ HOOK POINTS USED
 
 2. Tool invocation — `DelegationGuard.wrap_tool_execute(...)`, a subclass of
    `pydantic_ai.capabilities.AbstractCapability`
-   (`pydantic_ai/capabilities/abstract.py:846`), registered with
+   (`pydantic_ai/capabilities/abstract.py:209`), registered with
    `Agent(capabilities=[...])`. Since 0.10.0 this is the ONLY hook `DelegationGuard`
    overrides — it does not touch `before_tool_execute` at all, so the inherited
    no-op passthrough runs there (see `get_ordering()`/`for_agent()`'s docstrings
    for why authorization and outcome-recording were collapsed into one call).
    `ToolManager._run_execute_hooks` awaits (the no-op) `before_tool_execute` at
-   `pydantic_ai/tool_manager.py:459`, and only afterwards calls
+   `pydantic_ai/tool_manager.py:460`, and only afterwards calls
    `wrap_tool_execute(..., handler=do_execute)` at
-   `pydantic_ai/tool_manager.py:463`, where `do_execute` is the only path to
-   `toolset.call_tool` (`pydantic_ai/tool_manager.py:1003`). Raising from
+   `pydantic_ai/tool_manager.py:464`, where `do_execute` is the only path to
+   `toolset.call_tool` (`pydantic_ai/tool_manager.py:1009`). Raising from
    `wrap_tool_execute` (or simply never calling `handler`) therefore provably
    prevents the tool body from running. `get_ordering()` declares `position=
    "innermost"` so this capability's `wrap_tool_execute` sits as close to that raw
@@ -37,7 +38,7 @@ HOOK POINTS USED
 
    `GuardedToolset` is the alternative, narrower hook: a
    `pydantic_ai.toolsets.WrapperToolset` whose `call_tool` authorizes before
-   delegating to `self.wrapped.call_tool` (`pydantic_ai/toolsets/wrapper.py:63`).
+   delegating to `self.wrapped.call_tool` (`pydantic_ai/toolsets/wrapper.py:67`).
    Use it to guard one specific (e.g. third-party or MCP) toolset rather than
    every tool the agent can reach.
 
@@ -144,11 +145,15 @@ AppDepsT = TypeVar("AppDepsT")
 OnDenial = Literal["raise", "tool_failed"]
 """What to do when the Guard denies a call.
 
-`"raise"`      — re-raise `attenu_guard.AuthorityDenied`. Pydantic AI does not
-                 catch it (`pydantic_ai/tool_manager.py:477-489` only catches
-                 `ValidationError` / `ModelRetry` / `ToolFailed`), so it aborts the
-                 whole agent run. Deterministic hard stop; the default, because a
-                 denied action is a security event, not a conversational hiccup.
+`"raise"`      — re-raise `attenu_guard.AuthorityDenied`. `_run_execute_hooks` does
+                 route it through the generic `except Exception` -> `on_tool_execute_error`
+                 path (`pydantic_ai/tool_manager.py:470-471`), but that hook's default
+                 implementation is `raise error` (`capabilities/abstract.py:1068`), and
+                 the outer `except (ValidationError, ModelRetry)` / `except ToolFailed`
+                 clauses (`pydantic_ai/tool_manager.py:478-490`) don't match it either, so
+                 it still propagates uncaught and aborts the whole agent run. Deterministic
+                 hard stop; the default, because a denied action is a security event, not a
+                 conversational hiccup.
 `"tool_failed"` — raise `pydantic_ai.exceptions.ToolFailed`, which Pydantic AI turns
                  into a failed tool result the model sees and can adapt to, WITHOUT
                  consuming the tool's retry budget (so the model cannot grind
@@ -433,7 +438,7 @@ class DelegationGuard(AbstractCapability[Any]):
     `Toolset` on the agent, and MCP servers.
 
     Output tools are exempt by design — Pydantic AI does not fire tool hooks for
-    them (`pydantic_ai/tool_manager.py:454`); they produce the run's result and
+    them (`pydantic_ai/tool_manager.py:455`); they produce the run's result and
     reach no external system.
 
     ORDERING (0.9.0 execution binding): `get_ordering()` declares `position="innermost"`.
@@ -523,8 +528,9 @@ class DelegationGuard(AbstractCapability[Any]):
         (checked via `type(sibling).wrap_tool_execute is not AbstractCapability.
         wrap_tool_execute`, the same idiom pydantic-ai's own `_has_wrap_node_run` uses
         internally for the analogous check). Pinned pydantic-ai 2.31.1's `innermost` tier has NO
-        ordering edges among its own members (`_ordering.py:90-103` -- only list order as a
-        tiebreaker), so this capability cannot PROVE it is the closest wrapper to the raw tool
+        ordering edges among its own members (`_ordering.py:85-103`, `_add_position_edges` --
+        only list order as a tiebreaker; unchanged as of 2.37.0), so this capability cannot
+        PROVE it is the closest wrapper to the raw tool
         body when a sibling in the same tier also wraps execution: `handler` could be that
         sibling's own `wrap_tool_execute`, not the raw body, and a live probe against pinned
         2.31.1 confirmed the consequence -- the sibling's own pre-handler failure was

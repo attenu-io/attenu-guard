@@ -1,5 +1,5 @@
 """
-Integration test: attenu-guard x Pydantic AI (pydantic-ai-slim 2.31.1).
+Integration test: attenu-guard x Pydantic AI (pydantic-ai-slim 2.31.1, re-verified against 2.37.0).
 
 Runs entirely offline: the LLM is `pydantic_ai.models.function.FunctionModel`,
 which returns scripted `ToolCallPart`s, so no API key is needed.
