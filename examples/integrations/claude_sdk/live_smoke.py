@@ -91,10 +91,12 @@ async def main() -> int:
             )
         },
         hooks=reg.hooks(),            # <- PreToolUse / SubagentStart / SubagentStop
-        # Second gate. The SDK will emit CanUseToolShadowedWarning here, and it
-        # is right to: every tool above is in `allowed_tools`, and an allow rule
-        # auto-approves before `can_use_tool` runs. That is exactly why the
-        # PreToolUse hook, not this callback, is the enforcement point.
+        # NOT a second gate: `can_use_tool` never decides anything on its own -- it only
+        # replays the verdict `PreToolUse` already cached for this exact call (see
+        # adapters/claude_sdk.py's own doc comment). The SDK will emit
+        # CanUseToolShadowedWarning here, and it is right to: every tool above is in
+        # `allowed_tools`, and an allow rule auto-approves before `can_use_tool` runs
+        # regardless -- `PreToolUse`, not this callback, is the actual enforcement point.
         can_use_tool=reg.can_use_tool,
         max_turns=12,
         max_budget_usd=1.0,
