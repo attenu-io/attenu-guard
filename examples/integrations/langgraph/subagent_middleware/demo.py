@@ -23,6 +23,7 @@ Run:  python examples/integrations/langgraph/subagent_middleware/demo.py
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -38,7 +39,8 @@ from langchain_core.tools import BaseTool, tool
 
 from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit, evidence
 from attenu_guard.adapters.langchain import GuardedDelegation, ToolPolicy
-from attenu_guard.wire import HS256TestSigner
+from attenu_guard.cli import main as attenu_guard_cli
+from attenu_guard.wire import Ed25519Signer
 
 EXIT_OK, EXIT_FAIL, EXIT_PREMISE_CHANGED = 0, 1, 3
 
@@ -303,13 +305,25 @@ def main() -> int:
         entries = root.audit_log().entries
         chain_ok, err = AuditLog.verify(entries)
         print(f"    hash chain verifies: {chain_ok} ({len(entries)} events, {log.name}) {err or ''}")
-        signer = HS256TestSigner(b"demo-key", kid="demo")
+        # Ed25519, not a shared-secret HS256 test signer: a recipe that demonstrates "anyone can
+        # verify this offline" while signing with a symmetric key would be teaching the wrong
+        # thing -- anyone who CAN verify a symmetric-key signature can also forge one. Ed25519 is
+        # public-key: a verifier only ever needs the public half. Verified through the packaged
+        # `attenu-guard verify` CLI -- the same command a reader would actually run.
+        signer = Ed25519Signer.generate(kid="demo")
+        pubkey = signer.public_bytes_raw().hex()
         bundle = evidence.export_bundle(root.audit_log(), signer)
-        rep = evidence.verify_bundle(bundle, signer)
-        c = rep["checks"]
-        print(f"    signed bundle verifies offline: integrity={c['integrity']} "
-              f"monotonicity={c['monotonicity']} containment={c['containment']} ok={rep['ok']}")
-        ok = bool(ok) and chain_ok and rep["ok"]
+        bundle_path = Path(td) / "evidence-bundle.json"
+        bundle_path.write_text(json.dumps(bundle, indent=2))
+        print(f"    verifying with the packaged command: attenu-guard verify "
+              f"{bundle_path.name} --pubkey {pubkey[:16]}…")
+        try:
+            verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
+        except SystemExit as exc:
+            # A bare sys.exit() carries code=None, which Python treats as success (exit status
+            # 0) -- mirror that here so the `ok` check below agrees with process exit semantics.
+            verify_rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+        ok = bool(ok) and chain_ok and verify_rc in (0, None)
 
     print("\nRESULT:", "OK" if ok else "FAIL")
     return EXIT_OK if ok else EXIT_FAIL
