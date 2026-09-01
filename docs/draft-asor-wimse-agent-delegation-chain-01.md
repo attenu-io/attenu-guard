@@ -107,7 +107,13 @@ designed as the attenuation mechanism satisfying requirement R1 of
 converge with, {{I-D.niyikiza-oauth-attenuating-agent-tokens}} and
 {{I-D.coetzee-oauth-spt-txn-tokens}}. Its offline verification model is
 complementary to the online Delegation Server and synchronous revocation model
-in {{I-D.sweeney-wimse-credential-delegation}}.
+in {{I-D.sweeney-wimse-credential-delegation}}. The two are halves of one
+design, separated by a single axis: whether a server is in the path. The
+in-token mechanisms this document requires -- constraints carried in the token,
+parent-hash verification, and a child expiry bounded by its parent's -- are how
+a verifier with no network reconstructs what such a server would otherwise know
+first-hand; where a server is in every hop, they are redundant rather than
+absent.
 
 # Conventions and Definitions
 
