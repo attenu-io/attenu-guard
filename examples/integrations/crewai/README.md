@@ -121,7 +121,7 @@ graph and the raw audit-log lines between sections 4 and 5.
 
   10 events, hash chain: True
 
-  bundle: /tmp/.../evidence-bundle.json
+  bundle: (fresh temp dir)/evidence-bundle.json
   verifying it with the packaged command:
     attenu-guard verify evidence-bundle.json --pubkey ...
 integrity=True monotonicity=True containment=True anchor=verified nodes=3 actions_checked=1

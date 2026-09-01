@@ -334,7 +334,7 @@ def main() -> int:
         and not export_body_ran
         and child.is_narrower_than(root)
         and chain_ok
-        and verify_rc in (0, None)
+        and verify_rc == 0
         and exfiltrated  # the baseline's whole point: it DOES leak, unguarded
     )
     print("\nRESULT:", "OK" if ok else "FAILED")
