@@ -734,7 +734,7 @@ class DelegationGuardRegistry:
             invoked_params=pending.snapshot, duration_ms=duration_ms)
         return {}
 
-    # ---- the second gate: ClaudeAgentOptions.can_use_tool ----------------
+    # ---- the replay point (NOT a second gate): ClaudeAgentOptions.can_use_tool ----
     async def can_use_tool(self, tool_name: str, tool_input: Mapping[str, Any],
                            context: Any):
         """``CanUseTool`` callback. NEVER makes an independent policy decision --
