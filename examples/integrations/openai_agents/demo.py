@@ -310,12 +310,9 @@ async def main() -> int:
     print(f"\n  bundle: {bundle_path}")
     print("  verifying it with the packaged command:")
     print(f"    attenu-guard verify {bundle_path.name} --pubkey {pubkey[:16]}…")
-    try:
-        verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
-    except SystemExit as exc:
-        # A bare sys.exit() carries code=None, which Python treats as success (exit status 0)
-        # -- mirror that here so the `ok` check below agrees with process exit semantics.
-        verify_rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
+    # `cli.main` is a plain function returning 0/1/2 -- imported and called like this it
+    # never raises SystemExit (only its own `if __name__ == "__main__"` guard does).
+    verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
     reviewer_graph = evidence.delegation_graph(bundle)  # not `graph` -- section 4 already used that name
     print(f"  reviewer view: {len(reviewer_graph['nodes'])} nodes")
 

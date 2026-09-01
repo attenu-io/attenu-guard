@@ -317,13 +317,9 @@ def main() -> int:
         bundle_path.write_text(json.dumps(bundle, indent=2))
         print(f"    verifying with the packaged command: attenu-guard verify "
               f"{bundle_path.name} --pubkey {pubkey[:16]}…")
-        try:
-            verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
-        except SystemExit as exc:
-            # A bare sys.exit() carries code=None, which Python treats as success (exit status
-            # 0) -- mirror that here so the `ok` check below agrees with process exit semantics.
-            verify_rc = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
-        # the except branch above already maps a bare sys.exit() to 0, so None is unreachable
+        # `cli.main` is a plain function returning 0/1/2 -- imported and called like this it
+        # never raises SystemExit (only its own `if __name__ == "__main__"` guard does).
+        verify_rc = attenu_guard_cli(["verify", str(bundle_path), "--pubkey", pubkey])
         ok = bool(ok) and chain_ok and verify_rc == 0
 
     print("\nRESULT:", "OK" if ok else "FAIL")
