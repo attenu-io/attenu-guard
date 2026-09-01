@@ -58,6 +58,7 @@ ORCHESTRATOR = "orchestrator"
 SUMMARIZER = "summarizer"
 
 EXECUTED: list[str] = []
+STATE_AFTER_MUTATION: list[int] = []   # what summarize() saw its OWN input become, after mutating it
 
 
 def rule(title: str) -> None:
@@ -77,6 +78,15 @@ def _make_nodes(guard: Guard):
     @guard_node(guard, "crm.read", context_fn=lambda state: {"rows": state["expected_rows"]})
     def summarize(state: State) -> dict:
         EXECUTED.append(f"summarize(rows={state['expected_rows']})")
+        # Mutates its OWN argument in place, after the call was already authorized -- see
+        # section 4. `guard_node` takes one immutable snapshot of `*args, **kwargs` BEFORE
+        # invocation and reuses that SAME snapshot for both authorized_params and
+        # invoked_params (never re-reading `state` afterward), so this mutation cannot move
+        # the committed hash -- a genuinely falsifiable claim: an adapter that instead
+        # re-read `state` after the call would commit a DIFFERENT invoked_params_hash here.
+        state["expected_rows"] = -1
+        state["note"] = "MUTATED after the call was authorized"
+        STATE_AFTER_MUTATION.append(state["expected_rows"])
         return {"note": f"summarised {state['expected_rows']} rows"}
 
     def export_impl(state: State) -> dict:
@@ -155,13 +165,23 @@ def main() -> int:
     summarize_outcome = next(e for e in entries if e.get("call_id") == summarize_allow.get("call_id")
                              and e["event"] == "outcome")
     print(f"  capture: {summarize_allow['capture']}")
+    print(f"  summarize() mutated its OWN argument in place, after the call was authorized:")
+    print(f"    state['expected_rows'] became {STATE_AFTER_MUTATION[0]} inside the call "
+          f"(it was 4200 when authorized)")
     print(f"  authorized_params_hash == invoked_params_hash: "
           f"{summarize_allow['authorized_params_hash'] == summarize_outcome['invoked_params_hash']}")
-    print("  This proves the ARGUMENTS authorized are the arguments invoked -- it does not")
-    print("  prove anything about what summarize() did with them, and it says nothing about")
-    print("  a call path that reaches crm_query without going through this node at all.")
+    print("  This is NOT a tautology: the snapshot is taken BEFORE the call, and re-used for")
+    print("  BOTH hashes rather than re-read from the (now-mutated) argument afterward -- an")
+    print("  adapter that instead re-read `state` post-call would commit a DIFFERENT")
+    print("  invoked_params_hash here. It proves the ARGUMENTS authorized are the arguments")
+    print("  invoked; it does not prove anything else about what summarize() did with them,")
+    print("  and it says nothing about a call path that reaches crm_query without going")
+    print("  through this node at all.")
     capture_is_wrapper_sync = summarize_allow["capture"] == Capture.WRAPPER_SYNC
-    hashes_match = summarize_allow["authorized_params_hash"] == summarize_outcome["invoked_params_hash"]
+    mutation_did_not_move_the_hash = (
+        bool(STATE_AFTER_MUTATION) and STATE_AFTER_MUTATION[0] == -1
+        and summarize_allow["authorized_params_hash"] == summarize_outcome["invoked_params_hash"]
+    )
 
     rule("5. Revocation: a call that was legal a moment ago, denied")
     print(f"  before revoke: summarize({{'expected_rows': 10}}) allowed? "
@@ -245,10 +265,10 @@ def main() -> int:
         and not export_body_ran
         and summarizer.is_narrower_than(root)
         and capture_is_wrapper_sync
-        and hashes_match
+        and mutation_did_not_move_the_hash
         and revoked_denied
         and chain_ok
-        and verify_rc in (0, None)
+        and verify_rc == 0  # the except branch above already maps a bare sys.exit() to 0
         and exfiltrated  # the baseline's whole point: it DOES leak, unguarded
     )
     print("\nRESULT:", "OK" if ok else "FAILED")

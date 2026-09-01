@@ -85,8 +85,8 @@ story against a real model; it is env-gated (`RUN_LIVE=1` +
 
 ## Expected output
 
-Abridged; the run prints the full transcript, including the delegation
-graph and the raw audit-log lines between sections 5 and 6.
+Abridged; the run prints the full transcript, including the raw audit-log
+lines inside section 6 (only their count is shown below).
 
 ```text
 1. The authority the orchestrator holds
@@ -110,10 +110,16 @@ graph and the raw audit-log lines between sections 5 and 6.
 
 4. Execution binding: genuine WRAPPER_SYNC, no attestation flag
   capture: wrapper_sync
+  summarize() mutated its OWN argument in place, after the call was authorized:
+    state['expected_rows'] became -1 inside the call (it was 4200 when authorized)
   authorized_params_hash == invoked_params_hash: True
-  This proves the ARGUMENTS authorized are the arguments invoked -- it does not
-  prove anything about what summarize() did with them, and it says nothing about
-  a call path that reaches crm_query without going through this node at all.
+  This is NOT a tautology: the snapshot is taken BEFORE the call, and re-used for
+  BOTH hashes rather than re-read from the (now-mutated) argument afterward -- an
+  adapter that instead re-read `state` post-call would commit a DIFFERENT
+  invoked_params_hash here. It proves the ARGUMENTS authorized are the arguments
+  invoked; it does not prove anything else about what summarize() did with them,
+  and it says nothing about a call path that reaches crm_query without going
+  through this node at all.
 
 5. Revocation: a call that was legal a moment ago, denied
   before revoke: summarize({'expected_rows': 10}) allowed? True
@@ -122,11 +128,12 @@ graph and the raw audit-log lines between sections 5 and 6.
      to exercise it, on this call or on the graph run above.
 
 6. The ledger, checked without this process
-    (raw audit-log lines printed here)
+    (9 raw audit-log lines printed here: seq 0-8, one per root/spawn/kill/
+    allow/outcome/deny event)
 
   9 events, hash chain: True
 
-  bundle: /tmp/.../evidence-bundle.json
+  bundle: (fresh temp dir)/evidence-bundle.json
   verifying it with the packaged command:
     attenu-guard verify evidence-bundle.json --pubkey ...
 integrity=True monotonicity=True containment=True anchor=verified nodes=3 actions_checked=1
