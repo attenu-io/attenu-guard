@@ -6,6 +6,8 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-02
+
 ### Added
 - **Bundle-level interop test vectors (`tests/vectors/bundles/bundle_vectors_v1.json`, shipped in
   the package as `attenu_guard.vectors.load_bundle_vectors()`).** The token vectors have always
