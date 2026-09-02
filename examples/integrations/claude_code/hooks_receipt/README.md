@@ -20,7 +20,7 @@ Subagent narrowing is native, and it is good. From the
 - **Hooks run inside subagents.** `PreToolUse` and `PostToolUse` from
   [`settings.json`](https://code.claude.com/docs/en/settings) "apply to all tool calls everywhere",
   and `SubagentStart` / `SubagentStop` target specific agent types.
-- **`permissionMode`** inherits, with the parent's mode taking precedence where it is stricter.
+- **`permissionMode`** inherits the parent's mode when unset. The docs state the precedence only in the loose direction: "If the parent uses `bypassPermissions` or `acceptEdits`, this takes precedence and can't be overridden", and under auto mode the child's frontmatter mode is ignored. No sentence says a stricter parent clamps a looser child (docs read 2026-09-02).
 
 That machinery decides first. A call Claude Code refuses never reaches a tool body, whatever this recipe
 does. What follows is a second, independent check that produces a record.
