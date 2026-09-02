@@ -43,6 +43,7 @@ informative:
   I-D.niyikiza-oauth-attenuating-agent-tokens:
   I-D.coetzee-oauth-spt-txn-tokens:
   I-D.sweeney-wimse-credential-delegation:
+  I-D.hamr-oauth-agent-delegation:
   Macaroons:
     title: "Macaroons: Cookies with Contextual Caveats for Decentralized Authorization in the Cloud"
     date: 2014
@@ -386,7 +387,9 @@ This work builds directly on, and seeks convergence with,
 {{I-D.sweeney-wimse-credential-delegation}}, {{I-D.klrc-aiagent-auth}}, and the
 requirements of {{I-D.reece-wimse-cross-org-delegation}}. The capability-token
 lineage of {{Macaroons}}, {{Biscuit}}, and {{RFC2693}} is gratefully
-acknowledged.
+acknowledged. The "min" constraint type was added after Amr Hassan, author of
+{{I-D.hamr-oauth-agent-delegation}}, observed that -00 had no comparator for a
+floor tightened upward; the "tenure_years" example is his.
 
 # Reference Implementation and Test Vectors
 
