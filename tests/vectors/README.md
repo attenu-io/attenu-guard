@@ -266,7 +266,10 @@ of the human-readable `failures` list.
   names its own equivalent unpositioned integrity failure is conformant.
 - `reject_tampered_entry` — the same edit with nothing re-hashed. The stored
   hash no longer covers the entry's contents, so the chain check fails AT that
-  entry. Required: `integrity`, positioned on it.
+  entry. Required: `integrity`, positioned on it. This build additionally
+  reports `integrity(anchor)` for the same mismatch, because the anchor check
+  re-walks the chain before comparing heads; that is the one finding seen
+  twice, permitted, not required. (Found by the first independent run.)
 
 ### Verifying a bundle from the file alone
 
@@ -307,6 +310,20 @@ time- or randomness-dependent, so running it twice produces identical bytes.
 The generator self-checks every case against this build's own
 `verify_bundle()` before exiting 0, and `tests/test_bundle_vectors.py`
 regenerates and re-scores the whole file on every test run.
+
+### Independent runs
+
+Runs of this file by verifiers that share no code with this repository, pinned so a reader can
+re-run them. Each carries the claim boundary its author stated, and nothing wider.
+
+- **safal207, 2026-09-02** — a standalone, stdlib-only Python verifier (no `attenu_guard`
+  import; the fixture read as raw bytes) scored the released `bundle_vectors_v1.json` at
+  attenu-guard `v0.11.0` / attenu-guard-ts `v0.6.0`: 8 of 8 cases conformant, every required
+  `{reason, seq, node}` at its declared position, two diagnostic differences inside the
+  minimal-set rule. Proof tree, verifier and machine-readable report:
+  `safal207/ContractGraph-QA` at commit `61dc428`, `proofs/attenu-guard-v0.11.0-independent`.
+  Stated boundary: the released corpus only; no claim of general verifier completeness,
+  runtime correctness, production security or certification.
 
 ## Why HS256 for interop vectors carrying a published secret
 
