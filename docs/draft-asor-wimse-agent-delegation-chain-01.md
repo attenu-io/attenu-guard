@@ -389,7 +389,8 @@ requirements of {{I-D.reece-wimse-cross-org-delegation}}. The capability-token
 lineage of {{Macaroons}}, {{Biscuit}}, and {{RFC2693}} is gratefully
 acknowledged. The "min" constraint type was added after Amr Hassan, author of
 {{I-D.hamr-oauth-agent-delegation}}, observed that -00 had no comparator for a
-floor tightened upward; the "tenure_years" example is his.
+floor tightened upward; the duration-typed "tenureMin" axis of that document is
+the motivating example.
 
 # Reference Implementation and Test Vectors
 
