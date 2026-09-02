@@ -11,8 +11,8 @@ each script is the run behind the corresponding row in the blog post
 | Directory | Framework | Run |
 |---|---|---|
 | `langgraph/` | LangGraph + Deep Agents | `python examples/baselines/langgraph/bounded_by_parent.py examples/integrations/langgraph/subagent_middleware/demo.py` (unguarded run, then the twelve-line `BoundedByParent` middleware) |
-| `crewai/` | CrewAI | `python examples/baselines/crewai/baseline.py` |
-| `claude_code/` | Claude Code / Claude Agent SDK | `python examples/baselines/claude_code/baseline.py` (drives the SDK's real command builder; no model call) |
+| `crewai/` | CrewAI | `python examples/baselines/crewai/baseline.py` · `reviewer.py` (a reviewer coworker whose own list includes the export tool; output in `output-reviewer-2026-09-02.txt`) |
+| `claude_code/` | Claude Code / Claude Agent SDK | `python examples/baselines/claude_code/baseline.py` (SDK command builder, no model call) · `live_check.py` (live, Haiku, capped; the CLI's answer is in `output-live-2026-09-02.txt`) |
 | `openai_agents/` | OpenAI Agents SDK | `python examples/baselines/openai_agents/baseline.py` |
 | `google_adk/` | Google ADK | `python examples/baselines/google_adk/baseline.py` |
 

