@@ -26,7 +26,7 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Rename gate (the old name never returns outside CHANGELOG/I-D)
         run: |
-          ! git grep -nE "\\bdelegation[_-]guard\\b|\\bdg (demo|view|scenarios|verify)\\b" -- . ":(exclude)CHANGELOG.md" ":(exclude)docs/draft-*.md"
+          ! git grep -nE "\\bdelegation[_-]guard\\b|\\bdg (demo|view|scenarios|verify)\\b" -- . ":(exclude)CHANGELOG.md" ":(exclude)docs/release-notes/*" ":(exclude)docs/draft-*.md"
       - name: Property invariants (4k trials each, zero deps)
         run: python tests/run_properties.py
       - name: RFC 8785 canonicalization (zero deps)
