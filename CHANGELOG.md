@@ -6,6 +6,43 @@ All notable changes to attenu-guard are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-02
+
+### Added
+- **Bundle-level interop test vectors (`tests/vectors/bundles/bundle_vectors_v1.json`, shipped in
+  the package as `attenu_guard.vectors.load_bundle_vectors()`).** The token vectors have always
+  let an independent implementation score its own *token* verifier; there was no equivalent for
+  the *bundle* verifier, which is where the offline-verifiability claim actually lands -- an
+  auditor checks a published ledger with no engine, no service and no vendor in the loop. Eight
+  cases, every one derived from a single valid schema-v2 bundle by exactly ONE change, so each
+  isolates one rule: `valid_bundle_v2` (accept), `reject_params_mismatch`,
+  `reject_outcome_without_allow`, `reject_outcome_before_allow`, `reject_duplicate_outcome`,
+  `reject_duplicate_call_id`, `reject_rehashed_chain` (one entry edited and every later hash
+  recomputed -- the rewrite a hash chain alone cannot catch, which only the signed anchor does)
+  and `reject_tampered_entry` (the same edit with nothing re-hashed, which fails AT that entry).
+  Written by `tests/vectors/generate_bundles.py` on the same single-writer, deterministic,
+  stdlib-only discipline as `generate.py`: one serialisation written to both the repository copy
+  and the packaged copy, byte-identical by construction, self-checked against this build's own
+  `verify_bundle()` before the generator exits 0. Because a bundle verifier reports a LIST of
+  failures rather than one reject reason, each rejecting case declares `expect_failures`: the
+  MINIMAL set of `{reason, seq, node}` that MUST appear, at that exact position. A conformant
+  verifier MAY report more (one broken record often makes a second check unsatisfiable) but never
+  fewer and never elsewhere. Format, scoring rule and the byte-level recipe for re-checking an
+  entry hash and an anchor signature: `tests/vectors/README.md`.
+- **`verify_bundle()` reports `failure_details`, the structured twin of `failures`** (additive;
+  `failures` is byte-identical to before, because other implementations parse those strings).
+  One dict per string, same order, same count: `{"reason", "seq", "node", "call_id", "detail"}`,
+  so a conformance suite can assert WHICH check failed and WHERE instead of matching prose.
+  `reason` is the token before the colon in the message, except at the two historical sites whose
+  message names a node there (`unreadable_authority`, `unreadable_granted`), which state their
+  reason explicitly. Positions are the offending entry's own `seq`/`node`: the second sighting for
+  a re-used `call_id`, the `outcome` entry for every allow/outcome binding failure, and null for a
+  genuinely chain-level failure such as a signed anchor that no longer matches the ledger head.
+  Every failure in `evidence.py` now goes through one collector, so a message cannot be added
+  without its twin -- `tests/test_bundle_vectors.py` asserts the two lists stay in step at every
+  failure site in the module (including the ones no vector exercises) and traps a direct append.
+  The `execution_binding` sub-report's own shape is unchanged: the twins ride alongside it.
+
 ## [0.10.0] - 2026-08-31
 
 ### Fixed

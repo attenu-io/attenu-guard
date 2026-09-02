@@ -33,7 +33,7 @@ from .audit import AuditLog, CommittedAuditError
 from .strikes import StrikePolicy
 from . import canonical, wire, scenarios, evidence, identity   # stdlib-only submodules (wire needs `cryptography` only for Ed25519)
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 __all__ = [
     "Authority", "Guard", "Decision", "Reason", "ReasonCode", "Disposition",
     "AuthorityError", "AuthorityDenied", "AuditLog", "CommittedAuditError",

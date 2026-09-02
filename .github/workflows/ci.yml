@@ -51,6 +51,10 @@ jobs:
         run: python tests/test_cli_verify.py
       - name: Interop test vectors self-check
         run: python tests/vectors/generate.py
+      - name: Bundle-level interop vectors self-check
+        run: python tests/vectors/generate_bundles.py
+      - name: Bundle vectors + the structured-failure twin
+        run: python tests/test_bundle_vectors.py
       - name: The committed vectors match what the generator produces, in both copies
         # generate.py writes tests/vectors/ and the packaged src/attenu_guard/vectors/
         # from one serialisation. If either committed copy was edited by hand, or the
@@ -123,6 +127,27 @@ jobs:
               assert outcome == (data.get("expect") or data["expect_reject_reason"]), name
           assert len(vectors.VECTOR_NAMES) == 20
           print("packaged interop vectors OK")
+          PY
+      - name: The bundle-level vectors ship inside the installed package too
+        # Same claim, for the bundle verifier: scoring an independent implementation of
+        # verify_bundle needs `pip install attenu-guard` and nothing else.
+        run: |
+          cd "$RUNNER_TEMP"   # import the INSTALLED package, never the checkout
+          python - <<'PY'
+          from attenu_guard import evidence, vectors, wire
+          doc = vectors.load_bundle_vectors()
+          assert doc["version"] == "bundle_vectors_v1", doc["version"]
+          assert len(doc["cases"]) == 8, len(doc["cases"])
+          for case in doc["cases"]:
+              signer = wire.HS256TestSigner(bytes.fromhex(case["signer"]["secret_hex"]),
+                                            kid=case["signer"]["kid"])
+              report = evidence.verify_bundle(case["bundle"], signer)
+              assert ("accept" if report["ok"] else "reject") == case["expect"], case["name"]
+              reported = [{"reason": d["reason"], "seq": d["seq"], "node": d["node"]}
+                          for d in report["failure_details"]]
+              for expected in case["expect_failures"]:
+                  assert expected in reported, (case["name"], expected, reported)
+          print("packaged bundle vectors OK")
           PY
   integrations:
     # Real-framework integration PoCs (tests/integrations/): each job installs

@@ -1,6 +1,18 @@
-# Delegation Token offline-verification test vectors
+# Offline-verification test vectors
 
-This directory holds the interoperability artifact promised by
+This directory holds two suites, for the two things an independent
+implementation has to get right:
+
+- **Delegation Token vectors** (`*.json` here) — token chains for the wire
+  format and its offline verification algorithm. Documented first, below.
+- **Evidence bundle vectors** (`bundles/bundle_vectors_v1.json`) — whole
+  evidence bundles for the ledger verifier: hash-chain integrity against a
+  signed anchor, monotonicity, containment, and the schema-v2 execution-binding
+  rules. Documented in "Evidence bundle vectors", below.
+
+## Delegation Token offline-verification test vectors
+
+This suite is the interoperability artifact promised by
 `docs/draft-asor-wimse-agent-delegation-chain-01.md`'s "Reference
 Implementation and Test Vectors" section: a Delegation Chain that MUST
 verify, and a set of adversarial chains that MUST each be rejected, each for
@@ -9,7 +21,7 @@ a specific, declared reason. They exist so an **independent implementation**
 offline verifier against a fixed, known-good/known-bad set of tokens without
 needing this repository's Python or any of its code.
 
-## Getting them without cloning this repository
+### Getting them without cloning this repository
 
 They ship inside the installed package, so scoring your own verifier needs
 nothing but `pip install attenu-guard`:
@@ -27,7 +39,7 @@ you the raw JSON if you would rather parse it yourself. The copies here and the
 packaged ones are byte-identical — `generate.py` writes both from one
 serialisation, and `tests/test_wire.py` fails if they ever differ.
 
-## Regenerating
+### Regenerating
 
 Regenerate with (stdlib-only, no network, no installs):
 
@@ -49,7 +61,7 @@ from what this reference implementation actually does.
 main test run (`python3 tests/test_wire.py`), so they are self-checking on
 every CI run, not just a static fixture that can go stale.
 
-## Files
+### Files
 
 - `valid_chain.json` — a valid, 3-hop, strictly-attenuating chain
   (orchestrator -> summarizer -> formatter — the same story as
@@ -109,7 +121,7 @@ every CI run, not just a static fixture that can go stale.
 - `valid_jcs_unmarked_header.json` — omits the informational `c14n` marker while
   retaining canonical JCS header and payload bytes. `"expect": "accept"`.
 
-## File format
+### File format
 
 Every file is one JSON object:
 
@@ -145,10 +157,162 @@ Verification Algorithm from the draft's "Offline Verification Algorithm"
 section against the decoded tokens and `now`, and confirm your verifier's
 outcome matches `expect`/`expect_reject_reason`.
 
+## Evidence bundle vectors
+
+`bundles/bundle_vectors_v1.json` is the bundle-level suite: whole evidence
+bundles for `attenu_guard.evidence.verify_bundle`, the check an auditor runs
+on a published ledger with no engine, no service and no vendor in the loop.
+The token vectors above pin what a delegation token means; these pin what the
+LEDGER of a run has to satisfy — the hash chain reproduces and matches a
+signed anchor, every delegation is a subset of its parent, every allowed scope
+was inside the acting node's authority, and (schema v2) every tool call binds
+to exactly one correctly-ordered outcome on the same node, with the arguments
+that were authorized.
+
+### File format
+
+One JSON object holding every case:
+
+```jsonc
+{
+  "version": "bundle_vectors_v1",
+  "description": "what this file is and how it is scored",
+  "cases": [
+    {
+      "name": "reject_params_mismatch",
+      "description": "prose explaining the one change and why it must be rejected",
+      "signer": {"alg": "HS256", "kid": "bundle-interop-v1", "secret_hex": "..."},
+      "bundle": { "v": 2, "chain_id": "vectors", "entries": [...], "anchor": {...}, ... },
+      "expect": "reject",                       // or "accept"
+      "expect_failures": [                       // [] for an accepting case
+        {"reason": "params_mismatch", "seq": 3, "node": "vectors:n0"}
+      ]
+    }
+  ]
+}
+```
+
+`bundle` is exactly what `attenu_guard.evidence.export_bundle()` produces and
+what `verify_bundle()` takes: the full ledger (`entries`, hash-chained,
+root-first) plus the signed `anchor` over its head. `reason` is a stable token,
+the text before the first colon in this build's own failure message — with two
+historical exceptions that name a node there instead (`unreadable_authority`,
+`unreadable_granted`) and so state their reason explicitly; neither occurs in
+these vectors.
+
+### Scoring is different here
+
+A bundle verifier reports a LIST of failures, not one reject reason, so each
+rejecting case declares `expect_failures`: the **minimal set** of
+`{reason, seq, node}` that MUST appear.
+
+- A conformant verifier MAY report **more** than the minimal set. One broken
+  record often makes a second check unsatisfiable — a re-used `call_id`
+  necessarily orphans somebody's outcome — and reporting that consequence is
+  correct, not a failure to match.
+- It may never report **fewer**, and never at a **different position**.
+  `seq` is the offending entry's own `seq` field and `node` its `node`; both
+  are `null` when the failure is chain-level, with nothing single to point at.
+- Every rejecting bundle is derived from `valid_bundle_v2` by exactly **one**
+  change, so each case isolates one rule. Unless a case says otherwise, the
+  chain was re-hashed and a fresh anchor signed over it after the change, so
+  integrity is NOT what fails.
+
+Score yourself with nothing but `pip install attenu-guard`:
+
+```python
+from attenu_guard import vectors
+
+for case in vectors.load_bundle_vectors()["cases"]:
+    report = my_verifier(case["bundle"], case["signer"])       # your implementation
+    assert report.accepted == (case["expect"] == "accept"), case["name"]
+    for expected in case["expect_failures"]:                    # reason AND position
+        assert expected in report.failures, (case["name"], expected)
+```
+
+`vectors.read_bundle_vectors_bytes()` gives you the raw JSON if you would
+rather parse it yourself. This repository's own verifier returns the same
+information as `verify_bundle(bundle, signer)["failure_details"]`, a list of
+`{"reason", "seq", "node", "call_id", "detail"}` that is the structured twin
+of the human-readable `failures` list.
+
+### Cases
+
+- `valid_bundle_v2` — a complete, honest chain: an orchestrator delegates to a
+  strictly narrower summarizer, each node makes one authorized call that is
+  observed to completion with matching argument commitments, one over-reach is
+  denied, both nodes finalize. `"expect": "accept"`, no failures. Every case
+  below is this bundle with one thing changed.
+- `reject_params_mismatch` — the outcome reports an `invoked_params_hash` that
+  is not the `authorized_params_hash` its allow committed to: the arguments
+  that ran were not the arguments that were authorized. Required:
+  `params_mismatch` on the outcome entry.
+- `reject_outcome_without_allow` — an outcome whose `call_id` no allow ever
+  issued. Required: `outcome_without_allow` on the outcome entry.
+- `reject_outcome_before_allow` — an allow and its outcome transposed, so the
+  call finishes before it was authorized. Required: `outcome_before_allow` on
+  the outcome entry, at its new position.
+- `reject_duplicate_outcome` — one `call_id` reporting a terminal state twice.
+  Required: `duplicate_outcome` on the second one.
+- `reject_duplicate_call_id` — one `call_id` on two allows, which makes the
+  allow -> outcome binding ambiguous by construction. Required:
+  `duplicate_call_id` on the second sighting. This build additionally reports
+  the outcome that is consequently orphaned; that is permitted, not required.
+- `reject_rehashed_chain` — one entry edited and every later hash recomputed,
+  so the ledger is perfectly self-consistent and only the ORIGINAL signed
+  anchor still commits to the head it used to have. This is the rewrite a hash
+  chain alone cannot catch. The failure is chain-level: this build reports
+  `integrity(anchor)` with `seq` and `node` null, and an implementation that
+  names its own equivalent unpositioned integrity failure is conformant.
+- `reject_tampered_entry` — the same edit with nothing re-hashed. The stored
+  hash no longer covers the entry's contents, so the chain check fails AT that
+  entry. Required: `integrity`, positioned on it.
+
+### Verifying a bundle from the file alone
+
+Two hashes and one signature, all over RFC 8785 JCS bytes (the same
+canonicalization the token vectors use):
+
+- **Each entry's `hash`** is `SHA-256(prev_hash_ascii || JCS(entry without its
+  "hash" member))`, lowercase hex, where `prev_hash_ascii` is the previous
+  entry's `hash` as ASCII (not decoded from hex), and the first entry's
+  `prev_hash` is 64 `0` characters. Walk the ledger from the start: `seq` must
+  equal the position, `prev_hash` must equal the previous entry's `hash`.
+- **The anchor** commits to the head: `hex(HMAC-SHA256(secret, JCS(anchor
+  without its "kid", "sig" and "verified" members)))` must equal `sig`, and the
+  anchor's `seq`/`head` must equal the last entry's `seq`/`hash`. The anchor's
+  own `"verified"` field is the producer's claim about itself, never evidence —
+  re-check the signature.
+- **`signer`** is `{"alg": "HS256", "kid", "secret_hex"}`, the same shape as
+  the token vectors; hex-decode `secret_hex` for the HMAC key.
+
+Everything else a verifier needs is in the ledger: `authority` on the `root`
+entry and `granted` on each `spawn` give the node authorities to compare for
+monotonicity and containment, and the `call_id`/`capture`/`adapter`/
+`authorized_params_hash` on allows and `call_id`/`body_state`/
+`invoked_params_hash` on outcomes give the execution binding.
+
+### Regenerating
+
+```
+python3 tests/vectors/generate_bundles.py
+```
+
+That writes `bundles/` here AND `src/attenu_guard/vectors/bundles/` from one
+serialisation, so the two are byte-identical by construction. Never hand-edit
+either copy. Deterministic: the two values a real chain draws from the OS
+CSPRNG (the chain's `params_salt` and every `call_id`) come from a fixed
+counter-derived stream during generation, and nothing else in the ledger is
+time- or randomness-dependent, so running it twice produces identical bytes.
+The generator self-checks every case against this build's own
+`verify_bundle()` before exiting 0, and `tests/test_bundle_vectors.py`
+regenerates and re-scores the whole file on every test run.
+
 ## Why HS256 for interop vectors carrying a published secret
 
 `signer.secret_hex` is deliberately public — it is printed in this
-directory's own JSON files. HMAC is symmetric (see
+directory's own JSON files. The same reasoning covers the evidence bundles'
+anchor signer. HMAC is symmetric (see
 `attenu_guard.wire.HS256TestSigner`'s docstring): anyone who can verify
 a token with this secret can also forge one with it. That is fine here and
 does not undermine the vectors' purpose: these vectors exist to pin down the

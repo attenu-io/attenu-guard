@@ -25,7 +25,22 @@ once and writes those same bytes to both, so neither is a stale copy of the
 other. tests/test_wire.py asserts the two directories are byte-identical, so
 they cannot diverge silently. Do not hand-edit anything in this directory.
 
-tests/vectors/README.md documents the file format and how to use a vector from
+`bundles/bundle_vectors_v1.json` is the second, bundle-level suite: whole
+evidence bundles for `attenu_guard.evidence.verify_bundle` rather than token
+chains for `wire.load()`. It is scored differently — a bundle verifier reports
+a LIST of failures, so each rejecting case declares the minimal set of
+{reason, seq, node} that MUST appear — and is written by
+tests/vectors/generate_bundles.py, on the same single-writer discipline:
+
+    from attenu_guard import vectors
+
+    for case in vectors.load_bundle_vectors()["cases"]:
+        report = my_verifier(case["bundle"], case["signer"])
+        assert report.accepted == (case["expect"] == "accept")
+        for expected in case["expect_failures"]:
+            assert expected in report.failures      # reason AND position
+
+tests/vectors/README.md documents both file formats and how to use them from
 another implementation.
 """
 from __future__ import annotations
@@ -33,7 +48,8 @@ from __future__ import annotations
 import json
 from importlib import resources
 
-__all__ = ["VECTOR_NAMES", "read_vector_bytes", "load_vector", "load_vectors"]
+__all__ = ["VECTOR_NAMES", "read_vector_bytes", "load_vector", "load_vectors",
+           "BUNDLE_VECTORS_PATH", "read_bundle_vectors_bytes", "load_bundle_vectors"]
 
 #: Every shipped vector, valid chain first. Kept explicit rather than globbed so
 #: a file that fails to make it into a wheel is a failure, not a shorter list.
@@ -81,3 +97,29 @@ def load_vector(name: str) -> dict:
 def load_vectors() -> dict[str, dict]:
     """Every vector, parsed, keyed by filename, in `VECTOR_NAMES` order."""
     return {name: load_vector(name) for name in VECTOR_NAMES}
+
+
+#: The bundle-level vectors, as (subdirectory, filename) inside this package. Kept as parts
+#: rather than a "bundles/..." string because `importlib.resources` traverses one name at a
+#: time on every supported Python (multi-argument joinpath is 3.11+).
+BUNDLE_VECTORS_PATH = ("bundles", "bundle_vectors_v1.json")
+
+
+def read_bundle_vectors_bytes() -> bytes:
+    """The raw bytes of the bundle-level vector file, read from the installed package."""
+    target = resources.files(__name__)
+    for part in BUNDLE_VECTORS_PATH:
+        target = target / part
+    return target.read_bytes()
+
+
+def load_bundle_vectors() -> dict:
+    """The bundle-level vectors, parsed: `{"version", "description", "cases": [...]}`.
+
+    Each case is `{"name", "description", "signer", "bundle", "expect", "expect_failures"}`.
+    `expect` is "accept" or "reject"; `expect_failures` is the MINIMAL set of
+    `{"reason", "seq", "node"}` a conformant verifier MUST report for that bundle (empty for an
+    accepting case). A verifier MAY report more failures than the minimal set — one broken
+    record often makes a second check unsatisfiable — but never fewer, and never at a different
+    position. See tests/vectors/README.md."""
+    return json.loads(read_bundle_vectors_bytes())
