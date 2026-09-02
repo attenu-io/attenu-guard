@@ -1,0 +1,94 @@
+
+==============================================================================
+VERSIONS
+==============================================================================
+date                 2026-09-02
+python               3.12.12
+claude_agent_sdk     0.2.139
+claude code CLI      2.1.258 (Claude Code)
+
+==============================================================================
+WHAT WAS DECLARED
+==============================================================================
+parent  options.tools        = ['Read', 'Grep', 'Glob', 'Agent']
+parent  options.allowed_tools= ['Read', 'Grep', 'Glob', 'Agent']
+parent  permission_mode      = default (Manual)
+child   AgentDefinition.tools= ['Read', 'Bash', 'WebFetch']
+child   permissionMode       = bypassPermissions
+child asks for tools the parent does not list: ['Bash', 'WebFetch']
+
+==============================================================================
+1. THE ARGV THE SDK BUILDS FOR THE CLI (real _build_command)
+==============================================================================
+[
+  "<claude>",
+  "--output-format",
+  "stream-json",
+  "--verbose",
+  "--system-prompt",
+  "",
+  "--tools",
+  "Read,Grep,Glob,Agent",
+  "--allowedTools",
+  "Read,Grep,Glob,Agent",
+  "--permission-mode",
+  "default",
+  "--input-format",
+  "stream-json"
+]
+
+==============================================================================
+2. THE `agents` PAYLOAD IN THE initialize REQUEST (real conversion)
+==============================================================================
+{
+  "subtype": "initialize",
+  "agents": {
+    "widener": {
+      "description": "A subagent that asks for more than its parent holds.",
+      "prompt": "You are a subagent.",
+      "tools": [
+        "Read",
+        "Bash",
+        "WebFetch"
+      ],
+      "permissionMode": "bypassPermissions"
+    }
+  }
+}
+
+==============================================================================
+3. DID THE SDK NARROW THE CHILD AGAINST THE PARENT?
+==============================================================================
+child tools as DECLARED  : ['Read', 'Bash', 'WebFetch']
+child tools as SENT      : ['Read', 'Bash', 'WebFetch']
+identical                : True
+child mode as DECLARED   : bypassPermissions
+child mode as SENT       : bypassPermissions
+
+The parent's own limits travel on a DIFFERENT channel:
+  --tools        -> 'Read,Grep,Glob,Agent'
+  --allowedTools -> 'Read,Grep,Glob,Agent'
+The child's tool list travels inside the initialize request, untouched.
+
+VERDICT (SDK layer): the SDK performs NO intersection. A tool the parent
+does not list is forwarded verbatim in the child's grant. Whether the CLI
+then refuses it is decided inside the CLI, which this script cannot see.
+
+==============================================================================
+4. IS THERE INTERSECTION CODE ANYWHERE IN THE INSTALLED PACKAGE?
+==============================================================================
+files scanned: 24
+matches      : 0
+  (none - there is no code that relates a subagent's tools to the parent's)
+
+==============================================================================
+5. THE SDK'S OWN WARNING ABOUT allowed_tools VS can_use_tool
+==============================================================================
+can_use_tool will not be invoked for: Read, Grep, Glob, Agent. An allowed_tools entry that allows a whole tool auto-approves it before the callback is consulted. To gate every tool call, use a PreToolUse hook; or narrow the entry so calls fall through to can_use_tool. Allow rules from settings files can also shadow the callback but are not visible here.
+
+can_use_tool will not be invoked: permission_mode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
+
+==============================================================================
+DONE
+==============================================================================
+No model was called. No network request was made. Exit 0.
