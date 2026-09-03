@@ -6,8 +6,12 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-03
+
 ### Fixed
 - `verify_bundle()` monotonicity: a delegation that widened only ttl or only a ceiling verified CLEAN whenever the child's scopes were literally a subset of the parent's — the check was gated on a literal, non-wildcard-aware scope difference, so `is_narrower_than` returning False was discarded. A child that outlived its parent, raised a ceiling, dropped a ceiling its parent held, or carried no ttl at all now fails, and the message names the dimension (`ttl 7200 > parent 3600`, `ceiling max_rows<=250 looser than parent max_rows<=100`). The scope-widening string is unchanged
+- `adapters.pydantic_ai`: `DelegationGuard.get_ordering()` adds `wrapped_by=[AbstractCapability]`, so the sorter settles it LAST in every list order — `position="innermost"` alone is a tier whose only tiebreaker is list order, and a sibling innermost execution wrapper could land between it and the raw tool body
+- `adapters.pydantic_ai`: the per-call re-read of `ctx.root_capability` is no longer load-bearing — the ordering is the guarantee; it and the construction-time check are belt-and-braces, narrowed to "anything ordered after DelegationGuard in the resolved chain that wraps execution", and a sibling innermost execution wrapper (registered, rebound or per-run-injected) is no longer refused
 
 ### Added
 - Bundle interop vectors, revision `bundle_vectors_v1.1` — four appended cases: `reject_widened_scope` and `reject_uncontained_allow` (the delegation checks no rejecting case covered), `reject_increased_ttl` and `reject_loosened_ceiling` (the two dimensions the gate above hid); `version` stays `bundle_vectors_v1`
