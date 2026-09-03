@@ -53,7 +53,7 @@ jobs:
         run: python tests/vectors/generate.py
       - name: Bundle-level interop vectors self-check
         run: python tests/vectors/generate_bundles.py
-      - name: Bundle vectors + the structured-failure twin
+      - name: Bundle vectors, the structured-failure twin, and the README reason vocabulary
         run: python tests/test_bundle_vectors.py
       - name: Ed25519 (RFC 8032 vectors) on the stdlib path
         # No cryptography here by design: this is the path the envelope corpus is
