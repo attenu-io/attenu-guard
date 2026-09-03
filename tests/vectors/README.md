@@ -620,6 +620,15 @@ sparse case, not a duplicate. An entry is claimed as soon as `subject.seq` finds
 it, before the rest of the envelope is judged, so a second envelope cannot
 escape the rule by being defective in some other way as well.
 
+Why the file exists before any implementation of it: the third independent run of the bundle
+corpus scored 9 of 17 with every check right and every reason name wrong, and its author drew
+the conclusion for us. "An implementation working from prose will get the checks right and the
+names arbitrary, every time, and nothing local will ever flag it. That seems to me the strongest
+available argument for the order you are using on the envelope: vectors posted before anything
+is implemented." (Xuebin Ma, @XuebinMa, agent-guard, crewAIInc/crewAI#5888, quoted with his
+permission.) The envelope corpus was posted as text, reviewed by three implementers, and built
+from that text; the two rows past sixteen came from reviewing the reference verifier against it.
+
 ### File format
 
 One JSON object holding every case, in the same shape as the bundle file, with
