@@ -6,7 +6,7 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-09-04
+## [0.13.0] - 2026-09-03
 
 ### Added
 - Observer envelopes (envelope v1) — a witness's Ed25519 signature over the IDENTITY of one committed ledger entry (`chain_id`, `node`, `seq`, `entry_hash`, `event`, and `call_id` on an allow), carried beside the ledger in a bundle's top-level `envelopes` array. `evidence.sign_envelope()`, `evidence.verify_envelopes()`, `evidence.envelope_subject()`, `evidence.envelope_signing_input()`, and `export_bundle(..., envelopes=...)`. The signature is over `JCS(envelope minus "sig")`, the same canonicalization the ledger has signed with since 0.7.0
@@ -14,6 +14,7 @@ Versions follow semantic versioning.
 - Six named envelope failures, in `evidence.ENVELOPE_FAILURES` and in the same `failures`/`failure_details` list as every other bundle failure: `envelope_unknown_version`, `envelope_unknown_member`, `envelope_subject_mismatch`, `envelope_non_canonical`, `envelope_unknown_witness`, `envelope_bad_signature`. An envelope is never required; a present one has to verify
 - Observer-envelope interop vectors (`tests/vectors/envelopes/envelope_vectors_v1.json`), packaged as `attenu_guard.vectors.load_envelope_vectors()` — sixteen scoring cases, revision `envelope_vectors_v1.0`, on the same nine-entry ledger as `bundle_vectors_v1.json`. Every case carries `witness_keys` and `expect_states` (every entry, not only the covered ones); `valid_jcs_reorder` carries `canonical_hex`, `reject_non_canonical` carries `raw_hex`, `reject_rehashed_chain_unanchored` carries `"signer": null`
 - `attenu_guard._ed25519` — RFC 8032 Ed25519, stdlib-only, so the envelope corpus is scorable and regenerable by a `pip install attenu-guard` that pulled in no dependencies. `evidence` prefers `cryptography` when it is installed; Ed25519 is deterministic, so both backends produce the same bytes, and CI regenerates the corpus under each and diffs the result
+- `tests/vectors/README.md`: a **reason vocabulary** table for the bundle corpus, above the cases — the names are the contract, the per-case `Required:` lines are its instances (asked for by the third independent run, which scored 9 of 17 before adopting the names and 17 of 17 after); and that run's row under *Independent runs*: Xuebin Ma (@XuebinMa), `agent-guard`, Rust, v1.2 at `v0.12.1`, pinned
 
 ### Changed
 - `adapters.pydantic_ai` header: re-verified against pydantic-ai-slim 2.38.0

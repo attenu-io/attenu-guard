@@ -249,6 +249,32 @@ information as `verify_bundle(bundle, signer)["failure_details"]`, a list of
 `{"reason", "seq", "node", "call_id", "detail"}` that is the structured twin
 of the human-readable `failures` list.
 
+### Reason vocabulary
+
+The agreement an implementer cannot derive from prose is the set of names below. A verifier
+that detects a violation at the right `{seq, node}` but reports it under a name of its own
+scores that case as a failure to reproduce, which is what the third independent run found
+(9 of 17 before adopting these names, 17 of 17 after). The per-case `Required:` lines are
+instances of this table; the table is the contract.
+
+| reason | what it means | positioned on |
+|---|---|---|
+| `integrity` | an entry's hash chain does not verify (a rehashed, reordered, or altered entry) | the first entry that fails |
+| `integrity(anchor)` | the signed anchor does not verify against the bundle head | chain level, no `{seq, node}` |
+| `monotonicity` | a spawned node's authority is not a subset of its parent's on some dimension (scopes, ttl, a ceiling, an omitted ceiling); the message names the dimension | the spawn entry of that node |
+| `containment` | an `allow` names a node the bundle never spawned, or a scope outside that node's authority | the allow entry |
+| `chain_id_mismatch` | an entry, or the anchor, names a different chain than the bundle | the foreign entry; chain level for the anchor |
+| `missing_root` | the bundle has zero or more than one root event | chain level |
+| `unsupported_version` | the bundle's `v` is not one this verifier supports | chain level |
+| `anchor_version_mismatch` | the anchor's `v` differs from the bundle's | chain level |
+| `root_version_mismatch` | the root entry's `v` differs from the bundle's | the root entry |
+| `mixed_entry_versions` | some entry declares a `v` other than the bundle's | the first such entry |
+| `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
+| `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
+
+Execution-binding reasons are listed with the schema-v2 cases below; envelope reasons have
+their own table in the observer envelope section.
+
 ### Cases
 
 - `valid_bundle_v2` — a complete, honest chain: an orchestrator delegates to a
@@ -458,6 +484,21 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   not reproduced here, but the repository's `Rust Tests (Workspace)` check is green on that
   commit and its test command covers both the fixture-pin test and the scoring test. His
   extras on `reject_duplicate_call_id` match the previous entry's, position for position.
+- **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-03** — the same Rust verifier against
+  revision `bundle_vectors_v1.2` (seventeen cases), fixture `bundle_vectors_v1.json` at
+  attenu-guard `v0.12.1`, 146,765 bytes, sha256
+  `54311d68c8342c01ce233f4b1aea251125a4f3323fd9776c01843d3b2f5700ea`, verifier pinned at
+  commit `a29f894698121672f87855b38a06f63c73291743`; reproduce with
+  `cargo run -p guard-verify -- attenu-vectors --vectors crates/guard-verify/fixtures/attenu/bundle_vectors_v1.json`.
+  **First run 9 of 17, then 17 of 17 after one change.** All eight failures were the same
+  thing: the violation was detected and positioned correctly (right `seq`, right `node`) but
+  reported as `not_narrower` where the corpus requires `monotonicity`, and as
+  `scope_not_authorized` where it requires `containment`. The four v1.2 discrimination rows
+  (longer ttl, looser ceiling, omitted ceiling, null ttl, each on a literal-subset scope set)
+  were all rejected at seq 1 before any change. He reported the first number on purpose, as
+  the one worth having; it is why the reason-vocabulary table above exists. Stated boundary,
+  his words: "independent reproduction of the released corpus at that pinned boundary. Not
+  verifier completeness, not runtime correctness, not certification." Source: crewAIInc/crewAI#5888.
 
 ## Observer envelope vectors
 
