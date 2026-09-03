@@ -34,8 +34,10 @@ ledger verifies · `RESULT: OK`. Exit `3` = the SDK now carries an authority fie
 
 ## Trust boundary
 
-The check lives at the MCP boundary, inside the server, before the tool body. It does not see a direct Python call
-to the underlying function (the test proves it runs), or any other route to the resource behind the tool. Inside
+The check lives inside each tool function, as its first statement, before the tool body. A direct Python call to
+that function is therefore checked too: with no delegation chain it returns `no_delegation_chain` and the body does
+not run (`test_direct_python_call_still_hits_the_gate`). What is outside the boundary is any route to the resource
+that does not go through the tool function at all. Inside
 the boundary: a denied call never runs its body; a tool the server does not declare does not exist; retries stay
 denied and each attempt is on the ledger; if the ledger cannot be written the body does not run.
 
