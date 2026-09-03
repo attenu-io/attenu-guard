@@ -1,6 +1,6 @@
 # Offline-verification test vectors
 
-This directory holds two suites, for the two things an independent
+This directory holds three suites, for the three things an independent
 implementation has to get right:
 
 - **Delegation Token vectors** (`*.json` here) — token chains for the wire
@@ -9,6 +9,11 @@ implementation has to get right:
   evidence bundles for the ledger verifier: hash-chain integrity against a
   signed anchor, monotonicity, containment, and the schema-v2 execution-binding
   rules. Documented in "Evidence bundle vectors", below.
+- **Observer envelope vectors** (`envelopes/envelope_vectors_v1.json`) — the
+  same bundles carrying a witness's signature over the identity of a ledger
+  entry, for the one question the other two cannot answer: was this delegation
+  event signed by something outside the process that wrote it? Documented in
+  "Observer envelope vectors", below.
 
 ## Delegation Token offline-verification test vectors
 
@@ -453,6 +458,314 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   not reproduced here, but the repository's `Rust Tests (Workspace)` check is green on that
   commit and its test command covers both the fixture-pin test and the scoring test. His
   extras on `reject_duplicate_call_id` match the previous entry's, position for position.
+
+## Observer envelope vectors
+
+`envelopes/envelope_vectors_v1.json` is the third suite, and the narrowest.
+The token vectors pin what a delegation token means; the bundle vectors pin
+what the ledger of a run has to satisfy; these pin the one question neither
+can answer — **was this delegation event signed by something outside the
+process that wrote it?**
+
+An **observer envelope** is a witness's Ed25519 signature over the **identity**
+of one committed ledger entry, never over its contents, which the entry's own
+`hash` already covers. Envelopes travel beside the ledger in the bundle's
+top-level `envelopes` array. No entry changes, so a bundle without them stays
+valid exactly as it is today.
+
+An envelope is **never required**. An absent one is the status quo and changes
+nothing; every entry of a bundle without them reports `process-asserted`. A
+**present** one has to verify: a broken envelope lands in the same failure list
+as the chain-level checks and the bundle rejects.
+
+Per entry — the entry, not the node, because a node carries several entries and
+an `allow` never creates a node of its own — a verifier reports one of two
+states:
+
+- **`witness-signed`**: an envelope exists whose `subject` matches the entry
+  recomputed from the bundle, and whose signature verifies under the trusted key
+  its `witness.kid` names. A signature that verifies under some *other* trusted
+  key is not witness-signed. The state says where the signature came from and
+  nothing about authority: the witness is whoever holds that key, and nothing in
+  the envelope makes that the delegation parent.
+- **`process-asserted`**: no envelope, or one that does not verify. This covers
+  two facts a bundle does not separate — a hop nobody undertook to cover, and a
+  hop a witness undertook to cover and never did. v1 takes the weaker reading
+  and stops there.
+
+`observed.result` never changes the state. A verifying envelope is
+witness-signed whatever the witness concluded, and the report line prints the
+two together, in the same form for all three results: `witness-signed
+(matched)`, `witness-signed (not_matched)`, `witness-signed (indeterminate)`. A
+process-asserted entry gets no result.
+
+### File format
+
+One JSON object holding every case, in the same shape as the bundle file, with
+two fields on every case that the bundle file does not have:
+
+```jsonc
+{
+  "version": "envelope_vectors_v1",        // compatibility contract; does not move
+  "revision": "envelope_vectors_v1.0",     // additive counter; moves when a case is appended
+  "description": "what this file is and how it is scored",
+  "cases": [
+    {
+      "name": "reject_locator_mismatch",
+      "description": "prose explaining the one change and why it must be rejected",
+      "signer": {"alg": "HS256", "kid": "bundle-interop-v1", "secret_hex": "..."},
+      "witness_keys": [                      // the Ed25519 keys a verifier trusts for this case
+        {"kid": "witness-interop-v1", "alg": "EdDSA", "public_key_hex": "..."}
+      ],
+      "bundle": { "v": 2, "entries": [...], "anchor": {...}, "envelopes": [...] },
+      "expect": "reject",                    // or "accept"
+      "expect_states": {                     // EVERY entry, not only the covered ones
+        "0": "process-asserted", "1": "process-asserted", "…": "…"
+      },
+      "expect_failures": [
+        {"reason": "envelope_subject_mismatch", "seq": 1, "node": "vectors:n1"}
+      ]
+    }
+  ]
+}
+```
+
+`bundle` is what `export_bundle()` produces, with the envelopes inside it,
+where the contract puts them — so a two-argument scoring call still reaches
+them. `signer` verifies the anchor and is **null** on the one case that carries
+no anchor. `witness_keys` is the trust set: `public_key_hex` is the raw 32-byte
+Ed25519 public key in lowercase hex and `alg` is `EdDSA`, the JOSE identifier
+both implementations use for Ed25519. Carrying the keys in the file is what
+makes `reject_bad_signature` and `reject_unknown_witness` checkable from the
+file alone. `expect_states` covers **every** entry in the chain, so an
+accepting case asserts a state and not merely the absence of a failure.
+
+Two more fields appear on one case each:
+
+- **`canonical_hex`** on `valid_jcs_reorder`: the exact JCS bytes the signature
+  covers, the envelope without its `sig` member. Those are the **bytes**, not a
+  digest over them. Score that row on both halves — it accepts, *and* the bytes
+  the verifier canonicalized equal `canonical_hex`. Accepting while producing
+  different bytes fails the row.
+- **`raw_hex`** on `reject_non_canonical`: the envelope bytes **as received**,
+  for that case's single envelope. `envelope_non_canonical` is the one failure a
+  verifier cannot raise from a parsed object, because formatting and escaping do
+  not survive a parse.
+
+### The envelope
+
+```jsonc
+{
+  "v": 1,
+  "typ": "delegation-event-observation",
+  "subject": {"chain_id": "…", "node": "…", "seq": 1, "entry_hash": "…", "event": "spawn"},
+  "observed": {"result": "matched", "at": "2026-09-01T11:00:00Z", "method": "…"},
+  "witness": {"kid": "…", "alg": "EdDSA"},
+  "sig": "…"
+}
+```
+
+`sig` is over `JCS(envelope minus its "sig" member)`, lowercase hex over the raw
+signature bytes — the same canonicalization the ledger has signed with since
+0.7.0, and the same hex convention as `entry_hash` and the anchor's own `sig`.
+
+v1 defines two subject member sets, keyed by `event`: `spawn` carries
+`chain_id`, `node`, `seq`, `entry_hash`, `event`; `allow` carries those five
+plus `call_id`. v1 defines **no** subject for any other event.
+
+`entry_hash` is the **binding member** — the only subject member that is
+evidence of *which* entry the witness signed, because the hash covers
+`prev_hash` and with it everything before the entry in the chain. The rest are
+**locators**, whose job is to find the entry without hashing every entry. A
+verifier finds the entry at `seq`, recomputes its hash from the bundle, and
+compares; the locators are then checked against **that same entry**, and one
+that disagrees is the same failure at the same position. `seq` is the lookup
+key, so there is nothing to compare it against.
+
+`observed.result` is a closed vocabulary of three. `matched` means the witness
+saw the event and it agrees with what it independently observed.
+**`not_matched` requires evidence that contradicts the event** — the witness
+looked, and what it saw disagrees. **`indeterminate` is the residual state**: it
+holds whenever the witness cannot settle the question in either direction,
+including when there was nothing to go on. Thin or absent evidence is
+`indeterminate`, never `not_matched`. `method` is free text naming how the
+witness observed; the signature covers it, and no verifier decision turns on it.
+
+The version commits the exact signed member set of the **whole** envelope, the
+subject included, so a member added anywhere is a new version and the digest
+cannot widen silently. A different `typ` is a different contract.
+
+### The six named failures
+
+Every reported failure carries `{reason, seq, node}`, and every failed envelope
+is reported on its own.
+
+| reason | what it is |
+|---|---|
+| `envelope_unknown_version` | a `v` or `typ` this build does not know |
+| `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` |
+| `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
+| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` |
+| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names |
+
+### Scoring, and the two rules on where a failure may land
+
+The minimal-set rule is carried over from the bundle file unchanged. Each
+rejecting case declares `expect_failures`: the **minimal set** of
+`{reason, seq, node}` that MUST appear.
+
+- A conformant verifier MAY report **more** than the minimal set.
+- It may never report **fewer**, and never at a **different position**.
+- Cases are **appended, never inserted, changed or removed**, so `version` is
+  the compatibility contract and stays `envelope_vectors_v1` while `revision`
+  moves with each addition. Iterate `cases`; do not assume a length.
+- Unless a row says otherwise, the envelope is **re-signed by the witness after
+  the change**, so `envelope_bad_signature` is not what fails.
+  `reject_bad_signature` is the only row where it is.
+
+Two rules from envelope v0.1 say where the permitted extras may **not** land.
+Both bind scoring:
+
+> An envelope failure lands only on the hop that envelope covers, never on a hop
+> coverage skipped. In row 6 the envelope failure is at M, never at N, because
+> no envelope covers N.
+
+> A verifier never raises a chain-level integrity failure, `integrity(anchor)`
+> or the equivalent it names, because an envelope failed. That failure comes
+> from a real anchor mismatch and from nothing else. In row 12 the anchor is
+> fresh and in row 14 there is none, so nothing at chain level fails in either.
+> In rows 6 and 13 the anchor is the original over a rehashed chain, which is
+> what makes `integrity(anchor)` assertable.
+
+Score yourself with nothing but `pip install attenu-guard`:
+
+```python
+from attenu_guard import vectors
+
+for case in vectors.load_envelope_vectors()["cases"]:
+    report = my_verifier(case["bundle"], case["signer"], case["witness_keys"])
+    assert report.accepted == (case["expect"] == "accept"), case["name"]
+    assert report.states == case["expect_states"], case["name"]     # every entry
+    for expected in case["expect_failures"]:                        # reason AND position
+        assert expected in report.failures, (case["name"], expected)
+```
+
+`vectors.read_envelope_vectors_bytes()` gives you the raw JSON. This
+repository's own verifier returns the same information as
+`verify_bundle(bundle, signer, witness_keys=...)`, whose report carries
+`failure_details` as before plus an `envelopes` summary with `states`,
+`results` and `lines`.
+
+### Cases
+
+Every case runs on the **same nine-entry ledger** as `valid_bundle_v2` in the
+bundle file — imported by the generator, not restated, so the two files cannot
+describe different chains. Envelope-eligible entries are therefore the `spawn`
+at seq 1 (`vectors:n1`) and the `allow`s at seq 2 (`vectors:n0`) and seq 4
+(`vectors:n1`).
+
+- `valid_spawn_envelope` — one honest envelope over the `spawn` at seq 1. Every
+  check passes; seq 1 reports `witness-signed (matched)`, every other entry
+  `process-asserted`. The rejecting rows below are this case with one change,
+  unless their description names another.
+- `valid_allow_envelope` — the same over the `allow` at seq 2, whose subject
+  carries `call_id` alongside the five members a spawn subject carries.
+- `valid_jcs_reorder` — the positive control for canonicalization: the same
+  envelope as `valid_spawn_envelope`, same subject and same signature, with its
+  members written in a different **source** order at every level. It accepts,
+  and the row carries `canonical_hex`. **Every other object in this file is
+  written with its members sorted; this envelope is the one deliberate
+  exception, because a writer that sorted it would delete what the case tests.**
+- `absent_envelope` — no top-level `envelopes` member at all: every bundle
+  written before this contract existed. It verifies exactly as it does today
+  and every entry reports `process-asserted`.
+- `indeterminate_result` — a witness that looked and could not decide. It is
+  carried and reported, and it is not a failure: seq 1 reports
+  `witness-signed (indeterminate)`.
+- `reject_rehashed_chain_sparse` — the `ts` at seq 1 restated and every later
+  hash recomputed, with the **original** anchor. Coverage **skips** the mutated
+  entry: the only envelope is over seq 2, the next covered hop, whose hash moved
+  with the rehash. Required: `integrity(anchor)` at chain level, and
+  `envelope_subject_mismatch` at seq 2. Position is only ever as fine as
+  coverage.
+- `reject_subject_mismatch` — the subject's `entry_hash` altered by one nibble,
+  envelope re-signed. Required: `envelope_subject_mismatch` at the covered
+  entry.
+- `reject_bad_signature` — signed by a different key that **is** in
+  `witness_keys`, while `witness.kid` still names the first, so only the
+  signature is wrong. Required: `envelope_bad_signature`. The only row where it
+  is what fails.
+- `reject_unknown_version` — `v: 2`, re-signed, everything else untouched. The
+  signature is valid, which is the point: a verifier that checks the signature
+  first still has to refuse. Required: `envelope_unknown_version`.
+- `reject_non_canonical` — the same object serialized non-canonically (the
+  `typ` value's leading character written as a `\u0064` escape) and signed over
+  **those** bytes, carried in `raw_hex`. Required: `envelope_non_canonical`. A
+  verifier that recomputes the signing preimage also gets
+  `envelope_bad_signature` here and may report it; that is an extra, and the
+  required failure does not depend on whether a deployment kept the bytes.
+- `reject_member_without_bump` — a member added to the subject with no version
+  bump, re-signed. Required: `envelope_unknown_member`. Note the direction: a
+  member **added** is `envelope_unknown_member`, a subject **missing** a member
+  its event requires is `envelope_subject_mismatch`.
+- `reject_masked_bundle_mutation` — the covered entry's `ts` mutated on the
+  bundle side after the envelope was signed, chain re-hashed, **fresh** anchor.
+  The envelope still verifies and the entry no longer matches it. Required:
+  `envelope_subject_mismatch`, and that is the whole minimal set — nothing at
+  chain level fails, and nothing may be reported there.
+- `reject_rehashed_chain_anchored` — `reject_rehashed_chain_sparse` with the
+  mutated entry **covered**. The two rows differ only in whether it carries an
+  envelope. Required: `integrity(anchor)` and `envelope_subject_mismatch` at
+  seq 1. This build also reports the mismatch at seq 2, whose hash moved with
+  the same rehash; that is an extra on a covered hop.
+- `reject_rehashed_chain_unanchored` — the same mutation with **no anchor** and
+  `"signer": null`, so no bundle-level anchor check runs. Required:
+  `envelope_subject_mismatch` at seq 1, and it is the only check that fails.
+  **This is the row that fails only if the envelope check exists.**
+- `reject_unknown_witness` — signed by a key whose `kid` is not in
+  `witness_keys`. The signature is genuine; there is simply no reason to trust
+  it. Required: `envelope_unknown_witness`.
+- `reject_locator_mismatch` — the ledger and `entry_hash` untouched,
+  `subject.node` the only change and set to **another node in the same chain**,
+  so a verifier that looks the entry up by node lands on a real entry that is
+  the wrong one. Re-signed. Required: `envelope_subject_mismatch` at the
+  **found** entry's `{seq, node}` — the entry `seq` locates, not the node the
+  subject names. This pins the position rule for a disagreeing locator on its
+  own, since `reject_subject_mismatch` only exercises the hash. (Proposed by
+  @safal207 on A2A #1575; appended after row 15, so nothing above it moved.)
+
+### Regenerating
+
+```
+python3 tests/vectors/generate_envelopes.py
+```
+
+That writes `envelopes/` here AND `src/attenu_guard/vectors/envelopes/` from one
+serialisation, so the two are byte-identical by construction. Never hand-edit
+either copy. Deterministic: the chain's two CSPRNG draws are fixed by the bundle
+generator, the three witness keys are derived from fixed seed strings, and
+**Ed25519 signing is itself deterministic** (RFC 8032 derives the nonce from the
+key and the message, never from a CSPRNG), so the signatures are the same bytes
+whether `cryptography` is installed or the stdlib implementation in
+`attenu_guard._ed25519` produced them. The generator self-checks every case
+against this build's own `verify_bundle()` before exiting 0, and
+`tests/test_envelope_vectors.py` regenerates and re-scores the whole file on
+every test run.
+
+### Why Ed25519 here, and HS256 for the anchors
+
+The bundle anchors keep the published-secret HS256 signer for the reason given
+at the end of this file. The envelopes cannot: the contract fixes
+`witness.alg` at `EdDSA` and defines no other value, and a symmetric secret
+printed in the file would make `reject_bad_signature` and
+`reject_unknown_witness` unscoreable, since anyone reading the file could mint
+either. Ed25519 is asymmetric, so the file carries only public keys and a
+scorer still cannot forge an envelope. To keep the corpus runnable and
+regenerable with bare `python3`, `attenu_guard._ed25519` implements RFC 8032 in
+the standard library; `attenu_guard.evidence` prefers `cryptography` when it is
+installed, and `tests/test_ed25519.py` pins both against the RFC's own test
+vectors and against each other.
 
 ## Why HS256 for interop vectors carrying a published secret
 

@@ -55,6 +55,14 @@ jobs:
         run: python tests/vectors/generate_bundles.py
       - name: Bundle vectors + the structured-failure twin
         run: python tests/test_bundle_vectors.py
+      - name: Ed25519 (RFC 8032 vectors) on the stdlib path
+        # No cryptography here by design: this is the path the envelope corpus is
+        # signed and scored on when `pip install attenu-guard` pulled in nothing.
+        run: python tests/test_ed25519.py
+      - name: Observer-envelope interop vectors self-check
+        run: python tests/vectors/generate_envelopes.py
+      - name: Observer envelope vectors + the per-entry state contract
+        run: python tests/test_envelope_vectors.py
       - name: The committed vectors match what the generator produces, in both copies
         # generate.py writes tests/vectors/ and the packaged src/attenu_guard/vectors/
         # from one serialisation. If either committed copy was edited by hand, or the
@@ -89,6 +97,19 @@ jobs:
           pytest -q tests/test_invariants.py tests/test_core_v02.py
       - name: Ed25519 wire path (cryptography present)
         run: python tests/test_wire.py
+      - name: Ed25519 backends agree, and the envelope corpus is identical under both
+        # With cryptography installed, evidence.py signs and verifies envelopes through
+        # OpenSSL instead of the stdlib fallback. Ed25519 is deterministic, so the
+        # regenerated corpus must be the SAME bytes — the diff check below is the proof.
+        run: |
+          set -eu
+          python tests/test_ed25519.py
+          python tests/vectors/generate_envelopes.py
+          python tests/test_envelope_vectors.py
+          git diff --exit-code -- tests/vectors src/attenu_guard/vectors || {
+            echo "::error::the envelope vectors differ between the OpenSSL and stdlib Ed25519 backends"
+            exit 1
+          }
   quickstart-canary:
     # Guards against a broken first-run experience: install from a clean tree
     # and run the README quickstart verbatim, every push.
@@ -151,6 +172,37 @@ jobs:
               for expected in case["expect_failures"]:
                   assert expected in reported, (case["name"], expected, reported)
           print("packaged bundle vectors OK")
+          PY
+      - name: The observer-envelope vectors ship inside the installed package too
+        # The third suite, on the same claim: scoring an independent envelope verifier
+        # needs `pip install attenu-guard` and nothing else — no clone, and no
+        # cryptography, since the Ed25519 the envelopes require is in the package.
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP"   # import the INSTALLED package, never the checkout
+          python - <<'PY'
+          from attenu_guard import evidence, vectors, wire
+          doc = vectors.load_envelope_vectors()
+          assert doc["version"] == "envelope_vectors_v1", doc["version"]
+          assert doc["revision"] == "envelope_vectors_v1.0", doc["revision"]
+          assert len(doc["cases"]) == 16, len(doc["cases"])
+          for case in doc["cases"]:
+              signer = None
+              if case["signer"] is not None:
+                  signer = wire.HS256TestSigner(bytes.fromhex(case["signer"]["secret_hex"]),
+                                                kid=case["signer"]["kid"])
+              raw = case.get("raw_hex")
+              report = evidence.verify_bundle(
+                  case["bundle"], signer, witness_keys=case["witness_keys"],
+                  envelope_bytes=[bytes.fromhex(raw)] if raw is not None else None)
+              assert ("accept" if report["ok"] else "reject") == case["expect"], case["name"]
+              states = {str(s): v for s, v in report["envelopes"]["states"].items()}
+              assert states == case["expect_states"], (case["name"], states)
+              reported = [{"reason": d["reason"], "seq": d["seq"], "node": d["node"]}
+                          for d in report["failure_details"]]
+              for expected in case["expect_failures"]:
+                  assert expected in reported, (case["name"], expected, reported)
+          print("packaged envelope vectors OK")
           PY
   integrations:
     # Real-framework integration PoCs (tests/integrations/): each job installs
