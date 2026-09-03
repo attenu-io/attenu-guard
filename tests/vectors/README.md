@@ -316,12 +316,12 @@ regenerates and re-scores the whole file on every test run.
 Runs of this file by verifiers that share no code with this repository, pinned so a reader can
 re-run them. Each carries the claim boundary its author stated, and nothing wider.
 
-- **safal207, 2026-09-02** — a standalone, stdlib-only Python verifier (no `attenu_guard`
+- **@safal207, 2026-09-02** — a standalone, stdlib-only Python verifier (no `attenu_guard`
   import; the fixture read as raw bytes) scored the released `bundle_vectors_v1.json` at
   attenu-guard `v0.11.0` / attenu-guard-ts `v0.6.0`: 8 of 8 cases conformant, every required
   `{reason, seq, node}` at its declared position, two diagnostic differences inside the
   minimal-set rule. Proof tree, verifier and machine-readable report:
-  `safal207/ContractGraph-QA` at commit `61dc428`, `proofs/attenu-guard-v0.11.0-independent`.
+  `safal207/ContractGraph-QA` at commit `052aa3d` (his corrected proof tree; the earlier `61dc428` carried a report not produced by the pinned verifier, which he replaced), `proofs/attenu-guard-v0.11.0-independent`.
   Stated boundary: the released corpus only; no claim of general verifier completeness,
   runtime correctness, production security or certification.
 - **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-02** — a Rust verifier
