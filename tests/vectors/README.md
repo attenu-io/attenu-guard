@@ -271,9 +271,48 @@ instances of this table; the table is the contract.
 | `mixed_entry_versions` | some entry declares a `v` other than the bundle's | the first such entry |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
+| `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
+| `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority | that spawn entry |
 
-Execution-binding reasons are listed with the schema-v2 cases below; envelope reasons have
-their own table in the observer envelope section.
+`unreadable_authority` and `unreadable_granted` are the two historical exceptions to the
+"reason is the text before the first colon" rule: their message names the node there instead,
+so a verifier states those two reasons explicitly rather than parsing them out.
+
+Execution binding is checked on `schema_version=2` chains only; on a v1 bundle these cannot
+occur and the report says `"not applicable"`. Every failure in the binding loop is about a
+PAIR and is positioned on the **outcome**: the allow was a complete, valid record when it was
+written, and it is the outcome that fails to bind to it.
+
+| reason | what it means | positioned on |
+|---|---|---|
+| `v2_field_on_v1` | an entry on a `schema_version=1` chain carries a v2-only field | that entry |
+| `invalid_root` | a `root` record does not satisfy the v2 record schema | that entry |
+| `invalid_kill` | a `kill` record does not satisfy it | that entry |
+| `invalid_allow` | an `allow` record does not satisfy it | that entry |
+| `invalid_deny` | a `deny` record does not satisfy it | that entry |
+| `invalid_outcome` | an `outcome` record does not satisfy it | that entry |
+| `duplicate_call_id` | one `call_id` on two `allow`/`deny` records, which makes the binding ambiguous by construction | the **second** sighting |
+| `duplicate_outcome` | one `call_id` reporting a terminal state twice | the second outcome |
+| `outcome_without_allow` | an outcome whose `call_id` no allow in this chain ever issued | the outcome |
+| `cross_ref` | an allow and its outcome sit on different nodes | the outcome |
+| `outcome_before_allow` | the outcome's `seq` is not after its allow's | the outcome |
+| `params_mismatch` | `authorized_params_hash` != `invoked_params_hash`: the arguments that ran were not the arguments authorized | the outcome |
+
+The observer-envelope reasons complete the vocabulary. Each is positioned on the entry the
+envelope covers, found by the subject's `seq` — never on a hop coverage skipped. The
+observer-envelope section below is their full treatment.
+
+| reason | what it means | positioned on |
+|---|---|---|
+| `envelope_unknown_version` | a `v` or `typ` this verifier does not know | the covered entry |
+| `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` | the covered entry |
+| `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry |
+| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to | the covered entry |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` | the covered entry |
+| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names | the covered entry |
+
+`tests/test_bundle_vectors.py` asserts that this vocabulary and the reasons `evidence.py` can
+actually report are the same set, so a new check cannot be added without a row here.
 
 ### Cases
 

@@ -282,6 +282,64 @@ class TestBundleVectors(unittest.TestCase):
 
 
 # =========================================================================
+# The reason vocabulary the README publishes, against the reasons this build
+# can actually report
+# =========================================================================
+class TestReasonVocabulary(unittest.TestCase):
+    """`tests/vectors/README.md`'s "Reason vocabulary" section is the agreement an implementer
+    cannot derive from prose: a verifier that detects a violation at the right position but
+    reports it under a name of its own has not reproduced the corpus. The third independent run
+    scored 9 of 17 for exactly that reason and 17 of 17 after adopting these names.
+
+    A table is only worth that if it cannot go stale, so this asserts the two sets are EQUAL —
+    a new check in evidence.py cannot ship without a row, and a row cannot outlive its check."""
+
+    SOURCE = (_ROOT / "src" / "attenu_guard" / "evidence.py").read_text()
+    README = (_ROOT / "tests" / "vectors" / "README.md").read_text()
+
+    #: `failures.add(f"invalid_{ev}", ...)` is the one reason built from a variable rather than
+    #: written literally; `ev` is "allow" or "deny" at that site and nowhere else.
+    _INVALID_EVENTS = ("allow", "deny")
+
+    def _reported_reasons(self) -> set:
+        import re
+        literal = set(re.findall(r'(?:log|fail|failures)\.add\(\s*"([^"]+)"', self.SOURCE))
+        # The f-string site, asserted to exist rather than assumed, so the expansion below is
+        # not an invention this test carries on its own.
+        self.assertIn('failures.add(f"invalid_{ev}"', self.SOURCE)
+        literal |= {f"invalid_{ev}" for ev in self._INVALID_EVENTS}
+        # The envelope scorer reports through one `report()` helper, so its reasons reach
+        # `fail.add` as a variable; the module states the set.
+        literal |= set(evidence.ENVELOPE_FAILURES)
+        return literal
+
+    def _documented_reasons(self) -> set:
+        import re
+        section = self.README.split("### Reason vocabulary", 1)
+        self.assertEqual(len(section), 2, "the README has no 'Reason vocabulary' section")
+        body = section[1].split("### Cases", 1)[0]
+        return set(re.findall(r"^\| `([^`]+)` \|", body, re.M))
+
+    def test_every_reason_this_build_reports_has_a_row(self):
+        missing = sorted(self._reported_reasons() - self._documented_reasons())
+        self.assertEqual(missing, [], f"reasons evidence.py reports with no README row: {missing}")
+
+    def test_every_documented_reason_is_one_this_build_can_report(self):
+        stale = sorted(self._documented_reasons() - self._reported_reasons())
+        self.assertEqual(stale, [], f"README rows for reasons evidence.py cannot report: {stale}")
+
+    def test_the_declared_failures_of_both_corpora_are_all_in_the_vocabulary(self):
+        # The per-case `Required:` lines are instances of the table, so nothing a committed case
+        # requires may be absent from it.
+        documented = self._documented_reasons()
+        for loader in (vectors.load_bundle_vectors, vectors.load_envelope_vectors):
+            for case in loader()["cases"]:
+                for failure in case["expect_failures"]:
+                    with self.subTest(case=case["name"], reason=failure["reason"]):
+                        self.assertIn(failure["reason"], documented)
+
+
+# =========================================================================
 # failures <-> failure_details: the structured twin, at every failure site
 # =========================================================================
 def _v2_bundle(signer):
