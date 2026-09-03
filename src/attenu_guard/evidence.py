@@ -36,7 +36,11 @@ from attenu_guard.reasons import Capture, BodyState
 from attenu_guard.params import ParamsHashReason
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
-           "SUPPORTED_BUNDLE_VERSIONS"]
+           "SUPPORTED_BUNDLE_VERSIONS",
+           # Observer envelopes (envelope v1)
+           "sign_envelope", "verify_envelopes", "envelope_subject", "envelope_signing_input",
+           "ENVELOPE_VERSION", "ENVELOPE_TYP", "ENVELOPE_RESULTS", "ENVELOPE_ALG",
+           "ENVELOPE_FAILURES", "WITNESS_SIGNED", "PROCESS_ASSERTED"]
 
 # Bundle schema versions this build knows how to verify. A bundle (or anchor) declaring anything
 # else is rejected rather than verified against a schema this code doesn't actually understand.
@@ -157,13 +161,17 @@ def _anchor_for(entries: list[dict], signer, ts: int = 0) -> dict:
 
 
 def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist=None, redact_task: bool = False,
-                  strict: bool = False) -> dict:
+                  strict: bool = False, envelopes: list | None = None) -> dict:
     """A self-contained evidence bundle: the full ledger + a signed anchor over its head.
 
     Custody (A2b): with `redact_task=True`, free-text `task` fields are replaced by a length+hash marker BEFORE the
     anchor is computed, so the transported bundle carries no raw prompt text yet still verifies. With `strict=True`
     the bundle is checked against LEDGER_FIELDS (and `context_allowlist` if given) and an `EvidenceLeakError` is
-    raised on any field/context key outside the allow-list — the flywheel transport ships nothing unvetted."""
+    raised on any field/context key outside the allow-list — the flywheel transport ships nothing unvetted.
+
+    `envelopes` are observer envelopes (`sign_envelope`) to carry beside the ledger, in the top-level `envelopes`
+    array. They are omitted entirely when none are given, so a bundle without them is byte-for-byte what this
+    function has always produced."""
     import copy
     entries = copy.deepcopy(audit_log.entries)
     if redact_task:
@@ -182,9 +190,12 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     anchor = _anchor_for(entries, signer, ts)
     from attenu_guard import AuditLog as _AL
     anchor["verified"] = _AL.verify_anchor(entries, anchor, signer)[0]
-    return {"v": _bundle_version(entries), "c14n": "JCS", "chain_id": _chain_id(entries), "entries": entries,
-            "anchor": anchor, "redaction": report,
-            "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
+    bundle = {"v": _bundle_version(entries), "c14n": "JCS", "chain_id": _chain_id(entries), "entries": entries,
+              "anchor": anchor, "redaction": report,
+              "note": "offline-verifiable: attenu_guard.evidence.verify_bundle(bundle, signer)"}
+    if envelopes:
+        bundle["envelopes"] = list(envelopes)
+    return bundle
 
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dict]:
@@ -297,6 +308,377 @@ def denials(bundle: dict) -> list[dict]:
         else:
             r["count"] += 1; r["last_seq"] = e.get("seq")
     return sorted(rows.values(), key=lambda r: r["first_seq"])
+
+
+# =========================================================================
+# Observer envelopes (envelope v1) — docs/OBSERVER-ENVELOPE.md
+#
+# One question a reader of a bundle cannot answer today: was this delegation
+# event signed by something OUTSIDE the process that wrote it? An envelope is a
+# witness's signature over the IDENTITY of one committed ledger entry — never
+# over its contents, which the entry's own hash already covers. Envelopes travel
+# beside the ledger in a top-level `envelopes` array; no entry changes, so a
+# bundle without them stays valid exactly as it is today.
+#
+# An envelope is never REQUIRED. An absent one is the status quo and changes
+# nothing. A present one has to verify: a broken envelope lands in the same
+# failure list as the chain-level checks and the bundle rejects.
+# =========================================================================
+
+#: The only envelope version this build knows. The version commits the exact signed member set
+#: of the WHOLE envelope, the subject included, so a member added anywhere is a new version and
+#: the digest cannot widen silently.
+ENVELOPE_VERSION = 1
+#: The only `typ` at v1. A different one is a different contract, not a different envelope.
+ENVELOPE_TYP = "delegation-event-observation"
+#: The envelope's own member set at v1.
+ENVELOPE_MEMBERS = frozenset({"v", "typ", "subject", "observed", "witness", "sig"})
+#: The subject member set, keyed by `event`. v1 defines a subject for `spawn` and `allow` and
+#: for no other event; `entry_hash` is the BINDING member (the only evidence of WHICH entry the
+#: witness signed) and the rest are locators, whose job is to find the entry without hashing
+#: every entry.
+ENVELOPE_SUBJECT_MEMBERS = {
+    "spawn": frozenset({"chain_id", "node", "seq", "entry_hash", "event"}),
+    "allow": frozenset({"chain_id", "node", "seq", "entry_hash", "event", "call_id"}),
+}
+ENVELOPE_OBSERVED_MEMBERS = frozenset({"result", "at", "method"})
+ENVELOPE_WITNESS_MEMBERS = frozenset({"kid", "alg"})
+#: `observed.result`'s closed vocabulary. `not_matched` requires evidence that CONTRADICTS the
+#: event; `indeterminate` is the residual state, and covers thin or absent evidence. No verifier
+#: decision turns on the result: it is reported next to the state, never instead of it.
+ENVELOPE_RESULTS = ("matched", "not_matched", "indeterminate")
+#: The JOSE identifier for Ed25519, and the only `witness.alg` v1 defines.
+ENVELOPE_ALG = "EdDSA"
+#: The two per-entry states a verifier reports. `witness-signed` says where the signature came
+#: from and NOTHING about authority — the witness is whoever holds the key `witness.kid` names,
+#: which nothing in the envelope makes the delegation parent.
+WITNESS_SIGNED = "witness-signed"
+#: No envelope, or one that does not verify. Every entry in a bundle without envelopes is this.
+#: It covers two facts a bundle does not separate — a hop nobody undertook to cover, and a hop a
+#: witness undertook to cover and never did — and v1 takes the weaker reading of the two.
+PROCESS_ASSERTED = "process-asserted"
+
+#: The six named envelope failures, in the order this build checks them.
+ENVELOPE_FAILURES = ("envelope_unknown_version", "envelope_unknown_member",
+                     "envelope_subject_mismatch", "envelope_non_canonical",
+                     "envelope_unknown_witness", "envelope_bad_signature")
+
+
+_ED25519_BACKEND = None
+
+
+def _ed25519_backend():
+    """OpenSSL through `cryptography` when it is installed, the stdlib fallback otherwise.
+
+    Ed25519 is deterministic, so the two agree byte for byte (tests/test_ed25519.py pins that);
+    preferring OpenSSL keeps a deployment that HAS it on the hardened, constant-time path, and
+    the fallback is what lets the shipped envelope corpus be scored, and regenerated, by a
+    `pip install attenu-guard` that pulled in no dependencies at all."""
+    global _ED25519_BACKEND
+    if _ED25519_BACKEND is not None:
+        return _ED25519_BACKEND
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519 as _c
+    except ImportError:
+        from attenu_guard import _ed25519
+        _ED25519_BACKEND = (_ed25519.sign, _ed25519.verify, _ed25519.public_key)
+        return _ED25519_BACKEND
+
+    from cryptography.hazmat.primitives import serialization as _ser
+
+    def _sign(seed: bytes, message: bytes) -> bytes:
+        return _c.Ed25519PrivateKey.from_private_bytes(seed).sign(message)
+
+    def _verify(public: bytes, message: bytes, signature: bytes) -> bool:
+        try:
+            _c.Ed25519PublicKey.from_public_bytes(public).verify(signature, message)
+            return True
+        except Exception:  # noqa: BLE001 - any failure here is "no", not an error to propagate
+            return False
+
+    def _public(seed: bytes) -> bytes:
+        return _c.Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
+            _ser.Encoding.Raw, _ser.PublicFormat.Raw)
+
+    _ED25519_BACKEND = (_sign, _verify, _public)
+    return _ED25519_BACKEND
+
+
+def envelope_signing_input(envelope: Mapping) -> bytes:
+    """The bytes a witness signs: `JCS(envelope minus its "sig" member)`.
+
+    The same RFC 8785 canonicalization the ledger has signed with since 0.7.0 — one
+    implementation, not a second one for envelopes."""
+    return canonical.dumps({k: v for k, v in envelope.items() if k != "sig"})
+
+
+def _recomputed_hashes(entries: list[dict]) -> dict:
+    """seq -> the entry's hash RECOMPUTED from the bundle, never read off the entry.
+
+    `entry_hash` in a subject is checked against this. The recomputation walks the ledger from
+    GENESIS exactly as `AuditLog.verify` does, so an entry whose stored `hash` was replaced does
+    not get to supply the value it is compared against."""
+    out: dict = {}
+    prev = _GENESIS
+    for i, e in enumerate(entries):
+        payload = {k: v for k, v in e.items() if k != "hash"}
+        try:
+            computed = _rehash(prev, payload)
+        except Exception:  # noqa: BLE001 - an unhashable payload has no recomputable hash
+            computed = None
+        out[e.get("seq", i)] = computed
+        prev = computed if computed is not None else _GENESIS
+    return out
+
+
+def envelope_subject(entries: list[dict], seq: int) -> dict:
+    """The v1 subject for the entry at `seq`, recomputed from the ledger.
+
+    Raises `ValueError` when `seq` names no entry, or names one whose `event` v1 defines no
+    subject for."""
+    entry = next((e for e in entries if e.get("seq") == seq), None)
+    if entry is None:
+        raise ValueError(f"no entry at seq {seq!r}")
+    event = entry.get("event")
+    if event not in ENVELOPE_SUBJECT_MEMBERS:
+        raise ValueError(f"envelope v{ENVELOPE_VERSION} defines no subject for event {event!r}")
+    subject = {"chain_id": entry.get("chain_id"), "node": entry.get("node"), "seq": seq,
+               "entry_hash": _recomputed_hashes(entries)[seq], "event": event}
+    if event == "allow":
+        subject["call_id"] = entry.get("call_id")
+    return subject
+
+
+def sign_envelope(entries: list[dict], seq: int, seed: bytes, *, kid: str,
+                  result: str = "matched", at: str, method: str) -> dict:
+    """An observer envelope over the entry at `seq`, signed with the 32-byte Ed25519 `seed`.
+
+    `entries` is the ledger the subject is recomputed from — a witness signs the identity of an
+    entry that already exists, never a claim it composes itself."""
+    if result not in ENVELOPE_RESULTS:
+        raise ValueError(f"observed.result must be one of {list(ENVELOPE_RESULTS)}, got {result!r}")
+    sign, _verify, _public = _ed25519_backend()
+    envelope = {"v": ENVELOPE_VERSION, "typ": ENVELOPE_TYP,
+                "subject": envelope_subject(entries, seq),
+                "observed": {"result": result, "at": at, "method": method},
+                "witness": {"kid": kid, "alg": ENVELOPE_ALG}}
+    envelope["sig"] = sign(seed, envelope_signing_input(envelope)).hex()
+    return envelope
+
+
+def _trusted_witnesses(witness_keys) -> dict:
+    """kid -> (alg, raw public key bytes), from the vector file's own `witness_keys` shape
+    (`[{"kid", "alg", "public_key_hex"}]`) or from a plain `{kid: public_key_bytes}` mapping.
+
+    `None` means no trust anchor is configured, which is an EMPTY set, not an absent check: an
+    envelope naming a kid nobody trusts is `envelope_unknown_witness`, and that is the honest
+    answer whether the trust set is empty or merely does not contain it."""
+    if witness_keys is None:
+        return {}
+    if isinstance(witness_keys, Mapping):
+        return {kid: (ENVELOPE_ALG, bytes(key) if not isinstance(key, str) else bytes.fromhex(key))
+                for kid, key in witness_keys.items()}
+    trusted = {}
+    for k in witness_keys:
+        trusted[k.get("kid")] = (k.get("alg"), bytes.fromhex(k.get("public_key_hex") or ""))
+    return trusted
+
+
+def _envelope_line(state: str, result) -> str:
+    """The report line: the state and the result together, in the same form for all three
+    results. A process-asserted entry gets no result."""
+    return f"{state} ({result})" if state == WITNESS_SIGNED else state
+
+
+def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
+               raw_bytes) -> tuple[dict, _FailureLog]:
+    """Score every envelope in the bundle and derive the per-entry state.
+
+    Returns the summary `verify_bundle` reports as `report["envelopes"]`, plus the failures,
+    which go into the SAME list as every other bundle failure. Two rules bind where a failure
+    may land: an envelope failure lands only on the hop that envelope covers, never on a hop
+    coverage skipped; and no chain-level integrity failure is ever raised because an envelope
+    failed — that one comes from a real anchor mismatch and from nothing else."""
+    fail = _FailureLog()
+    states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
+    results: dict = {}
+    # The hash walk is what an envelope's binding member is checked against; a bundle carrying
+    # none does not pay for it. Every entry is process-asserted in that case, which is the
+    # status quo and exactly what this reports.
+    by_seq = {e.get("seq", i): e for i, e in enumerate(entries)} if envelopes else {}
+    recomputed = _recomputed_hashes(entries) if envelopes else {}
+
+    for index, envelope in enumerate(envelopes):
+        raw = raw_bytes[index] if raw_bytes and index < len(raw_bytes) else None
+        seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw, fail)
+        if seq is None:
+            continue
+        states[seq] = WITNESS_SIGNED
+        results[seq] = result
+
+    lines = {seq: _envelope_line(state, results.get(seq)) for seq, state in states.items()}
+    return ({"status": "verified" if not fail else "FAILED",
+             "count": len(envelopes),
+             "witness_signed": sorted(s for s, st in states.items() if st == WITNESS_SIGNED),
+             "states": states, "results": results, "lines": lines,
+             "failures": list(fail.messages)}, fail)
+
+
+def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, trusted: dict,
+                    raw, fail: _FailureLog):
+    """One envelope, checked in the order the six named failures are defined in.
+
+    Returns `(seq, node, result)` for an envelope that verified, and `(None, None, None)` for
+    one that did not. Every failure is positioned on the entry the envelope COVERS, found by
+    `subject.seq` — the locators are checked against that entry, not used to find it."""
+    def position(subject):
+        s = subject.get("seq") if isinstance(subject, Mapping) else None
+        entry = by_seq.get(s)
+        if entry is None:
+            return (s if isinstance(s, int) else None), None
+        return entry.get("seq"), entry.get("node")
+
+    def report(reason: str, detail: str, subject) -> tuple:
+        seq, node = position(subject)
+        fail.add(reason, f"{reason}: {detail}", seq=seq, node=node)
+        return seq, node
+
+    if not isinstance(envelope, Mapping):
+        fail.add("envelope_unknown_version",
+                 f"envelope_unknown_version: envelope #{index} is not a JSON object")
+        return None, None, None
+    subject = envelope.get("subject")
+
+    # (1) version — a `v` or `typ` this build does not know is a DIFFERENT CONTRACT, and
+    # nothing further about it can be read safely.
+    if envelope.get("v") != ENVELOPE_VERSION or envelope.get("typ") != ENVELOPE_TYP:
+        report("envelope_unknown_version",
+               f"envelope v={envelope.get('v')!r} typ={envelope.get('typ')!r}, this build "
+               f"knows v={ENVELOPE_VERSION} typ={ENVELOPE_TYP!r}", subject)
+        return None, None, None
+
+    # (2) member sets — the version commits the exact signed member set of the whole envelope,
+    # so a member added ANYWHERE is a new version that did not declare itself.
+    for label, value, expected in (("envelope", envelope, ENVELOPE_MEMBERS),
+                                   ("observed", envelope.get("observed"), ENVELOPE_OBSERVED_MEMBERS),
+                                   ("witness", envelope.get("witness"), ENVELOPE_WITNESS_MEMBERS)):
+        if not isinstance(value, Mapping) or set(value) != expected:
+            got = sorted(value) if isinstance(value, Mapping) else type(value).__name__
+            report("envelope_unknown_member",
+                   f"{label} member set is {got}, expected {sorted(expected)}", subject)
+            return None, None, None
+
+    # (3) subject — the event decides the member set; a member ADDED to it is unknown_member,
+    # one MISSING is subject_mismatch (a subject that does not say what it covers).
+    if not isinstance(subject, Mapping):
+        report("envelope_subject_mismatch",
+               f"subject is {type(subject).__name__}, expected a JSON object", subject)
+        return None, None, None
+    event = subject.get("event")
+    if event not in ENVELOPE_SUBJECT_MEMBERS:
+        report("envelope_subject_mismatch",
+               f"subject event={event!r}; envelope v{ENVELOPE_VERSION} defines a subject for "
+               f"{sorted(ENVELOPE_SUBJECT_MEMBERS)} and no other event", subject)
+        return None, None, None
+    expected_members = ENVELOPE_SUBJECT_MEMBERS[event]
+    if set(subject) - expected_members:
+        report("envelope_unknown_member",
+               f"subject member set is {sorted(subject)}, expected {sorted(expected_members)} "
+               f"for a {event} subject", subject)
+        return None, None, None
+    if expected_members - set(subject):
+        report("envelope_subject_mismatch",
+               f"subject is missing {sorted(expected_members - set(subject))}, which a {event} "
+               "subject requires", subject)
+        return None, None, None
+
+    # (3a) the binding member. `seq` is the lookup key, so there is nothing to compare it
+    # against; the entry it finds supplies the hash the subject is checked against.
+    entry = by_seq.get(subject.get("seq"))
+    if entry is None:
+        report("envelope_subject_mismatch",
+               f"no entry at seq {subject.get('seq')!r} in this bundle", subject)
+        return None, None, None
+    seq, node = entry.get("seq"), entry.get("node")
+    computed = recomputed.get(seq)
+    if subject.get("entry_hash") != computed:
+        report("envelope_subject_mismatch",
+               f"subject entry_hash {subject.get('entry_hash')!r} != the hash recomputed for "
+               f"seq {seq} from this bundle ({computed!r})", subject)
+        return None, None, None
+
+    # (3b) the locators, checked against the SAME entry `seq` found. A matching locator attests
+    # nothing on its own; a disagreeing one is the same failure at the same position.
+    locators = [("chain_id", entry.get("chain_id")), ("node", entry.get("node")),
+                ("event", entry.get("event"))]
+    if event == "allow":
+        locators.append(("call_id", entry.get("call_id")))
+    for member, actual in locators:
+        if subject.get(member) != actual:
+            report("envelope_subject_mismatch",
+                   f"subject {member}={subject.get(member)!r} != {actual!r} on the entry at "
+                   f"seq {seq}", subject)
+            return None, None, None
+
+    # (4) canonicality — an invariant SEPARATE from the signature: the received bytes must equal
+    # JCS of what they parse to. It can only be raised where the bytes as received are supplied,
+    # because formatting and escaping do not survive a parse.
+    non_canonical = False
+    if raw is not None:
+        raw = bytes.fromhex(raw) if isinstance(raw, str) else bytes(raw)
+        try:
+            recanonicalized = canonical.dumps(dict(envelope))
+        except canonical.CanonicalizationError as exc:
+            recanonicalized, non_canonical = None, True
+            report("envelope_non_canonical", f"the envelope cannot be canonicalized: {exc}", subject)
+        if recanonicalized is not None and recanonicalized != raw:
+            non_canonical = True
+            report("envelope_non_canonical",
+                   "the bytes as received are not JCS of what they parse to "
+                   f"({len(raw)} received, {len(recanonicalized)} canonical)", subject)
+
+    # (5) the witness key. A signature that verifies under some OTHER trusted key is not
+    # witness-signed: the kid names the key, and that is the key it has to verify under.
+    witness = envelope.get("witness")
+    kid, alg = witness.get("kid"), witness.get("alg")
+    known = trusted.get(kid)
+    if known is None or known[0] != alg:
+        report("envelope_unknown_witness",
+               f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
+               f"({sorted(k for k in trusted if k is not None)})", subject)
+        return None, None, None
+
+    # (6) the signature, over JCS(envelope minus "sig").
+    _sign, verify, _public = _ed25519_backend()
+    try:
+        signature = bytes.fromhex(envelope.get("sig") or "")
+    except ValueError:
+        signature = b""
+    if not verify(known[1], envelope_signing_input(envelope), signature):
+        report("envelope_bad_signature",
+               f"the signature does not verify under the key kid={kid!r} names", subject)
+        return None, None, None
+    if non_canonical:
+        return None, None, None
+    return seq, node, envelope.get("observed", {}).get("result")
+
+
+def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None) -> dict:
+    """Score a bundle's observer envelopes on their own, without the ledger checks.
+
+    `witness_keys` is the trust set: the vector file's `[{"kid", "alg", "public_key_hex"}]`, or
+    a `{kid: public_key_bytes}` mapping. `envelope_bytes` is the list of envelope bytes AS
+    RECEIVED, positionally aligned with `bundle["envelopes"]` (entries may be None) — only
+    `envelope_non_canonical` needs them, and only where a deployment kept them.
+
+    Returns `{ok, status, count, states, results, lines, witness_signed, failures,
+    failure_details}`. `states` maps every entry's seq to `witness-signed` or
+    `process-asserted`; `lines` is the report line for each, `witness-signed (matched)` and so
+    on, with no result on a process-asserted entry."""
+    entries = bundle.get("entries") or []
+    summary, fail = _envelopes(entries, bundle.get("envelopes") or [],
+                               _trusted_witnesses(witness_keys), envelope_bytes)
+    return {"ok": not fail, **summary, "failure_details": fail.details}
 
 
 # =========================================================================
@@ -707,7 +1089,8 @@ def _integrity_position(entries: list[dict]) -> tuple:
 
 
 def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = None,
-                  expected_head: tuple | None = None) -> dict:
+                  expected_head: tuple | None = None, witness_keys=None,
+                  envelope_bytes=None) -> dict:
     """Verify integrity, monotonicity and containment from the bundle alone. Returns
     {ok, checks, failures, failure_details, ...}.
 
@@ -723,6 +1106,14 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     when given, the bundle's actual (seq, hash, chain_id, v) must equal it exactly, or `checks["expected_anchor"]`
     reports `"FAILED"` and the mismatch lands in `failures`. `report["verified_against"]` names which mode ran.
 
+    `witness_keys` is the trust set for the bundle's observer envelopes, if it carries any:
+    `[{"kid", "alg", "public_key_hex"}]` (the envelope vector file's own shape) or a
+    `{kid: public_key_bytes}` mapping. `None` is an EMPTY trust set, not a skipped check — an
+    envelope naming a key nobody trusts is `envelope_unknown_witness`. `envelope_bytes` supplies
+    the envelope bytes AS RECEIVED, positionally aligned with `bundle["envelopes"]`, which only
+    `envelope_non_canonical` needs and only where a deployment kept them. A bundle with no
+    `envelopes` array reports every entry `process-asserted` and verifies exactly as before.
+
     `failure_details` is the structured twin of `failures`: same order, same count, one
     `{"reason", "seq", "node", "call_id", "detail"}` dict per string, so a conformance suite can
     assert the reason AND the position of every failure instead of matching prose.
@@ -730,7 +1121,8 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     entries = bundle.get("entries") or []
     anchor = bundle.get("anchor") or {}
     checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked",
-              "version": False, "chain_id": False, "root": False, "expected_anchor": "not checked"}
+              "version": False, "chain_id": False, "root": False, "expected_anchor": "not checked",
+              "envelopes": "not present"}
     log = _FailureLog()
 
     # (0) version: the bundle must declare a schema version this build understands, and — when an
@@ -871,10 +1263,23 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     if execution_binding.get("failures"):
         log.extend(eb_failures)
 
-    excluded = ("anchor", "expected_anchor")
+    # (4) observer envelopes. Never required — an absent envelope is the status quo and changes
+    # nothing — but a PRESENT one has to verify, and a broken one lands in this same list. The
+    # per-entry state is reported either way, so a reader sees which hops were covered before
+    # reading which one failed.
+    envelopes = _envelopes(entries, bundle.get("envelopes") or [],
+                           _trusted_witnesses(witness_keys), envelope_bytes)
+    if "envelopes" in bundle:
+        envelope_summary, envelope_failures = envelopes
+        checks["envelopes"] = envelope_summary["status"]
+        log.extend(envelope_failures)
+    else:
+        envelope_summary = {**envelopes[0], "status": "not present"}
+
+    excluded = ("anchor", "expected_anchor", "envelopes")
     return {"ok": all(v for k, v in checks.items() if k not in excluded) and not log,
             "checks": checks, "failures": log.messages, "failure_details": log.details,
             "nodes": len(auth), "actions_checked": actions, "chain_id": bundle.get("chain_id"),
-            "execution_binding": execution_binding,
+            "execution_binding": execution_binding, "envelopes": envelope_summary,
             "verified_against": "expected_anchor" if (expected_anchor is not None or expected_head is not None)
                                 else "bundle_anchor"}

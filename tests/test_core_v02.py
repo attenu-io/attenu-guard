@@ -1306,6 +1306,7 @@ def test_evidence_bundle_verifies_offline():
         "chain_id": True,
         "root": True,                        # 0.9.0: exactly-one-root check
         "expected_anchor": "not checked",     # 0.9.0: no expected_anchor/expected_head was given
+        "envelopes": "not present",           # 0.13.0: this bundle carries no observer envelopes
     }
     assert rep["nodes"] == 2 and rep["actions_checked"] >= 1
 
