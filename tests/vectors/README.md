@@ -257,6 +257,17 @@ scores that case as a failure to reproduce, which is what the third independent 
 (9 of 17 before adopting these names, 17 of 17 after). The per-case `Required:` lines are
 instances of this table; the table is the contract.
 
+**This vocabulary is closed.** Every reason the released verifier can report is in it, and
+every row names a reason the verifier can report; `tests/test_bundle_vectors.py` asserts both
+directions against the source, so a check cannot ship without a row and a row cannot outlive
+its check. A token that is not here is one the contract has no opinion about. So, for an
+implementation that checks a rule the corpus does not name yet: report it under a token of your
+own, mark it as outside the contract, and say so in the thread where the corpus is discussed;
+the next revision adds the row, the token, and a case that exercises it, and your token is
+renamed to match. Inventing is expected; inventing silently is the failure mode. The same
+holds for the six envelope reasons in the observer-envelope section: they are the whole of
+envelope v1's set, and a v2 declares its own.
+
 | reason | what it means | positioned on |
 |---|---|---|
 | `integrity` | an entry's hash chain does not verify (a rehashed, reordered, or altered entry) | the first entry that fails |
