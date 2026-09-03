@@ -311,7 +311,7 @@ def denials(bundle: dict) -> list[dict]:
 
 
 # =========================================================================
-# Observer envelopes (envelope v1) — docs/OBSERVER-ENVELOPE.md
+# Observer envelopes (envelope v1) — tests/vectors/README.md, "Observer envelope vectors"
 #
 # One question a reader of a bundle cannot answer today: was this delegation
 # event signed by something OUTSIDE the process that wrote it? An envelope is a
