@@ -265,7 +265,7 @@ implementation that checks a rule the corpus does not name yet: report it under 
 own, mark it as outside the contract, and say so in the thread where the corpus is discussed;
 the next revision adds the row, the token, and a case that exercises it, and your token is
 renamed to match. Inventing is expected; inventing silently is the failure mode. The same
-holds for the six envelope reasons in the observer-envelope section: they are the whole of
+holds for the seven envelope reasons in the observer-envelope section: they are the whole of
 envelope v1's set, and a v2 declares its own.
 
 | reason | what it means | positioned on |
@@ -875,6 +875,20 @@ at seq 1 (`vectors:n1`) and the `allow`s at seq 2 (`vectors:n0`) and seq 4
   say `"none"`, and one that ignores `alg` and reports
   `envelope_bad_signature` — the right verdict for the wrong reason.
   (Appended at revision `envelope_vectors_v1.1`, after row 17.)
+
+### Known limits of envelope v1, stated rather than fixed
+
+- **An envelope is outside the anchor.** The bundle anchor signs the ledger head, not the
+  `envelopes` array, so an array stripped in transit is indistinguishable from a bundle that
+  never carried one: the verifier reports every entry `process-asserted` and raises nothing.
+  That is the v0/v0.1 design (an absent envelope is the status quo), and it is the open
+  question for a v2: anchor coverage, or an envelope count in the anchor.
+- **The strict leak check does not read envelope text.** `export_bundle(strict=True)` vets the
+  ledger entries; `observed.method`, `observed.at` and `witness.kid` are free text a witness
+  wrote and pass through unvetted. Keep them free of anything you would not put in a ledger.
+- **Canonicality is checked only where the received bytes are supplied**, and the report does
+  not yet say per envelope whether that check ran. A `witness-signed` entry whose bytes were
+  never supplied was not canonicality-checked; a later revision adds a per-envelope field.
 
 ### Regenerating
 
