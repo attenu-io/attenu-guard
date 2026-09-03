@@ -6,8 +6,11 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- `verify_bundle()` monotonicity: a delegation that widened only ttl or only a ceiling verified CLEAN whenever the child's scopes were literally a subset of the parent's — the check was gated on a literal, non-wildcard-aware scope difference, so `is_narrower_than` returning False was discarded. A child that outlived its parent, raised a ceiling, dropped a ceiling its parent held, or carried no ttl at all now fails, and the message names the dimension (`ttl 7200 > parent 3600`, `ceiling max_rows<=250 looser than parent max_rows<=100`). The scope-widening string is unchanged
+
 ### Added
-- Bundle interop vectors, revision `bundle_vectors_v1.1` — two appended cases, `reject_widened_scope` (`monotonicity` on the over-granting spawn) and `reject_uncontained_allow` (`containment` on the allow), the delegation checks no rejecting case covered; `version` stays `bundle_vectors_v1`
+- Bundle interop vectors, revision `bundle_vectors_v1.1` — four appended cases: `reject_widened_scope` and `reject_uncontained_allow` (the delegation checks no rejecting case covered), `reject_increased_ttl` and `reject_loosened_ceiling` (the two dimensions the gate above hid); `version` stays `bundle_vectors_v1`
 - `tests/vectors/README.md` — the permitted extras two independent runs reported on `reject_duplicate_call_id` (first-sighting vs last-sighting binding) and on `reject_tampered_entry` (stored-head vs recomputed-head), both conformant
 
 ## [0.11.0] - 2026-09-02

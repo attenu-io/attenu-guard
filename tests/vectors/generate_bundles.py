@@ -400,6 +400,46 @@ def gen_cases() -> list:
         _mutate(base, _forge_allow_scope),
         expect="reject", expect_failures=[_fail("containment", 4, n1)]))
 
+    # Authority is a lattice, not a scope list: a delegation can widen without naming a single
+    # new scope, by living longer or by spending more. These two cases pin the other two
+    # dimensions `Authority.is_narrower_than` compares. Both were accepted by 0.11.0, whose
+    # monotonicity check reported nothing unless the LITERAL scope difference was non-empty.
+
+    def _widen_granted_ttl(es):
+        es[1]["granted"]["ttl"] = 7200
+
+    cases.append(_case(
+        "reject_increased_ttl",
+        "The delegation at seq 1 grants the summarizer a ttl of 7200 seconds under a parent "
+        "holding 3600: the child outlives the authority it was cut from, so there is a window "
+        "in which it still acts and its parent no longer can. Not one scope is added — the "
+        "grant is still exactly {crm.read} under a parent holding {crm.*, mail.send} — which is "
+        "the point of this case. Attenuation is a lattice relation over scopes, ceilings AND "
+        "ttl, so a verifier that compares scope lists alone accepts this bundle and reports "
+        "nothing. Chain re-hashed and re-anchored, containment and execution binding untouched. "
+        "Required: monotonicity on the spawn (seq 1), node the child. This build names the "
+        "dimension in its message ('ttl 7200 > parent 3600'); an implementation that names its "
+        "own equivalent is conformant, since only reason and position are scored.",
+        _mutate(base, _widen_granted_ttl),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    def _loosen_granted_ceiling(es):
+        es[1]["granted"]["constraints"] = [{"key": "max_rows", "max": 250_000}]
+
+    cases.append(_case(
+        "reject_loosened_ceiling",
+        "The delegation at seq 1 raises the summarizer's max_rows ceiling to 250000 under a "
+        "parent bounded at 100000: the child may read more rows per call than the node that "
+        "delegated to it. Again no scope is added and the ttl is untouched, so this is the "
+        "ceiling dimension in isolation. A ceiling is not decoration — it is the difference "
+        "between a summarizer that reads a page and one that exfiltrates a table — and a bound "
+        "that a delegation can raise bounds nothing. Chain re-hashed and re-anchored. Required: "
+        "monotonicity on the spawn (seq 1), node the child. The same rule fails the other way "
+        "too: a child that simply OMITS a ceiling its parent holds is unbounded on that "
+        "dimension and so is not narrower, which the verifier reports the same way.",
+        _mutate(base, _loosen_granted_ceiling),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
     return cases
 
 

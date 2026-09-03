@@ -89,6 +89,8 @@ class TestBundleVectors(unittest.TestCase):
             # both asked for. Appended, never inserted: a case's position is stable for life.
             "reject_widened_scope",
             "reject_uncontained_allow",
+            "reject_increased_ttl",
+            "reject_loosened_ceiling",
         ])
 
     def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
@@ -98,7 +100,9 @@ class TestBundleVectors(unittest.TestCase):
         # also broke integrity would not isolate the rule it is named for.
         by_name = {c["name"]: c for c in self.document["cases"]}
         for name, reason, other in (("reject_widened_scope", "monotonicity", "containment"),
-                                    ("reject_uncontained_allow", "containment", "monotonicity")):
+                                    ("reject_uncontained_allow", "containment", "monotonicity"),
+                                    ("reject_increased_ttl", "monotonicity", "containment"),
+                                    ("reject_loosened_ceiling", "monotonicity", "containment")):
             with self.subTest(case=name):
                 case = by_name[name]
                 self.assertEqual(case["expect"], "reject")
@@ -459,6 +463,117 @@ class TestFailureDetailsTwin(unittest.TestCase):
         for forbidden in ("failures.append(", "log.append("):
             self.assertNotIn(forbidden, source,
                              f"use _FailureLog.add(reason, detail, ...) instead of {forbidden}")
+
+
+# =========================================================================
+# Monotonicity across EVERY dimension of the lattice, not just scopes
+# =========================================================================
+class TestMonotonicityDimensions(unittest.TestCase):
+    """A delegation widens if it grows on ANY dimension `Authority.is_narrower_than` compares:
+    scopes, ceilings, or ttl. Through 0.11.0 the bundle verifier's monotonicity check was gated
+    on a literal, non-wildcard-aware scope difference, so a child that only outlived its parent
+    or only raised a ceiling was reported ONLY when its scopes happened not to be literally a
+    subset. Every widening bundle below verified clean before that gate was removed, and the
+    misdirected case reported a scope message for a ttl violation.
+    """
+
+    def setUp(self):
+        self.signer = HS256TestSigner(b"k", kid="k")
+        self.parent = Authority({"crm.read", "mail.send"}, [RowLimit(100)], ttl=3600)
+
+    def _bundle(self, granted_wire, *, parent=None):
+        """An honest two-node v2 chain with the spawn's `granted` replaced wholesale, the chain
+        re-hashed and a fresh anchor signed over it. That detour is the only way to get an
+        unsound delegation into a ledger: `Guard.delegate` refuses to create one, which is why
+        this is a verifier test and not a Guard test."""
+        root = Guard.issue("orchestrator", parent or self.parent, chain_id="t", schema_version=2)
+        child = root.delegate("summarizer", Authority({"crm.read"}, [RowLimit(50)], ttl=900),
+                              task="summarize")
+        child.complete()
+        root.complete()
+        bundle = evidence.export_bundle(root.audit_log(), self.signer)
+        bundle["entries"][_index_of(bundle, "spawn")]["granted"] = granted_wire
+        _rehash(bundle)
+        _reanchor(bundle, self.signer)
+        return bundle
+
+    @staticmethod
+    def _granted(scopes=("crm.read",), max_rows=50, ttl=900):
+        constraints = [] if max_rows is None else [{"key": "max_rows", "max": max_rows}]
+        return {"scopes": list(scopes), "constraints": constraints, "ttl": ttl}
+
+    def _assert_widens(self, granted, expected_detail, *, parent=None):
+        report = evidence.verify_bundle(self._bundle(granted, parent=parent), self.signer)
+        self.assertFalse(report["ok"], "a widening delegation must not verify")
+        self.assertFalse(report["checks"]["monotonicity"])
+        # Integrity stays green: the chain was re-hashed and re-anchored, so monotonicity is
+        # the only thing wrong and the failure cannot be an artifact of a broken ledger.
+        self.assertTrue(report["checks"]["integrity"])
+        self.assertEqual(report["failures"],
+                         [f"monotonicity: t:n1 not ⊆ parent t:n0 ({expected_detail})"])
+        self.assertEqual([(d["reason"], d["seq"], d["node"]) for d in report["failure_details"]],
+                         [("monotonicity", 1, "t:n1")])
+
+    # ---- the two dimensions 0.11.0 accepted ----------------------------
+    def test_a_child_that_outlives_its_parent_is_not_narrower(self):
+        self._assert_widens(self._granted(ttl=7200), "ttl 7200 > parent 3600")
+
+    def test_a_child_with_a_looser_ceiling_is_not_narrower(self):
+        self._assert_widens(self._granted(max_rows=250),
+                            "ceiling max_rows<=250 looser than parent max_rows<=100")
+
+    # ---- the two the same relation fails on, by omission ---------------
+    def test_a_child_unbounded_where_its_parent_bounds_is_not_narrower(self):
+        # Dropping a ceiling is not attenuation: no ceiling means unbounded on that dimension,
+        # which is MORE authority than the parent held, not less.
+        self._assert_widens(self._granted(max_rows=None),
+                            "ceiling max_rows unbounded, parent holds max_rows<=100")
+
+    def test_a_child_that_never_expires_under_a_parent_that_does_is_not_narrower(self):
+        self._assert_widens(self._granted(ttl=None), "ttl unbounded, parent 3600")
+
+    # ---- the dimension is named, even when a wildcard hides the scopes --
+    def test_a_ttl_widening_under_a_wildcard_parent_names_ttl_not_scopes(self):
+        # The misdirected case. {crm.read} is covered by a parent holding {crm.*} but is NOT
+        # literally in its scope set, so the old gate fired and printed a scope message for a
+        # violation that was entirely about ttl.
+        self._assert_widens(self._granted(ttl=7200), "ttl 7200 > parent 3600",
+                            parent=Authority({"crm.*"}, [RowLimit(100)], ttl=3600))
+
+    # ---- what must NOT change ------------------------------------------
+    def test_the_scope_widening_message_is_unchanged(self):
+        self._assert_widens(self._granted(scopes=("crm.read", "pay.transfer")),
+                            "child scopes ['pay.transfer'] not held by parent")
+
+    def test_a_scope_widening_under_a_wildcard_parent_keeps_its_historical_wording(self):
+        # The published string lists the LITERAL set difference, so a scope the parent covers
+        # by wildcard appears in it alongside the one it does not. Unchanged on purpose: it is
+        # the wording the released vectors and two independent verifiers already score.
+        self._assert_widens(self._granted(scopes=("crm.read", "pay.transfer")),
+                            "child scopes ['crm.read', 'pay.transfer'] not held by parent",
+                            parent=Authority({"crm.*"}, [RowLimit(100)], ttl=3600))
+
+    def test_an_honestly_narrower_child_still_verifies(self):
+        # The other half of the fix: removing the gate must not make a sound delegation fail.
+        report = evidence.verify_bundle(
+            self._bundle(self._granted(max_rows=10, ttl=60)), self.signer)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["failures"], [])
+
+    def test_an_identical_regrant_still_verifies(self):
+        # The boundary of the relation: equal is narrower-or-equal, so a child granted exactly
+        # what its parent holds is sound and must not be reported.
+        report = evidence.verify_bundle(
+            self._bundle({"scopes": ["crm.read", "mail.send"],
+                          "constraints": [{"key": "max_rows", "max": 100}], "ttl": 3600}),
+            self.signer)
+        self.assertTrue(report["ok"], report["failures"])
+
+    def test_the_first_failing_dimension_is_the_one_reported(self):
+        # Ceilings are compared before ttl, matching Authority.is_narrower_than, so a child that
+        # widens both names the ceiling. One message per unsound delegation, as before.
+        self._assert_widens(self._granted(max_rows=250, ttl=7200),
+                            "ceiling max_rows<=250 looser than parent max_rows<=100")
 
 
 if __name__ == "__main__":

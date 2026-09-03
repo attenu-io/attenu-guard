@@ -222,7 +222,7 @@ rejecting case declares `expect_failures`: the **minimal set** of
   position and declared minimal set are stable for life. So `version` is the
   compatibility contract and stays `bundle_vectors_v1` — an implementation that
   scored the file before still scores it — while `revision` moves with each
-  addition, which is what a report should name (`bundle_vectors_v1.1`, ten
+  addition, which is what a report should name (`bundle_vectors_v1.1`, twelve
   cases). Iterate `cases`; do not assume a length.
 
 Score yourself with nothing but `pip install attenu-guard`:
@@ -295,8 +295,27 @@ of the human-readable `failures` list.
   positioned on the allow. (Asked for by the first two independent runs; added
   in revision v1.1.)
 
-Neither of the two v1.1 cases has a permitted extra: each fails exactly one
+- `reject_increased_ttl` — the `spawn` grants a ttl of 7200 under a parent
+  holding 3600, so the child outlives the authority it was cut from. No scope
+  is added: the grant is still exactly `{crm.read}`. Required:
+  `monotonicity` on the spawn. (Added in revision v1.1.)
+- `reject_loosened_ceiling` — the `spawn` raises the child's `max_rows` to
+  250000 under a parent bounded at 100000, so the child may read more per call
+  than the node that delegated to it. No scope is added and the ttl is
+  untouched. Required: `monotonicity` on the spawn. (Added in revision v1.1.)
+
+None of the four v1.1 cases has a permitted extra: each fails exactly one
 check and reports exactly one failure.
+
+Attenuation is a lattice relation over three dimensions, not a scope list, so
+the last two cases add no scope at all. A verifier that compares scope sets
+alone accepts both and reports nothing. Two further widenings fail the same
+relation by omission rather than by growth, and a verifier should reject them
+too, though neither has a vector: a child that omits a ceiling its parent holds
+is unbounded on that dimension, and a child with no ttl under a parent that has
+one never expires. Both were accepted by attenu-guard through 0.11.0, whose
+monotonicity check was gated on a literal, non-wildcard-aware scope difference;
+the gate is gone and the relation alone now decides.
 
 ### Permitted extras, and where implementations legitimately differ
 
