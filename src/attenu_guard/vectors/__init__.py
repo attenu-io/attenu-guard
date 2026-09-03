@@ -40,8 +40,24 @@ tests/vectors/generate_bundles.py, on the same single-writer discipline:
         for expected in case["expect_failures"]:
             assert expected in report.failures      # reason AND position
 
-tests/vectors/README.md documents both file formats and how to use them from
-another implementation.
+`envelopes/envelope_vectors_v1.json` is the third suite: the OBSERVER ENVELOPE
+layer, a witness's Ed25519 signature over the identity of one committed ledger
+entry, carried beside the ledger in a bundle's top-level `envelopes` array. It
+is scored through the same `verify_bundle` call with two more arguments — the
+trust set the case declares, and, for the one case that needs them, the envelope
+bytes as received:
+
+    from attenu_guard import vectors
+
+    for case in vectors.load_envelope_vectors()["cases"]:
+        report = my_verifier(case["bundle"], case["signer"], case["witness_keys"])
+        assert report.accepted == (case["expect"] == "accept")
+        assert report.states == case["expect_states"]       # every entry, not only covered ones
+        for expected in case["expect_failures"]:
+            assert expected in report.failures              # reason AND position
+
+tests/vectors/README.md documents all three file formats and how to use them
+from another implementation.
 """
 from __future__ import annotations
 
@@ -49,7 +65,8 @@ import json
 from importlib import resources
 
 __all__ = ["VECTOR_NAMES", "read_vector_bytes", "load_vector", "load_vectors",
-           "BUNDLE_VECTORS_PATH", "read_bundle_vectors_bytes", "load_bundle_vectors"]
+           "BUNDLE_VECTORS_PATH", "read_bundle_vectors_bytes", "load_bundle_vectors",
+           "ENVELOPE_VECTORS_PATH", "read_envelope_vectors_bytes", "load_envelope_vectors"]
 
 #: Every shipped vector, valid chain first. Kept explicit rather than globbed so
 #: a file that fails to make it into a wheel is a failure, not a shorter list.
@@ -127,3 +144,40 @@ def load_bundle_vectors() -> dict:
     record often makes a second check unsatisfiable — but never fewer, and never at a different
     position. See tests/vectors/README.md."""
     return json.loads(read_bundle_vectors_bytes())
+
+
+#: The observer-envelope vectors, as (subdirectory, filename) inside this package — same
+#: traversal discipline as BUNDLE_VECTORS_PATH, one name at a time.
+ENVELOPE_VECTORS_PATH = ("envelopes", "envelope_vectors_v1.json")
+
+
+def read_envelope_vectors_bytes() -> bytes:
+    """The raw bytes of the observer-envelope vector file, read from the installed package."""
+    target = resources.files(__name__)
+    for part in ENVELOPE_VECTORS_PATH:
+        target = target / part
+    return target.read_bytes()
+
+
+def load_envelope_vectors() -> dict:
+    """The observer-envelope vectors, parsed: `{"version", "revision", "description", "cases"}`.
+
+    Same append-only discipline as the bundle file: `version` is the compatibility contract and
+    does not move, `revision` is the additive counter that does. Iterate `cases`; do not assume
+    a length.
+
+    Each case is `{"name", "description", "signer", "witness_keys", "bundle", "expect",
+    "expect_states", "expect_failures"}`, with `canonical_hex` on the JCS-reorder case and
+    `raw_hex` on the non-canonical one.
+
+    `signer` verifies the bundle's anchor and is null on the one case that carries no anchor.
+    `witness_keys` is the trust set: `[{"kid", "alg", "public_key_hex"}]`, where
+    `public_key_hex` is a raw 32-byte Ed25519 public key in lowercase hex and `alg` is `EdDSA`.
+    `expect_states` maps EVERY entry's seq (as a string) to `witness-signed` or
+    `process-asserted`, so an accepting case asserts a state and not merely the absence of a
+    failure. `expect_failures` is the MINIMAL set of `{"reason", "seq", "node"}` a conformant
+    verifier MUST report. It MAY report more, never fewer, never at a different position — and
+    two further rules bind where an extra may land: an envelope failure lands only on the hop
+    that envelope covers, never on a hop coverage skipped, and no chain-level integrity failure
+    is ever raised because an envelope failed. See tests/vectors/README.md."""
+    return json.loads(read_envelope_vectors_bytes())
