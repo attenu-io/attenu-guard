@@ -4,6 +4,12 @@ One line per change. The long-form notes for each version (reasoning, review fin
 
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+- `adapters.pydantic_ai`: `DelegationGuard.get_ordering()` adds `wrapped_by=[AbstractCapability]`, so the sorter settles it LAST in every list order — `position="innermost"` alone is a tier whose only tiebreaker is list order, and a sibling innermost execution wrapper could land between it and the raw tool body
+- `adapters.pydantic_ai`: the per-call re-read of `ctx.root_capability` is no longer load-bearing — the ordering is the guarantee; it and the construction-time check are belt-and-braces, narrowed to "anything ordered after DelegationGuard in the resolved chain that wraps execution", and a sibling innermost execution wrapper (registered, rebound or per-run-injected) is no longer refused
+
 ## [0.11.0] - 2026-09-02
 
 ### Added

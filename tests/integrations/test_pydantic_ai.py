@@ -24,6 +24,7 @@ pytest.importorskip("pydantic_ai")
 
 from pydantic_ai import Agent  # noqa: E402
 from pydantic_ai.capabilities.abstract import AbstractCapability, CapabilityOrdering  # noqa: E402
+from pydantic_ai.capabilities.combined import CombinedCapability  # noqa: E402
 from pydantic_ai.exceptions import ModelRetry  # noqa: E402
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
@@ -548,10 +549,15 @@ def test_guarded_toolset_v2_allowed_call_records_a_returned_outcome():
 # capabilities are also registered on the same agent.
 # ==========================================================================
 def test_delegation_guard_declares_innermost_ordering():
+    """`position="innermost"` is a TIER shared with other members; `wrapped_by=[Abstract
+    Capability]` is the relative edge that makes it exact. A TYPE ref is resolved with
+    `issubclass` and the self-edge is skipped, so `AbstractCapability` names every sibling
+    without this file knowing any of them in advance."""
     cap = dg_pai.DelegationGuard(policies={})
     ordering = cap.get_ordering()
     assert isinstance(ordering, CapabilityOrdering)
     assert ordering.position == "innermost"
+    assert list(ordering.wrapped_by) == [AbstractCapability]
 
 
 def test_delegation_guard_rejects_dual_instrumentation_with_guarded_toolset_at_construction():
@@ -586,64 +592,218 @@ def test_delegation_guard_alone_does_not_trip_the_dual_instrumentation_check():
     )
 
 
+# --------------------------------------------------------------------------
+# `wrapped_by=[AbstractCapability]`: DelegationGuard sorts LAST, so its `handler`
+# is the raw tool body. These replace the construction-time REJECTION of a sibling
+# innermost execution wrapper: that combination is now legal and safe, because the
+# sibling is ordered outside DelegationGuard instead of possibly inside it.
+# --------------------------------------------------------------------------
+
+_TRACE: list[str] = []
+
+
+def _traced_toolset():
+    """The raw-body sink, as an ordered trace: the raw tool records itself, so a test can see
+    exactly what ran between DelegationGuard and the tool body."""
+    toolset = FunctionToolset()
+
+    @toolset.tool_plain
+    def crm_query(rows: int) -> str:
+        _TRACE.append("raw-body")
+        return f"read {rows} rows"
+
+    return toolset
+
+
 class _OtherInnermostWrapper(AbstractCapability):
-    """A second, `innermost`-positioned capability that wraps tool execution and RAISES before
-    ever calling its own handler -- reproduces the exact defect Codex live-probed against pinned
-    pydantic-ai 2.31.1: the innermost tier has no ordering edges among its own members (only
-    list order as a tiebreaker), so DelegationGuard cannot prove it sits closer to the raw body
-    than this sibling does."""
+    """A second `innermost`-positioned capability that also wraps tool execution -- the exact
+    shape the old construction-time check refused. It records when it runs and calls its own
+    handler, so a test can tell whether it sits OUTSIDE DelegationGuard (correct) or between
+    DelegationGuard and the raw tool body (Codex round 3, finding 3's live-probed defect)."""
 
     def get_ordering(self):
         return CapabilityOrdering(position="innermost")
 
     async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
-        raise RuntimeError("the sibling wrapper failed before ever reaching the raw body")
+        _TRACE.append("other:enter")
+        try:
+            return await handler(args)
+        finally:
+            _TRACE.append("other:exit")
 
 
-def test_delegation_guard_rejects_a_sibling_innermost_execution_wrapper_listed_after():
-    """Codex review round 3, finding 3: [DelegationGuard, OtherInnermostWrapper] must be
-    refused at agent construction -- closing off the live-probed defect (the sibling's own
-    pre-handler failure misreported here as DelegationGuard's own RAISED outcome for a body it
-    never reached) before any run, and so any false outcome, can happen at all."""
-    guard_cap = dg_pai.DelegationGuard(policies={})
-    other = _OtherInnermostWrapper()
-
-    with pytest.raises(dg_pai.UserError, match="innermost"):
-        Agent(
-            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
-            deps_type=dg_pai.GuardedDeps,
-            capabilities=[guard_cap, other],
-        )
+class _PlainCapability(AbstractCapability):
+    """No ordering, no hooks -- the third list member, there to make the list orders distinct."""
 
 
-def test_delegation_guard_rejects_a_sibling_innermost_execution_wrapper_listed_before():
-    """Same rejection, the OPPOSITE list order -- pinned 2.31.1's innermost tier preserves
-    LISTED order as its only tiebreaker (no ordering edges among its own members), so this file
-    cannot lean on registration order to sidestep the collision either way; both orders must be
-    refused identically."""
-    guard_cap = dg_pai.DelegationGuard(policies={})
-    other = _OtherInnermostWrapper()
+class _TracingDelegationGuard(dg_pai.DelegationGuard):
+    """DelegationGuard with a trace marker on either side of the real hook, so a test can assert
+    what its `handler` actually reaches. Everything else, `get_ordering()` included, inherited."""
 
-    with pytest.raises(dg_pai.UserError, match="innermost"):
-        Agent(
-            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
-            deps_type=dg_pai.GuardedDeps,
-            capabilities=[other, guard_cap],
-        )
+    async def wrap_tool_execute(self, ctx, **kwargs):
+        _TRACE.append("guard:enter")
+        try:
+            return await super().wrap_tool_execute(ctx, **kwargs)
+        finally:
+            _TRACE.append("guard:exit")
+
+
+_QUERY_POLICIES = {"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})}
+
+# What the trace MUST be: the sibling wrapper runs outside DelegationGuard, and nothing at all
+# sits between "guard:enter" and "raw-body" -- i.e. DelegationGuard's `handler` IS the tool body.
+_INNERMOST_TRACE = ["other:enter", "guard:enter", "raw-body", "guard:exit", "other:exit"]
+
+
+def _ordering_agent(capabilities):
+    return Agent(
+        FunctionModel(single_read_script),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=[_traced_toolset()],
+        capabilities=capabilities,
+    )
+
+
+def _run_traced(agent, **run_kwargs):
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None), **run_kwargs))
+    return root
+
+
+def _assert_outcome_is_the_raw_body(root):
+    """The ledger's own view of the same fact: one allow, one RETURNED outcome bound to it."""
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+@pytest.mark.parametrize("order", ["guard-first", "other-first", "guard-last"])
+def test_delegation_guard_handler_is_the_raw_body_in_every_list_order(order):
+    """`position="innermost"` alone is a TIER whose only tiebreaker is LIST order, so a sibling
+    innermost execution wrapper could land between DelegationGuard and the raw body (round 3,
+    finding 3, live-probed: raw sink empty, ledger said RAISED). `wrapped_by=[AbstractCapability]`
+    is a per-sibling edge matched by `issubclass`, so the sorter settles DelegationGuard LAST
+    however the caller lists it -- and the sibling wrapper runs OUTSIDE it, harmlessly."""
+    _TRACE.clear()
+    guard_cap = _TracingDelegationGuard(policies=_QUERY_POLICIES)
+    other, plain = _OtherInnermostWrapper(), _PlainCapability()
+    capabilities = {
+        "guard-first": [guard_cap, other, plain],
+        "other-first": [other, guard_cap, plain],
+        "guard-last": [plain, other, guard_cap],
+    }[order]
+
+    root = _run_traced(_ordering_agent(capabilities))
+
+    assert _TRACE == _INNERMOST_TRACE
+    _assert_outcome_is_the_raw_body(root)
+
+
+@pytest.mark.parametrize("order", ["guard-first", "other-first", "guard-last"])
+def test_the_shipped_delegation_guard_is_the_last_leaf_of_the_resolved_chain(order):
+    """The same fact read off the settled chain, and on the SHIPPED class rather than the
+    tracing subclass above: `apply` yields leaves outer-first, so being last IS being innermost.
+    Last past pydantic-ai's own injected capabilities too, not just the ones listed here."""
+    guard_cap = dg_pai.DelegationGuard(policies=_QUERY_POLICIES)
+    other, plain = _OtherInnermostWrapper(), _PlainCapability()
+    capabilities = {
+        "guard-first": [guard_cap, other, plain],
+        "other-first": [other, guard_cap, plain],
+        "guard-last": [plain, other, guard_cap],
+    }[order]
+
+    leaves: list = []
+    _ordering_agent(capabilities).root_capability.apply(leaves.append)
+
+    assert leaves[-1] is guard_cap
+    assert leaves.index(other) < leaves.index(guard_cap)
+
+
+def test_delegation_guard_handler_is_the_raw_body_under_a_per_run_injected_wrapper():
+    """`agent.run(..., capabilities=[...])` adds capabilities AFTER `for_agent()` has run --
+    round 4, finding 2's public bypass, which used to be refused mid-run. The per-run layer is
+    composed into a second `CombinedCapability`, which sorts the same way, so the injected
+    wrapper also lands outside DelegationGuard and the run simply succeeds."""
+    _TRACE.clear()
+    agent = _ordering_agent([_TracingDelegationGuard(policies=_QUERY_POLICIES)])
+
+    root = _run_traced(agent, capabilities=[_OtherInnermostWrapper()])
+
+    assert _TRACE == _INNERMOST_TRACE
+    _assert_outcome_is_the_raw_body(root)
 
 
 class _RebindingInnermostWrapper(AbstractCapability):
     """An innermost capability whose ORIGINAL registered instance does NOT override
-    wrap_tool_execute, but whose for_agent() REBINDS to one (_OtherInnermostWrapper) that does.
-    Invisible to for_agent()'s construction-time check, which only sees agent.root_capability
-    BEFORE the whole binding call returns (pinned 2.31.1 binds the innermost tier through ONE
-    list comprehension) -- Codex review round 4, finding 2."""
+    wrap_tool_execute, but whose for_agent() REBINDS to one that does -- round 4, finding 2's
+    other escape from the construction-time check, which cannot see the replacement."""
 
     def get_ordering(self):
         return CapabilityOrdering(position="innermost")
 
     def for_agent(self, agent):
         return _OtherInnermostWrapper()
+
+
+@pytest.mark.parametrize("order", ["guard-first", "guard-last"])
+def test_a_rebinding_sibling_is_also_sorted_outside_delegation_guard(order):
+    """The rebind re-sorts (`CombinedCapability._rebound` re-runs the ordering pass), so the
+    replacement wrapper lands outside DelegationGuard in both list orders -- no rejection
+    needed, in either the construction-time check or the per-call one."""
+    _TRACE.clear()
+    guard_cap = _TracingDelegationGuard(policies=_QUERY_POLICIES)
+    rebinding = _RebindingInnermostWrapper()
+    capabilities = [guard_cap, rebinding] if order == "guard-first" else [rebinding, guard_cap]
+
+    root = _run_traced(_ordering_agent(capabilities))
+
+    assert _TRACE == _INNERMOST_TRACE
+    _assert_outcome_is_the_raw_body(root)
+
+
+class _AlsoDemandsTheLastSlot(AbstractCapability):
+    """A sibling that declares the SAME `wrapped_by=[AbstractCapability]` edge, so each of the
+    two depends on the other and the ordering graph has a cycle."""
+
+    def get_ordering(self):
+        return CapabilityOrdering(position="innermost", wrapped_by=[AbstractCapability])
+
+
+def test_two_capabilities_demanding_the_last_slot_are_refused_at_construction():
+    """Refusal is correct -- they cannot both be innermost -- but it is pydantic-ai's, not this
+    adapter's, and its message names neither capability. `Agent.__init__` builds the
+    `CombinedCapability`, whose `__post_init__` sorts, BEFORE any capability's `for_agent`, so
+    no adapter frame is on the stack to catch the cycle error and reword it. Asserted here as
+    the real observable rather than papered over -- see the class docstring's "ORDERING"."""
+    guard_cap = dg_pai.DelegationGuard(policies={})
+
+    with pytest.raises(dg_pai.UserError, match="Circular ordering constraints"):
+        Agent(
+            FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+            deps_type=dg_pai.GuardedDeps,
+            capabilities=[guard_cap, _AlsoDemandsTheLastSlot()],
+        )
+
+
+def test_the_nesting_check_names_both_capabilities_and_stays_silent_on_the_real_order():
+    """The belt-and-braces check, exercised directly: no legal capability list can put an
+    execution wrapper inside DelegationGuard today, so the adverse chain is built by hand
+    (assigning `capabilities` past the sorter). It exists for a future ordering primitive that
+    could out-rank `wrapped_by` -- and it reads the settled chain, not an ordering tier."""
+    guard_cap = dg_pai.DelegationGuard(policies={})
+    other = _OtherInnermostWrapper()
+    chain = CombinedCapability([guard_cap, other])
+    assert list(chain.capabilities) == [other, guard_cap], "the sorter already puts the guard last"
+
+    chain.capabilities = [guard_cap, other]  # force the adverse order the sorter refuses to make
+    found = dg_pai._find_execution_wrapper_nested_inside(chain, guard_cap)
+    assert found is other
+    message = dg_pai._execution_wrapper_nested_inside_message(found)
+    assert "DelegationGuard" in message and "_OtherInnermostWrapper" in message
+
+    chain.capabilities = [other, guard_cap]  # the order the sorter actually produces
+    assert dg_pai._find_execution_wrapper_nested_inside(chain, guard_cap) is None
 
 
 def _conflict_agent(sink: dict, capabilities):
@@ -655,85 +815,24 @@ def _conflict_agent(sink: dict, capabilities):
     )
 
 
-def _assert_construction_time_check_missed_it_but_run_still_refuses(
-    agent, *, run_capabilities=None, expected_exception=None, match=None
-):
-    """Shared assertion for round 4, finding 2's two escapes: construction must have SUCCEEDED
-    (proving the fast path really did miss it), but agent.run() must still be refused, with the
-    tool body never reached and zero allow/outcome entries. `expected_exception`/`match` default
-    to DelegationGuard's own UserError; a caller in an ordering where DelegationGuard is never
-    even INVOKED (see the "listed_before" rebinding test) overrides both."""
+def test_a_wrapper_nested_inside_is_refused_per_call_before_any_ledger_write(monkeypatch):
+    """The other half of the belt-and-braces: that the per-call re-read of `ctx.root_capability`
+    is still WIRED to refuse, and refuses BEFORE `_resolve()`/`guard.check()` -- zero allow or
+    outcome entries, tool body never reached. The detector is stubbed because, as above, no
+    legal capability list reaches this state; the agent is built first so `for_agent()`'s own
+    copy of the check runs unstubbed."""
+    sink: dict = {}
+    guard_cap = dg_pai.DelegationGuard(policies=_QUERY_POLICIES)
+    agent = _conflict_agent(sink, [guard_cap])
+    other = _OtherInnermostWrapper()
+    monkeypatch.setattr(dg_pai, "_find_execution_wrapper_nested_inside", lambda chain, mine: other)
+
     root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
-    exc = expected_exception or dg_pai.UserError
-    pattern = match or "innermost"
-    with pytest.raises(exc, match=pattern):
-        if run_capabilities is None:
-            _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
-        else:
-            _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None), capabilities=run_capabilities))
-    entries = root.audit_log().entries
-    assert [e for e in entries if e["event"] in ("allow", "outcome")] == []
-    return root
+    with pytest.raises(dg_pai.UserError, match="also wraps tool execution"):
+        _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
 
-
-def test_delegation_guard_construction_succeeds_but_run_rejects_a_rebinding_sibling_listed_after():
-    """Codex review round 4, finding 2: [DelegationGuard, RebindingInnermostWrapper] --
-    construction-time for_agent() only sees the sibling's ORIGINAL instance, which does not
-    (yet) override wrap_tool_execute, so construction SUCCEEDS (proving the fast path misses
-    this case, exactly as documented). wrap_tool_execute's own runtime check inspects the
-    ACTUAL resolved ctx.root_capability instead -- which DOES reflect the rebound wrapper -- and
-    refuses before _resolve()/guard.check() ever run: zero ledger writes, tool body never runs."""
-    sink: dict = {}
-    guard_cap = dg_pai.DelegationGuard(
-        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
-    )
-    agent = _conflict_agent(sink, [guard_cap, _RebindingInnermostWrapper()])  # construction must NOT raise
-
-    _assert_construction_time_check_missed_it_but_run_still_refuses(agent)
-    assert "rows" not in sink, "the tool body must never have run"
-
-
-def test_delegation_guard_construction_succeeds_but_run_rejects_a_rebinding_sibling_listed_before():
-    """Same escape, the OPPOSITE list order -- with a genuinely different exception shape, worth
-    being explicit about rather than papering over: pinned 2.31.1's innermost tier nests
-    wrappers in LISTED order, so here the rebound wrapper is OUTER and DelegationGuard is its
-    `handler` -- DelegationGuard's own wrap_tool_execute (and so its own runtime check) is never
-    even INVOKED, because the outer wrapper raises before ever calling its handler. That is not
-    a gap in DelegationGuard: the misattribution defect this whole check exists to prevent
-    (a sibling's own pre-handler failure recorded as DelegationGuard's own RAISED outcome for a
-    body it never reached) specifically requires DelegationGuard to be the one CALLING the
-    conflicting sibling as its handler -- which only happens in the OTHER list order. Here the
-    raw RuntimeError from the sibling itself propagates untouched, and -- the property that
-    actually matters -- DelegationGuard still never ran guard.check() at all: zero allow/outcome
-    entries either way."""
-    sink: dict = {}
-    guard_cap = dg_pai.DelegationGuard(
-        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
-    )
-    agent = _conflict_agent(sink, [_RebindingInnermostWrapper(), guard_cap])  # construction must NOT raise
-
-    _assert_construction_time_check_missed_it_but_run_still_refuses(
-        agent, expected_exception=RuntimeError, match="failed before ever reaching the raw body"
-    )
-    assert "rows" not in sink
-
-
-def test_delegation_guard_rejects_a_per_run_injected_conflicting_capability():
-    """Codex review round 4, finding 2's public bypass: agent.run(..., capabilities=[...]) adds
-    capabilities AFTER static for_agent() has already run -- entirely invisible to the
-    construction-time check (no sibling registered at construction at all). The runtime check
-    in wrap_tool_execute still catches it via the actual resolved ctx.root_capability, before
-    any ledger write."""
-    sink: dict = {}
-    guard_cap = dg_pai.DelegationGuard(
-        policies={"crm_query": dg_pai.ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]})},
-    )
-    agent = _conflict_agent(sink, [guard_cap])  # no conflict at construction time at all
-
-    _assert_construction_time_check_missed_it_but_run_still_refuses(
-        agent, run_capabilities=[_OtherInnermostWrapper()]
-    )
-    assert "rows" not in sink
+    assert [e for e in root.audit_log().entries if e["event"] in ("allow", "outcome")] == []
+    assert sink == {}, "the tool body must never have run"
 
 
 class _RaisingBeforeCapability(AbstractCapability):

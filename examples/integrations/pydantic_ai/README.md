@@ -9,7 +9,7 @@ Python >= 3.10).
 | Hook point | API used |
 |---|---|
 | Child creation | `GuardedDeps.delegate(...)`, called inside the delegating tool; the child `Guard` rides down as the sub-run's `deps` (`RunContext.deps`). Pydantic AI has no callback at the delegation site, so this is a construction-site integration. |
-| Tool invocation | `DelegationGuard.wrap_tool_execute` — an `AbstractCapability` registered via `Agent(capabilities=[...])`. Since 0.10.0 this is the only hook it overrides (`get_ordering()` pins it `position="innermost"`); `ToolManager._run_execute_hooks` calls it (`tool_manager.py:464` as of 2.37.0) as the only path to `toolset.call_tool` (`tool_manager.py:1009` as of 2.37.0), so the tool body provably cannot run on a denial. One registration covers function tools, every toolset, and MCP. |
+| Tool invocation | `DelegationGuard.wrap_tool_execute` — an `AbstractCapability` registered via `Agent(capabilities=[...])`. Since 0.10.0 this is the only hook it overrides (`get_ordering()` pins it `position="innermost", wrapped_by=[AbstractCapability]`, which sorts it last in the chain, so its `handler` is the raw tool body); `ToolManager._run_execute_hooks` calls it (`tool_manager.py:464` as of 2.37.0) as the only path to `toolset.call_tool` (`tool_manager.py:1009` as of 2.37.0), so the tool body provably cannot run on a denial. One registration covers function tools, every toolset, and MCP. |
 | Tool invocation (alt) | `GuardedToolset`, a `WrapperToolset` that checks inside `call_tool`. Use it to guard exactly one toolset instead of the whole agent. |
 
 Both hooks share `authorize_tool_call(...)`, which never returns on a denial.
