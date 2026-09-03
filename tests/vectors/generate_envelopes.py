@@ -69,7 +69,7 @@ VECTORS_FILENAME = "envelope_vectors_v1.json"
 # tell which corpus they ran without diffing case lists. Same discipline as the bundle file,
 # which grew its `revision` only at its first addition; this one carries it from the start.
 VECTORS_VERSION = "envelope_vectors_v1"
-VECTORS_REVISION = "envelope_vectors_v1.0"
+VECTORS_REVISION = "envelope_vectors_v1.1"
 
 VECTORS_DIR = Path(__file__).resolve().parent / ENVELOPES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -458,6 +458,27 @@ def gen_cases() -> list:
         with_envelopes(base, [_subject_change(spawn_envelope, "node", n0)]),
         expect="reject",
         expect_failures=[_fail("envelope_subject_mismatch", SPAWN_SEQ, n1)]))
+
+    # ---- appended at revision v1.1: one entry, at most one envelope --------
+    cases.append(_case(
+        "reject_duplicate_subject",
+        f"Two envelopes over the SAME entry, the `spawn` at seq {SPAWN_SEQ}. Both are honest on "
+        f"their own: the first is valid_spawn_envelope's, signed by {WITNESS_KID!r} and saying "
+        f"`matched`; the second is signed by {WITNESS_KID_B!r} — a second key the trust set "
+        "carries — over the same subject, saying `not_matched`. Nothing is malformed and both "
+        "signatures verify, which is the point: a verifier that keeps one state per entry and "
+        "overwrites it silently reports whichever envelope it read LAST, so the same bundle in "
+        "the other order scores differently, and anyone who can append an envelope can decide "
+        "what the earlier witness said. Required: `envelope_duplicate_subject` at the covered "
+        f"entry ({n1} at seq {SPAWN_SEQ}), positioned like every other envelope failure, and "
+        f"seq {SPAWN_SEQ} MUST report `process-asserted` — a contradicted observation is not a "
+        "clean one. The first envelope's result stands as what that witness said; the ENTRY is "
+        "what stops being witness-signed.",
+        with_envelopes(base, [spawn_envelope,
+                              _envelope(entries, SPAWN_SEQ, kid=WITNESS_KID_B,
+                                        result="not_matched")]),
+        expect="reject",
+        expect_failures=[_fail("envelope_duplicate_subject", SPAWN_SEQ, n1)]))
 
     return cases
 

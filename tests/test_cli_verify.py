@@ -62,6 +62,62 @@ class TestVerifyCli(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=f"{args}: {proc.stdout}{proc.stderr}")
             self.assertIn("attenu-guard", proc.stdout)
 
+    # ---- observer envelopes: --witness-keys ----------------------------
+    def _envelope_bundle(self, td: Path) -> tuple[Path, Path]:
+        """A one-envelope bundle and the trust set for it, written into `td`.
+
+        Built from the committed vector corpus, so the bundle here is the same one every
+        implementation scores rather than a shape invented for this test."""
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                    if c["name"] == "valid_spawn_envelope")
+        bundle_path = td / "envelopes.bundle.json"
+        keys_path = td / "witness_keys.json"
+        bundle_path.write_text(json.dumps(case["bundle"]))
+        keys_path.write_text(json.dumps(case["witness_keys"]))
+        return bundle_path, keys_path
+
+    def test_a_bundle_with_envelopes_verifies_when_the_trust_set_is_given(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            bundle_path, keys_path = self._envelope_bundle(Path(td))
+            rc, out = run("verify", str(bundle_path), "--witness-keys", str(keys_path))
+            self.assertEqual(rc, 0, out)
+            self.assertIn("OK", out)
+            self.assertNotIn("hint:", out)
+
+    def test_a_bundle_with_envelopes_and_no_trust_set_fails_and_names_the_flag(self):
+        # The defect: every bundle carrying an envelope failed here with no way to pass keys.
+        # The failure is still correct — an unknown key is not a trusted one — so it stands,
+        # and the output says which flag makes the run meaningful.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            bundle_path, _keys = self._envelope_bundle(Path(td))
+            rc, out = run("verify", str(bundle_path))
+            self.assertEqual(rc, 2)
+            self.assertIn("envelope_unknown_witness", out)
+            self.assertIn("hint: pass --witness-keys FILE to supply the trusted witness keys",
+                          out)
+            self.assertIn("FAILED", out)
+
+    def test_no_hint_on_a_bundle_that_carries_no_envelopes(self):
+        rc, out = run("verify", str(SAMPLES / "clean.bundle.json"))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("hint:", out)
+
+    def test_the_trust_set_may_be_given_as_a_whole_vector_case(self):
+        # `--witness-keys` on a file that IS a vector case, not just its witness_keys array.
+        import tempfile
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                    if c["name"] == "valid_spawn_envelope")
+        with tempfile.TemporaryDirectory() as td:
+            bundle_path, _keys = self._envelope_bundle(Path(td))
+            whole = Path(td) / "case.json"
+            whole.write_text(json.dumps(case))
+            rc, out = run("verify", str(bundle_path), "--witness-keys", str(whole))
+            self.assertEqual(rc, 0, out)
+
     def test_ledger_jsonl_still_verifies(self):
         import tempfile
         from attenu_guard import Authority, Guard

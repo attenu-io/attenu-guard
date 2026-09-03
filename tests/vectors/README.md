@@ -318,6 +318,7 @@ observer-envelope section below is their full treatment.
 | `envelope_unknown_version` | a `v` or `typ` this verifier does not know | the covered entry |
 | `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` | the covered entry |
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry |
+| `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named | the covered entry |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to | the covered entry |
 | `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` | the covered entry |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names | the covered entry |
@@ -590,6 +591,18 @@ two together, in the same form for all three results: `witness-signed
 (matched)`, `witness-signed (not_matched)`, `witness-signed (indeterminate)`. A
 process-asserted entry gets no result.
 
+**One entry, at most one envelope.** A second envelope naming a `subject.seq` an
+earlier envelope in the same array already named is `envelope_duplicate_subject`
+at the covered entry, and that entry reports **`process-asserted`**. Two
+observations of one event contradict each other by construction: whoever appends
+the second would otherwise decide what the first said, and the same bundle in
+the other array order would score differently. The first envelope's result is
+still what that witness said; it is the entry that stops being witness-signed.
+The rule is per entry, so envelopes over two different hops are the ordinary
+sparse case, not a duplicate. An entry is claimed as soon as `subject.seq` finds
+it, before the rest of the envelope is judged, so a second envelope cannot
+escape the rule by being defective in some other way as well.
+
 ### File format
 
 One JSON object holding every case, in the same shape as the bundle file, with
@@ -598,7 +611,7 @@ two fields on every case that the bundle file does not have:
 ```jsonc
 {
   "version": "envelope_vectors_v1",        // compatibility contract; does not move
-  "revision": "envelope_vectors_v1.0",     // additive counter; moves when a case is appended
+  "revision": "envelope_vectors_v1.1",     // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -686,7 +699,7 @@ The version commits the exact signed member set of the **whole** envelope, the
 subject included, so a member added anywhere is a new version and the digest
 cannot widen silently. A different `typ` is a different contract.
 
-### The six named failures
+### The seven named failures
 
 Every reported failure carries `{reason, seq, node}`, and every failed envelope
 is reported on its own.
@@ -696,6 +709,7 @@ is reported on its own.
 | `envelope_unknown_version` | a `v` or `typ` this build does not know |
 | `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` |
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
+| `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to |
 | `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names |
@@ -825,6 +839,16 @@ at seq 1 (`vectors:n1`) and the `allow`s at seq 2 (`vectors:n0`) and seq 4
   subject names. This pins the position rule for a disagreeing locator on its
   own, since `reject_subject_mismatch` only exercises the hash. (Proposed by
   @safal207 on A2A #1575; appended after row 15, so nothing above it moved.)
+- `reject_duplicate_subject` — **two** envelopes over the same entry, the
+  `spawn` at seq 1. Both are honest on their own: the first is
+  `valid_spawn_envelope`'s, saying `matched`; the second is signed by
+  `witness-interop-v1-b`, the second key the trust set carries, over the same
+  subject, saying `not_matched`. Nothing is malformed and both signatures
+  verify, which is the point — a verifier that keeps one state per entry and
+  overwrites it reports whichever envelope it read last, so the same bundle in
+  the other order scores differently. Required: `envelope_duplicate_subject` at
+  the covered entry, and seq 1 MUST report `process-asserted`. (Appended at
+  revision `envelope_vectors_v1.1`, after row 16.)
 
 ### Regenerating
 

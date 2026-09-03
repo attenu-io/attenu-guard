@@ -46,6 +46,17 @@ full rewrite by someone holding the signing key cannot be excluded without the k
 half (`.attenu/product.json` → `anchor_pub` in an Attenu-managed app; `--pubkey <hex>` for Ed25519, or the KMS
 public key for ES256).
 
+## If the bundle carries observer envelopes
+
+```bash
+pipx run attenu-guard verify witnessed.bundle.json --witness-keys witness_keys.json
+```
+
+An envelope is a witness's signature over the identity of one ledger entry, carried in the bundle's top-level
+`envelopes` array. Whose signature counts is yours to decide, so the keys come from you and never from the bundle:
+`witness_keys.json` is `[{"kid": "…", "alg": "EdDSA", "public_key_hex": "…"}]`. Without the flag every envelope
+fails `envelope_unknown_witness` — an unknown key is not a trusted one — and the output names the flag to pass.
+
 ## What the bundle is
 
 `export_bundle` output: the hash-chained entries, a signed anchor over the head, a redaction report (prompts and

@@ -171,7 +171,15 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
 
     `envelopes` are observer envelopes (`sign_envelope`) to carry beside the ledger, in the top-level `envelopes`
     array. They are omitted entirely when none are given, so a bundle without them is byte-for-byte what this
-    function has always produced."""
+    function has always produced.
+
+    ORDER MATTERS with `redact_task`: redaction rewrites every entry hash, so envelopes signed over the
+    unredacted ledger no longer bind to the entries that ship and would all fail `envelope_subject_mismatch`.
+    Giving both raises `ValueError` rather than exporting a bundle that cannot verify. Export the redacted
+    bundle first, then `sign_envelope` over ITS entries, then export again with those envelopes."""
+    if redact_task and envelopes:
+        raise ValueError("sign envelopes over the redacted ledger: export with redact_task=True "
+                         "first, then sign_envelope over the exported entries")
     import copy
     entries = copy.deepcopy(audit_log.entries)
     if redact_task:
@@ -358,10 +366,11 @@ WITNESS_SIGNED = "witness-signed"
 #: witness undertook to cover and never did — and v1 takes the weaker reading of the two.
 PROCESS_ASSERTED = "process-asserted"
 
-#: The six named envelope failures, in the order this build checks them.
+#: The seven named envelope failures, in the order this build checks them.
 ENVELOPE_FAILURES = ("envelope_unknown_version", "envelope_unknown_member",
-                     "envelope_subject_mismatch", "envelope_non_canonical",
-                     "envelope_unknown_witness", "envelope_bad_signature")
+                     "envelope_subject_mismatch", "envelope_duplicate_subject",
+                     "envelope_non_canonical", "envelope_unknown_witness",
+                     "envelope_bad_signature")
 
 
 _ED25519_BACKEND = None
@@ -454,7 +463,11 @@ def sign_envelope(entries: list[dict], seq: int, seed: bytes, *, kid: str,
     """An observer envelope over the entry at `seq`, signed with the 32-byte Ed25519 `seed`.
 
     `entries` is the ledger the subject is recomputed from — a witness signs the identity of an
-    entry that already exists, never a claim it composes itself."""
+    entry that already exists, never a claim it composes itself. That makes the ledger it is
+    signed over part of the signature: sign over the entries AS THEY WILL SHIP. With
+    `export_bundle(redact_task=True)` those are the redacted entries, so export first and sign
+    over the exported bundle's `entries` — `export_bundle` refuses to redact and carry envelopes
+    in one call for exactly this reason."""
     if result not in ENVELOPE_RESULTS:
         raise ValueError(f"observed.result must be one of {list(ENVELOPE_RESULTS)}, got {result!r}")
     sign, _verify, _public = _ed25519_backend()
@@ -498,7 +511,13 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     which go into the SAME list as every other bundle failure. Two rules bind where a failure
     may land: an envelope failure lands only on the hop that envelope covers, never on a hop
     coverage skipped; and no chain-level integrity failure is ever raised because an envelope
-    failed — that one comes from a real anchor mismatch and from nothing else."""
+    failed — that one comes from a real anchor mismatch and from nothing else.
+
+    One entry, at most one envelope. A second envelope naming a `subject.seq` an earlier one in
+    this array already named is `envelope_duplicate_subject`, and the entry falls back to
+    `process-asserted`: two observations of one event contradict each other by construction —
+    whoever appends the second decides what the first said, and an entry whose coverage is
+    disputed must not read as clean."""
     fail = _FailureLog()
     states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
@@ -507,14 +526,25 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     # status quo and exactly what this reports.
     by_seq = {e.get("seq", i): e for i, e in enumerate(entries)} if envelopes else {}
     recomputed = _recomputed_hashes(entries) if envelopes else {}
+    #: seq -> how many envelopes in this array named it, valid or not. `_score_envelope` counts
+    #: an envelope in as soon as its subject names an entry this bundle has.
+    claims: dict = {}
 
     for index, envelope in enumerate(envelopes):
         raw = raw_bytes[index] if raw_bytes and index < len(raw_bytes) else None
-        seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw, fail)
+        seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw,
+                                            fail, claims)
         if seq is None:
             continue
         states[seq] = WITNESS_SIGNED
         results[seq] = result
+
+    # The first envelope's result stands in `results` — it is what that witness said, and the
+    # duplicate does not erase it — but the STATE falls back, so a contradicted entry never
+    # reports witness-signed and the bundle rejects.
+    for seq, count in claims.items():
+        if count > 1:
+            states[seq] = PROCESS_ASSERTED
 
     lines = {seq: _envelope_line(state, results.get(seq)) for seq, state in states.items()}
     return ({"status": "verified" if not fail else "FAILED",
@@ -525,12 +555,19 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
 
 
 def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, trusted: dict,
-                    raw, fail: _FailureLog):
-    """One envelope, checked in the order the six named failures are defined in.
+                    raw, fail: _FailureLog, claims: dict):
+    """One envelope, checked in the order the seven named failures are defined in.
 
     Returns `(seq, node, result)` for an envelope that verified, and `(None, None, None)` for
     one that did not. Every failure is positioned on the entry the envelope COVERS, found by
-    `subject.seq` — the locators are checked against that entry, not used to find it."""
+    `subject.seq` — the locators are checked against that entry, not used to find it.
+
+    `claims` is the caller's seq -> count of the envelopes that have named each entry so far,
+    and this function updates it. An envelope claims its entry as soon as `subject.seq` finds
+    one, BEFORE the rest of the subject is checked, so a second envelope over an entry an
+    earlier one already named is `envelope_duplicate_subject` whether either of them is
+    otherwise sound: the point of the check is that no one can decide what an earlier witness
+    said by appending after it."""
     def position(subject):
         s = subject.get("seq") if isinstance(subject, Mapping) else None
         entry = by_seq.get(s)
@@ -600,6 +637,19 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
                f"no entry at seq {subject.get('seq')!r} in this bundle", subject)
         return None, None, None
     seq, node = entry.get("seq"), entry.get("node")
+
+    # (3a') one entry, at most one envelope. Counted here, before anything else about this
+    # envelope is judged, so the rule cannot be sidestepped by making the second envelope
+    # defective in some other way as well.
+    already = claims.get(seq, 0)
+    claims[seq] = already + 1
+    if already:
+        report("envelope_duplicate_subject",
+               f"seq {seq} is already covered by an earlier envelope in this bundle; two "
+               "observations of one event contradict each other by construction, so this entry "
+               "is not witness-signed", subject)
+        return None, None, None
+
     computed = recomputed.get(seq)
     if subject.get("entry_hash") != computed:
         report("envelope_subject_mismatch",

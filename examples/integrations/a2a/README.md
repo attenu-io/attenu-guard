@@ -131,6 +131,12 @@ Neither bundle on its own proves the hop, and a bundle that is not supplied is r
 never as passing. Two hops whose leaf tokens are byte-identical land in the same ledger id — give chains
 distinct `chain_id`s if you need to tell such hops apart.
 
+If a ledger carries observer envelopes, pass `witness_keys=…` as well: whose witness signatures count is the
+peer's decision, not this adapter's. Without them the hop is checked on a copy of each bundle with the
+`envelopes` member removed and `checks["envelopes"]` reports `not evaluated (no witness_keys configured)` —
+otherwise an honest hop would be refused for carrying evidence the verifier was given no key to read. With
+them, an envelope that does not verify fails the hop like any other check.
+
 ## Evidence manifest
 
 | Claim | Pinned to | Test |

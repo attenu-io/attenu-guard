@@ -327,7 +327,8 @@ def test_both_ledgers_and_the_tokens_verify_offline_together():
     report = dg_a2a.verify_hop(hop.tokens, _signer(),
                                client_bundle=client_bundle, server_bundle=server_bundle)
     assert report["ok"], report["failures"]
-    assert report["checks"] == {"chain": True, "client": "verified", "server": "verified"}
+    assert report["checks"] == {"chain": True, "client": "verified", "server": "verified",
+                                "envelopes": dg_a2a.ENVELOPES_NOT_EVALUATED}
     assert report["hops"] == 2
 
 
@@ -398,6 +399,75 @@ def test_verify_hop_catches_a_client_ledger_that_never_minted_the_token():
     )
     assert not report["ok"]
     assert any("was not minted by this chain" in f for f in report["failures"])
+
+
+# ---- observer envelopes on a hop -----------------------------------------
+_WITNESS_SEED = bytes(range(32))
+_WITNESS_KID = "a2a-hop-witness"
+
+
+def _witness_keys():
+    public = evidence._ed25519_backend()[2]
+    return [{"kid": _WITNESS_KID, "alg": evidence.ENVELOPE_ALG,
+             "public_key_hex": public(_WITNESS_SEED).hex()}]
+
+
+def _with_envelope(bundle):
+    """The same bundle, carrying one honest envelope over its first envelope-eligible entry."""
+    seq = next(e["seq"] for e in bundle["entries"]
+               if e.get("event") in evidence.ENVELOPE_SUBJECT_MEMBERS)
+    bundle = dict(bundle)
+    bundle["envelopes"] = [evidence.sign_envelope(bundle["entries"], seq, _WITNESS_SEED,
+                                                  kid=_WITNESS_KID, at="2026-09-01T11:00:00Z",
+                                                  method="sidecar:ledger-tail")]
+    return bundle
+
+
+def test_a_hop_carrying_envelopes_is_not_refused_when_no_trust_set_is_configured():
+    """The defect: `verify_hop` scored envelopes against an empty trust set, so a peer refused
+    every honest hop whose ledger carried one. Envelope trust belongs to the deployment; with
+    none configured the hop is checked without the envelopes, and says so."""
+    hop, _ = demo.run_hop()
+    client_bundle, server_bundle = _bundles(hop)
+    report = dg_a2a.verify_hop(hop.tokens, _signer(),
+                               client_bundle=_with_envelope(client_bundle),
+                               server_bundle=_with_envelope(server_bundle))
+    assert report["ok"], report["failures"]
+    assert report["checks"]["envelopes"] == "not evaluated (no witness_keys configured)"
+
+
+def test_a_configured_trust_set_scores_the_envelopes_on_the_hop():
+    hop, _ = demo.run_hop()
+    client_bundle, server_bundle = _bundles(hop)
+    report = dg_a2a.verify_hop(hop.tokens, _signer(),
+                               client_bundle=_with_envelope(client_bundle),
+                               server_bundle=_with_envelope(server_bundle),
+                               witness_keys=_witness_keys())
+    assert report["ok"], report["failures"]
+    assert report["checks"]["envelopes"] == "evaluated"
+
+
+def test_a_broken_envelope_fails_the_hop_once_a_trust_set_is_configured():
+    """The other half: not evaluating them by default is not the same as ignoring them. With
+    keys configured, an envelope that does not verify fails the hop like any other check."""
+    hop, _ = demo.run_hop()
+    client_bundle, _server = _bundles(hop)
+    carried = _with_envelope(client_bundle)
+    carried["envelopes"][0]["sig"] = "00" * 64
+    report = dg_a2a.verify_hop(hop.tokens, _signer(), client_bundle=carried,
+                               witness_keys=_witness_keys())
+    assert not report["ok"]
+    assert any("envelope_bad_signature" in f for f in report["failures"])
+    # And the same bundle passes with no trust set: the envelope is not evaluated, not ignored.
+    assert dg_a2a.verify_hop(hop.tokens, _signer(), client_bundle=carried)["ok"]
+
+
+def test_the_hop_check_does_not_mutate_the_bundle_it_was_given():
+    hop, _ = demo.run_hop()
+    client_bundle, _server = _bundles(hop)
+    carried = _with_envelope(client_bundle)
+    dg_a2a.verify_hop(hop.tokens, _signer(), client_bundle=carried)
+    assert "envelopes" in carried and len(carried["envelopes"]) == 1
 
 
 def test_a_tampered_server_ledger_fails():

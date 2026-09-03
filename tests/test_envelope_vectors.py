@@ -61,10 +61,13 @@ CASE_NAMES = [
     "reject_unknown_witness",
     # Appended at @safal207's proposal. Cases are appended, never inserted: nothing above moves.
     "reject_locator_mismatch",
+    # Appended at revision v1.1, with the duplicate-subject rule it pins.
+    "reject_duplicate_subject",
 ]
 
-# The three failures a chain mutation or the envelope's own contents can produce, and the row
-# that is required to produce each. Every one of the six named failures has a row.
+# The failures a chain mutation, the envelope's own contents, or the array they sit in can
+# produce, and the row that is required to produce each. Every one of the seven named failures
+# has a row.
 REQUIRED_BY_ROW = {
     "reject_rehashed_chain_sparse": "envelope_subject_mismatch",
     "reject_subject_mismatch": "envelope_subject_mismatch",
@@ -77,6 +80,7 @@ REQUIRED_BY_ROW = {
     "reject_rehashed_chain_unanchored": "envelope_subject_mismatch",
     "reject_unknown_witness": "envelope_unknown_witness",
     "reject_locator_mismatch": "envelope_subject_mismatch",
+    "reject_duplicate_subject": "envelope_duplicate_subject",
 }
 
 
@@ -118,7 +122,7 @@ class TestEnvelopeVectors(unittest.TestCase):
         # `version` is the compatibility contract and does not move when cases are appended;
         # `revision` is the additive counter that does.
         self.assertEqual(self.document["version"], "envelope_vectors_v1")
-        self.assertEqual(self.document["revision"], "envelope_vectors_v1.0")
+        self.assertEqual(self.document["revision"], "envelope_vectors_v1.1")
         self.assertEqual([c["name"] for c in self.document["cases"]], CASE_NAMES)
 
     def test_every_case_carries_the_two_envelope_specific_fields(self):
@@ -344,7 +348,7 @@ class TestEnvelopeVectors(unittest.TestCase):
         self.assertEqual(vectors.read_envelope_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_envelope_vectors()
         self.assertEqual(loaded["version"], "envelope_vectors_v1")
-        self.assertEqual(loaded["revision"], "envelope_vectors_v1.0")
+        self.assertEqual(loaded["revision"], "envelope_vectors_v1.1")
         self.assertEqual([c["name"] for c in loaded["cases"]], CASE_NAMES)
 
     def test_every_packaged_case_scores_as_it_declares(self):
@@ -480,16 +484,93 @@ class TestEnvelopeSurface(unittest.TestCase):
         with_envelope = evidence.export_bundle(guard.audit_log(), signer, envelopes=[{"x": 1}])
         self.assertEqual(with_envelope["envelopes"], [{"x": 1}])
 
-    def test_two_envelopes_on_the_same_entry_both_have_to_verify(self):
-        good = self._envelope()
-        broken = copy.deepcopy(good)
-        broken["subject"]["entry_hash"] = "0" * 64
-        report = self._report([good, _resign(broken)])
+    # ---- one entry, at most one envelope (v1.1) -------------------------
+    def test_a_second_envelope_over_a_covered_entry_is_a_duplicate_subject(self):
+        # The committed row scores the two-valid-envelopes case; this pins the surface it
+        # reports through, including that the first witness's result survives in `results`.
+        report = self._report([self._envelope(),
+                               self._envelope(result="not_matched")])
         self.assertFalse(report["ok"])
-        # The good one still puts the entry in witness-signed; the broken one is still reported.
-        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "witness-signed")
         self.assertEqual([d["reason"] for d in report["failure_details"]],
-                         ["envelope_subject_mismatch"])
+                         ["envelope_duplicate_subject"])
+        detail = report["failure_details"][0]
+        self.assertEqual((detail["seq"], detail["node"]),
+                         (generate_envelopes.SPAWN_SEQ,
+                          self.entries[generate_envelopes.SPAWN_SEQ]["node"]))
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual(report["witness_signed"], [])
+        self.assertEqual(report["lines"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual(report["results"][generate_envelopes.SPAWN_SEQ], "matched")
+
+    def test_the_duplicate_rule_makes_the_score_independent_of_array_order(self):
+        # The defect this rule closes: with the states keyed by seq and overwritten per
+        # envelope, the SAME two envelopes in the other order reported the other result and no
+        # failure at all. Both orders now reject, at the same position.
+        first, second = self._envelope(), self._envelope(result="not_matched")
+        forward = self._report([first, second])
+        backward = self._report([second, first])
+        for report in (forward, backward):
+            self.assertFalse(report["ok"])
+            self.assertEqual([d["reason"] for d in report["failure_details"]],
+                             ["envelope_duplicate_subject"])
+            self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+
+    def test_an_entry_claimed_by_a_broken_envelope_is_claimed(self):
+        # "Valid or not": the FIRST envelope names seq 1 and fails on its own subject, so a
+        # later honest one over the same entry is still the second observation of it. Both are
+        # reported, and the entry is not witness-signed.
+        broken = copy.deepcopy(self._envelope())
+        broken["subject"]["entry_hash"] = "0" * 64
+        report = self._report([_resign(broken), self._envelope()])
+        self.assertFalse(report["ok"])
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_subject_mismatch", "envelope_duplicate_subject"])
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+
+    def test_envelopes_over_different_entries_are_not_duplicates(self):
+        # The rule is per ENTRY. Two envelopes covering two hops is the ordinary sparse case.
+        allow = evidence.sign_envelope(self.entries, generate_envelopes.ALLOW_SEQ, self.seed,
+                                       kid=generate_envelopes.WITNESS_KID,
+                                       at=generate_envelopes.OBSERVED_AT,
+                                       method=generate_envelopes.OBSERVED_METHOD)
+        report = self._report([self._envelope(), allow])
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witness_signed"],
+                         sorted([generate_envelopes.SPAWN_SEQ, generate_envelopes.ALLOW_SEQ]))
+
+    def test_a_duplicate_naming_a_seq_this_bundle_has_no_entry_for_is_not_a_duplicate(self):
+        # An entry is claimed only once `subject.seq` FINDS one: two envelopes naming a seq that
+        # is not in the bundle are two subject mismatches, not a duplicate of each other.
+        stray = copy.deepcopy(self._envelope())
+        stray["subject"]["seq"] = 99
+        report = self._report([_resign(stray), _resign(copy.deepcopy(stray))])
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_subject_mismatch", "envelope_subject_mismatch"])
+
+    def test_export_bundle_refuses_to_redact_and_carry_envelopes_in_one_call(self):
+        # Redaction rewrites every entry hash, so envelopes signed over the unredacted ledger
+        # would ship bound to entries that no longer exist and fail envelope_subject_mismatch.
+        from attenu_guard import Authority, Guard, RowLimit
+        from attenu_guard.wire import HS256TestSigner as _S
+        signer = _S(b"k", kid="k")
+        guard = Guard.issue("a", Authority({"crm.read"}, [RowLimit(1)], ttl=60), chain_id="t")
+        guard.delegate("b", Authority({"crm.read"}, [RowLimit(1)], ttl=30), task="secret prompt")
+        redacted = evidence.export_bundle(guard.audit_log(), signer, redact_task=True)
+        envelope = evidence.sign_envelope(redacted["entries"], 1, self.seed,
+                                          kid=generate_envelopes.WITNESS_KID,
+                                          at=generate_envelopes.OBSERVED_AT,
+                                          method=generate_envelopes.OBSERVED_METHOD)
+        with self.assertRaises(ValueError) as raised:
+            evidence.export_bundle(guard.audit_log(), signer, redact_task=True,
+                                   envelopes=[envelope])
+        self.assertIn("sign envelopes over the redacted ledger", str(raised.exception))
+        # The documented order works: export redacted, sign over ITS entries, export again.
+        bundle = evidence.export_bundle(guard.audit_log(), signer, redact_task=True)
+        bundle["envelopes"] = [envelope]
+        keys = {generate_envelopes.WITNESS_KID: evidence._ed25519_backend()[2](self.seed)}
+        report = evidence.verify_envelopes(bundle, witness_keys=keys)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witness_signed"], [1])
 
 
 def _resign(envelope):

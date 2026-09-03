@@ -183,6 +183,7 @@ __all__ = [
     "guarded_tool",
     "verify_hop",
     "continuation_chain_id",
+    "ENVELOPES_NOT_EVALUATED",
 ]
 
 #: The A2A extension URI this adapter registers (spec §4.6.3: the version lives in the URI).
@@ -760,8 +761,13 @@ class GuardedAgentExecutor(AgentExecutor):
 # Cross-process verification
 # ---------------------------------------------------------------------------
 
+#: What `verify_hop` reports for `checks["envelopes"]` when no trust set was configured. The
+#: hop is checked without them, so this is a "not looked at", never a "looked at and passed".
+ENVELOPES_NOT_EVALUATED = "not evaluated (no witness_keys configured)"
+
+
 def verify_hop(tokens: Sequence[str], signer, *, client_bundle: "dict | None" = None,
-               server_bundle: "dict | None" = None, now: int = 0) -> dict:
+               server_bundle: "dict | None" = None, now: int = 0, witness_keys=None) -> dict:
     """Verify one A2A hop end to end, from the tokens and the two ledgers ALONE.
 
     Checks, in order:
@@ -776,11 +782,23 @@ def verify_hop(tokens: Sequence[str], signer, *, client_bundle: "dict | None" = 
                   was handed and did not widen it — with `chain_id` equal to
                   `continuation_chain_id(...)`, recomputed here from the leaf token's bytes.
 
+    `witness_keys` is the trust set for observer envelopes a bundle may carry — the shape
+    `evidence.verify_bundle` takes, `[{"kid", "alg", "public_key_hex"}]` or `{kid: public_key}`.
+    Envelope trust is a DEPLOYMENT's, not this function's: it is the peer who decides whose
+    witness signatures mean anything. Without it, an envelope would fail
+    `envelope_unknown_witness` and a peer would refuse an honest hop for carrying evidence it
+    was never given the keys to read, so a hop with no trust set configured is checked on a copy
+    of each bundle WITHOUT its `envelopes` member and `checks["envelopes"]` says the envelopes
+    were not evaluated. With a trust set they are scored like any other bundle check, and a
+    broken envelope fails the hop.
+
     Returns `{"ok", "checks", "failures", …}`, the same shape as
     `attenu_guard.evidence.verify_bundle`. A bundle that is not supplied is reported as
     `"not checked"`, never as passing.
     """
-    checks: dict[str, Any] = {"chain": False, "client": "not checked", "server": "not checked"}
+    checks: dict[str, Any] = {"chain": False, "client": "not checked", "server": "not checked",
+                              "envelopes": ("evaluated" if witness_keys is not None
+                                            else ENVELOPES_NOT_EVALUATED)}
     failures: list[str] = []
 
     try:
@@ -796,13 +814,14 @@ def verify_hop(tokens: Sequence[str], signer, *, client_bundle: "dict | None" = 
     leaf_authority = verified.leaf_authority
 
     if client_bundle is not None:
-        ok, why = _check_client(client_bundle, leaf_jti, leaf_sub, leaf_authority)
+        ok, why = _check_client(client_bundle, leaf_jti, leaf_sub, leaf_authority,
+                                witness_keys=witness_keys)
         checks["client"] = "verified" if ok else "FAILED"
         failures += why
 
     if server_bundle is not None:
         ok, why = _check_server(server_bundle, continuation_chain_id(verified), leaf_sub,
-                                leaf_authority)
+                                leaf_authority, witness_keys=witness_keys)
         checks["server"] = "verified" if ok else "FAILED"
         failures += why
 
@@ -855,10 +874,22 @@ def _authority_of(bundle: dict, node_id: str) -> "Authority | None":
     return None
 
 
+def _hop_bundle(bundle: dict, witness_keys) -> dict:
+    """The bundle a hop check actually verifies.
+
+    With a trust set, the bundle as it stands, envelopes included. Without one, a shallow copy
+    with the `envelopes` member removed: this adapter cannot evaluate an envelope whose witness
+    it was given no key for, and scoring it against an empty trust set would reject every honest
+    hop that carries one. What is not evaluated is reported as not evaluated."""
+    if witness_keys is not None or not bundle.get("envelopes"):
+        return bundle
+    return {k: v for k, v in bundle.items() if k != "envelopes"}
+
+
 def _check_client(bundle: dict, leaf_jti: str, leaf_sub: str,
-                  leaf_authority: Authority) -> "tuple[bool, list[str]]":
+                  leaf_authority: Authority, *, witness_keys=None) -> "tuple[bool, list[str]]":
     failures: list[str] = []
-    report = evidence.verify_bundle(bundle)
+    report = evidence.verify_bundle(_hop_bundle(bundle, witness_keys), witness_keys=witness_keys)
     if not report["ok"]:
         failures.append(f"client: bundle does not verify: {report['failures']}")
     nodes = evidence.delegation_graph(bundle)["nodes"]
@@ -883,9 +914,9 @@ def _check_client(bundle: dict, leaf_jti: str, leaf_sub: str,
 
 
 def _check_server(bundle: dict, chain_id: str, leaf_sub: str,
-                  leaf_authority: Authority) -> "tuple[bool, list[str]]":
+                  leaf_authority: Authority, *, witness_keys=None) -> "tuple[bool, list[str]]":
     failures: list[str] = []
-    report = evidence.verify_bundle(bundle)
+    report = evidence.verify_bundle(_hop_bundle(bundle, witness_keys), witness_keys=witness_keys)
     if not report["ok"]:
         failures.append(f"server: bundle does not verify: {report['failures']}")
     if bundle.get("chain_id") != chain_id:
