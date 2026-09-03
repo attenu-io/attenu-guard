@@ -71,7 +71,11 @@ class TestBundleVectors(unittest.TestCase):
         cls.document = generate_bundles.generate_all()
 
     def test_the_document_declares_its_version_and_every_expected_case(self):
+        # `version` is the compatibility contract and does not move when cases are appended —
+        # an implementation that scored bundle_vectors_v1 still scores it. `revision` is the
+        # additive counter that does move, so a reader can name the corpus they ran.
         self.assertEqual(self.document["version"], "bundle_vectors_v1")
+        self.assertEqual(self.document["revision"], "bundle_vectors_v1.1")
         self.assertEqual([c["name"] for c in self.document["cases"]], [
             "valid_bundle_v2",
             "reject_params_mismatch",
@@ -81,7 +85,53 @@ class TestBundleVectors(unittest.TestCase):
             "reject_duplicate_call_id",
             "reject_rehashed_chain",
             "reject_tampered_entry",
+            # revision v1.1 — the delegation-containment cases the first two independent runs
+            # both asked for. Appended, never inserted: a case's position is stable for life.
+            "reject_widened_scope",
+            "reject_uncontained_allow",
         ])
+
+    def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
+        # The gap the first two independent runs both reported: integrity and execution binding
+        # had rejecting cases, the two checks the library exists for had none. This asserts the
+        # corpus keeps covering them, and that each one fails ONLY its own check — a case that
+        # also broke integrity would not isolate the rule it is named for.
+        by_name = {c["name"]: c for c in self.document["cases"]}
+        for name, reason, other in (("reject_widened_scope", "monotonicity", "containment"),
+                                    ("reject_uncontained_allow", "containment", "monotonicity")):
+            with self.subTest(case=name):
+                case = by_name[name]
+                self.assertEqual(case["expect"], "reject")
+                self.assertEqual([f["reason"] for f in case["expect_failures"]], [reason])
+                report = evidence.verify_bundle(case["bundle"], _signer_for(case))
+                self.assertFalse(report["checks"][reason])
+                self.assertTrue(report["checks"][other])
+                self.assertTrue(report["checks"]["integrity"])
+                self.assertEqual(report["checks"]["anchor"], "verified")
+                self.assertEqual(report["execution_binding"]["failures"], [])
+                # Exactly one finding: these two cases have no permitted extras.
+                self.assertEqual(_positions(report), case["expect_failures"])
+
+    def test_each_rejecting_case_differs_from_the_valid_bundle_by_one_entry(self):
+        # The rule the README states and every case is built on. Compared entry by entry against
+        # `valid_bundle_v2`, ignoring the hash chain and the anchor, which every mutation
+        # legitimately rewrites. The three cases that insert, transpose or leave the chain broken
+        # are exempt from the count, not from the rule.
+        base = next(c for c in self.document["cases"] if c["name"] == "valid_bundle_v2")
+        base_entries = base["bundle"]["entries"]
+        reshaped = {"reject_outcome_before_allow", "reject_duplicate_outcome"}
+        for case in self.document["cases"]:
+            if case["expect"] != "reject" or case["name"] in reshaped:
+                continue
+            with self.subTest(case=case["name"]):
+                entries = case["bundle"]["entries"]
+                self.assertEqual(len(entries), len(base_entries))
+                skip = ("hash", "prev_hash")
+                differing = [i for i, (a, b) in enumerate(zip(base_entries, entries))
+                             if {k: v for k, v in a.items() if k not in skip}
+                             != {k: v for k, v in b.items() if k not in skip}]
+                self.assertEqual(len(differing), 1,
+                                 f"{case['name']} changed entries {differing}, expected exactly 1")
 
     def test_every_case_is_a_complete_v2_bundle_with_execution_binding(self):
         for case in self.document["cases"]:
@@ -149,6 +199,7 @@ class TestBundleVectors(unittest.TestCase):
         self.assertEqual(vectors.read_bundle_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_bundle_vectors()
         self.assertEqual(loaded["version"], "bundle_vectors_v1")
+        self.assertEqual(loaded["revision"], "bundle_vectors_v1.1")
         self.assertEqual([c["name"] for c in loaded["cases"]],
                          [c["name"] for c in self.document["cases"]])
 

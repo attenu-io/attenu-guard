@@ -114,7 +114,11 @@ def read_bundle_vectors_bytes() -> bytes:
 
 
 def load_bundle_vectors() -> dict:
-    """The bundle-level vectors, parsed: `{"version", "description", "cases": [...]}`.
+    """The bundle-level vectors, parsed: `{"version", "revision", "description", "cases": [...]}`.
+
+    Cases are appended to this file, never inserted, changed or removed, so `version` is the
+    compatibility contract and does not move; `revision` is the additive counter that does, and
+    is what a conformance report should name. Iterate `cases`; do not assume a length.
 
     Each case is `{"name", "description", "signer", "bundle", "expect", "expect_failures"}`.
     `expect` is "accept" or "reject"; `expect_failures` is the MINIMAL set of

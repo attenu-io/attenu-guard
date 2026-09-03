@@ -4,6 +4,12 @@ One line per change. The long-form notes for each version (reasoning, review fin
 
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Added
+- Bundle interop vectors, revision `bundle_vectors_v1.1` — two appended cases, `reject_widened_scope` (`monotonicity` on the over-granting spawn) and `reject_uncontained_allow` (`containment` on the allow), the delegation checks no rejecting case covered; `version` stays `bundle_vectors_v1`
+- `tests/vectors/README.md` — the permitted extras two independent runs reported on `reject_duplicate_call_id` (first-sighting vs last-sighting binding) and on `reject_tampered_entry` (stored-head vs recomputed-head), both conformant
+
 ## [0.11.0] - 2026-09-02
 
 ### Added
