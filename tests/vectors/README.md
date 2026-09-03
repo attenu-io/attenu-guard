@@ -434,6 +434,15 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   `safal207/ContractGraph-QA` at commit `052aa3d` (his corrected proof tree; the earlier `61dc428` carried a report not produced by the pinned verifier, which he replaced), `proofs/attenu-guard-v0.11.0-independent`.
   Stated boundary: the released corpus only; no claim of general verifier completeness,
   runtime correctness, production security or certification.
+- **@safal207, 2026-09-03** — the same stdlib-only verifier, re-pinned to the released
+  `bundle_vectors_v1.json` at attenu-guard `v0.12.0` (revision `bundle_vectors_v1.1`, twelve
+  cases): 12 of 12 conformant. Proof tree `safal207/ContractGraph-QA` at commit `2a3623d`,
+  `proofs/attenu-guard-v0.12.0-independent`; the fixture, verifier and report hashes he
+  published match the files in that tree and the fixture matches ours byte for byte (checked
+  from this side). He also ran the exact `v0.11.0` verifier against v1.1 and reported what
+  the note above says: it rejects `reject_increased_ttl` and `reject_loosened_ceiling` at the
+  required position for a scope reason, so those two rows do not discriminate it. Stated
+  boundary: corpus conformance for the released fixtures, not regression discrimination.
 - **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-02** — a Rust verifier
   (`crates/guard-verify/src/attenu/` in `XuebinMa/agent-guard`, pinned at commit
   `7c96469bafb609af8d071de8e71b18806546c0cd`), written from this README and the per-case
