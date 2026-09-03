@@ -6,6 +6,9 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- Bundle interop vectors, revision `bundle_vectors_v1.2` — five appended cases: `valid_bundle_v2_literal` (the root holds `{crm.read, mail.send}`, so the child's scopes are a literal subset) and, derived from it, `reject_increased_ttl_literal`, `reject_loosened_ceiling_literal`, `reject_null_ttl_literal`, `reject_omitted_ceiling_literal`. The v1.1 ttl/ceiling rows are rejected by a verifier that compares scope lists literally and never checks ttl or ceilings (0.11.0 was one), for a scope reason at the declared position, so they never discriminated it; the four new rows can fail only on the dimension they are about. 0.11.0 accepts all four; this build rejects each. `version` stays `bundle_vectors_v1`; no case changed
+
 ## [0.12.0] - 2026-09-03
 
 ### Fixed

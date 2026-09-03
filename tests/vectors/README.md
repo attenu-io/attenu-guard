@@ -176,7 +176,7 @@ One JSON object holding every case:
 ```jsonc
 {
   "version": "bundle_vectors_v1",         // compatibility contract; does not move
-  "revision": "bundle_vectors_v1.1",      // additive counter; moves when a case is appended
+  "revision": "bundle_vectors_v1.2",      // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -214,16 +214,17 @@ rejecting case declares `expect_failures`: the **minimal set** of
 - It may never report **fewer**, and never at a **different position**.
   `seq` is the offending entry's own `seq` field and `node` its `node`; both
   are `null` when the failure is chain-level, with nothing single to point at.
-- Every rejecting bundle is derived from `valid_bundle_v2` by exactly **one**
-  change, so each case isolates one rule. Unless a case says otherwise, the
+- Every rejecting bundle is derived from an accepting case by exactly **one**
+  change, so each case isolates one rule: from `valid_bundle_v2`, unless its
+  description names `valid_bundle_v2_literal`. Unless a case says otherwise, the
   chain was re-hashed and a fresh anchor signed over it after the change, so
   integrity is NOT what fails.
 - Cases are **appended, never inserted, changed or removed**: a case's name,
   position and declared minimal set are stable for life. So `version` is the
   compatibility contract and stays `bundle_vectors_v1` — an implementation that
   scored the file before still scores it — while `revision` moves with each
-  addition, which is what a report should name (`bundle_vectors_v1.1`, twelve
-  cases). Iterate `cases`; do not assume a length.
+  addition, which is what a report should name (`bundle_vectors_v1.2`,
+  seventeen cases). Iterate `cases`; do not assume a length.
 
 Score yourself with nothing but `pip install attenu-guard`:
 
@@ -304,18 +305,52 @@ of the human-readable `failures` list.
   than the node that delegated to it. No scope is added and the ttl is
   untouched. Required: `monotonicity` on the spawn. (Added in revision v1.1.)
 
-None of the four v1.1 cases has a permitted extra: each fails exactly one
-check and reports exactly one failure.
+- `valid_bundle_v2_literal` — `valid_bundle_v2` with one difference: the
+  root holds `{crm.read, mail.send}` instead of `{crm.*, mail.send}`, so the
+  child's `{crm.read}` is a **literal** subset of its parent's scopes, with no
+  wildcard in play. Every check MUST pass. It is the base for the four rows
+  below, and exists for one reason, stated after them. (Added in revision
+  v1.2.)
+- `reject_increased_ttl_literal` — `reject_increased_ttl`, derived from
+  `valid_bundle_v2_literal` instead: ttl 7200 under a parent holding 3600,
+  scopes a literal subset. Required: `monotonicity` on the spawn. (Added in
+  revision v1.2.)
+- `reject_loosened_ceiling_literal` — `reject_loosened_ceiling`, derived from
+  `valid_bundle_v2_literal` instead: `max_rows` 250000 under a parent bounded
+  at 100000, scopes a literal subset. Required: `monotonicity` on the spawn.
+  (Added in revision v1.2.)
+- `reject_null_ttl_literal` — the `spawn` grants the child no ttl at all
+  (`ttl` null) under a parent holding 3600: a child that never expires under a
+  parent that does. The ttl dimension failing by omission rather than by
+  growth. Derived from `valid_bundle_v2_literal`. Required: `monotonicity` on
+  the spawn. (Added in revision v1.2.)
+- `reject_omitted_ceiling_literal` — the `spawn` grants the child no ceilings
+  (`constraints` empty) under a parent bounded at `max_rows` 100000: a child
+  unbounded on a dimension its parent bounds. The ceiling dimension failing by
+  omission. Derived from `valid_bundle_v2_literal`. Required: `monotonicity`
+  on the spawn. (Added in revision v1.2.)
+
+None of the four v1.1 cases or the four v1.2 rejecting cases has a permitted
+extra: each fails exactly one check and reports exactly one failure.
 
 Attenuation is a lattice relation over three dimensions, not a scope list, so
-the last two cases add no scope at all. A verifier that compares scope sets
-alone accepts both and reports nothing. Two further widenings fail the same
-relation by omission rather than by growth, and a verifier should reject them
-too, though neither has a vector: a child that omits a ceiling its parent holds
-is unbounded on that dimension, and a child with no ttl under a parent that has
-one never expires. Both were accepted by attenu-guard through 0.11.0, whose
-monotonicity check was gated on a literal, non-wildcard-aware scope difference;
-the gate is gone and the relation alone now decides.
+the v1.1 ttl and ceiling cases add no scope at all. A verifier that compares
+scope sets alone, wildcard-aware, accepts both and reports nothing. But a
+verifier that compares scope lists **literally** and skips ttl and ceilings
+rejects both anyway, for a scope reason at the declared position, because
+`crm.read` is not literally in `{crm.*, mail.send}`: it passes the two rows
+without ever checking the dimension they are about. attenu-guard through
+0.11.0 was exactly that verifier, its monotonicity check gated on a literal,
+non-wildcard-aware scope difference, and it scores both v1.1 rows as
+conformant. The gate is gone and the relation alone now decides, but the rows
+did not discriminate it, which is what revision v1.2 fixes. The four
+`_literal` rows derive from a base whose child scopes are a plain subset of
+the parent's, so a literal comparison finds nothing and only a ttl or ceiling
+check can produce the required failure. attenu-guard 0.11.0 accepts all four
+and 0.12.1 rejects each one, naming the dimension. Two of them are the
+omission modes the previous revision described without a vector: a child that
+omits a ceiling its parent holds, and a child with no ttl under a parent that
+has one.
 
 ### Permitted extras, and where implementations legitimately differ
 

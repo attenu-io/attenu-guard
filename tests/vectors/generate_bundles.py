@@ -61,7 +61,7 @@ VECTORS_VERSION = "bundle_vectors_v1"
 # contract and stays put: an implementation that scored `bundle_vectors_v1` still scores it.
 # `revision` is the additive counter — it moves whenever a case is appended, so a reader can
 # tell which corpus they ran without diffing case lists.
-VECTORS_REVISION = "bundle_vectors_v1.1"
+VECTORS_REVISION = "bundle_vectors_v1.2"
 
 VECTORS_DIR = Path(__file__).resolve().parent / BUNDLES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -132,7 +132,15 @@ class _fixed_entropy:
 # The chain every case is derived from
 # =========================================================================
 
-def _valid_bundle() -> dict:
+ROOT_SCOPES = frozenset({"crm.*", "mail.send"})
+# The second accepting base (revision v1.2): the root holds the child's one scope LITERALLY,
+# so the child's scope set is a plain subset of the parent's with no wildcard in play. Rows
+# derived from it can fail only on ttl or on a ceiling — a verifier that compares scope lists
+# and never looks at the other two dimensions finds nothing to report and fails the row.
+ROOT_SCOPES_LITERAL = frozenset({"crm.read", "mail.send"})
+
+
+def _valid_bundle(root_scopes: frozenset = ROOT_SCOPES) -> dict:
     """A complete, honest schema-v2 chain: an orchestrator that delegates to a narrower
     summarizer, two authorized tool calls each observed to completion, one over-reach denied,
     both nodes finalized. Nine entries, seq 0..8:
@@ -146,10 +154,16 @@ def _valid_bundle() -> dict:
         6 outcome   summarizer              call B, invoked_params_hash == authorized
         7 done      summarizer
         8 done      orchestrator
+
+    `root_scopes` is the only knob: `ROOT_SCOPES_LITERAL` swaps the root's `crm.*` for a
+    literal `crm.read`, and nothing else in the chain changes (the summarizer's deny of
+    `crm.export` at seq 5 is still an over-reach, now against a parent that never held it
+    either). The fixed entropy stream restarts per chain, so both bases share their
+    `params_salt` and `call_id` values; they are separate chains and never compared.
     """
     with _fixed_entropy():
         root = Guard.issue("orchestrator",
-                           Authority(scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600),
+                           Authority(scopes=set(root_scopes), ceilings=[RowLimit(100_000)], ttl=3600),
                            chain_id=CHAIN_ID, schema_version=2)
         child = root.delegate("summarizer",
                               Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900),
@@ -440,6 +454,84 @@ def gen_cases() -> list:
         _mutate(base, _loosen_granted_ceiling),
         expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
 
+    # ---- the literal-subset base (added in revision v1.2) ------------------
+    # The two rows above derive from valid_bundle_v2, whose parent holds crm.* while the child
+    # holds crm.read. That scope difference is non-empty as a LITERAL comparison, so a verifier
+    # that compares scope lists literally and never looks at ttl or ceilings rejects both rows
+    # anyway — at the declared position, with a scope message — and passes a corpus it has no
+    # business passing. (attenu-guard through 0.11.0 was exactly that verifier; found by the
+    # reviewer of the 0.12.0 release note.) The four rows below derive from a base whose child
+    # scopes are a plain subset of the parent's, so nothing but a ttl or ceiling check can fail
+    # them. The two omission modes the README described without a vector get one here.
+    literal = _valid_bundle(ROOT_SCOPES_LITERAL)
+
+    cases.append(_case(
+        "valid_bundle_v2_literal",
+        "valid_bundle_v2 with one difference: the orchestrator's root authority is "
+        "{crm.read, mail.send} instead of {crm.*, mail.send}, so the summarizer's grant of "
+        "{crm.read} is a LITERAL subset of its parent's scopes, with no wildcard in play. Every "
+        "check MUST pass, exactly as for valid_bundle_v2. This case exists as the base for the "
+        "four rows that follow it: a verifier that compares scope lists literally sees no "
+        "scope difference between parent and child in any of them, so only a check on ttl or "
+        "on ceilings can fail them. The same nine entries, the same calls, the same outcomes; "
+        "the summarizer's deny of crm.export at seq 5 is still an over-reach.",
+        literal, expect="accept"))
+
+    cases.append(_case(
+        "reject_increased_ttl_literal",
+        "reject_increased_ttl derived from valid_bundle_v2_literal instead: the delegation at "
+        "seq 1 grants the summarizer a ttl of 7200 under a parent holding 3600, and the grant "
+        "is still exactly {crm.read} under a parent holding {crm.read, mail.send}. The scope "
+        "sets are a literal subset, so a verifier that skips ttl reports nothing and fails "
+        "this row; the earlier row let such a verifier pass by rejecting for a scope reason "
+        "that its literal comparison happened to produce. Chain re-hashed and re-anchored, "
+        "containment and execution binding untouched. Required: monotonicity on the spawn "
+        "(seq 1), node the child. This build names the dimension ('ttl 7200 > parent 3600'); "
+        "only reason and position are scored.",
+        _mutate(literal, _widen_granted_ttl),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    cases.append(_case(
+        "reject_loosened_ceiling_literal",
+        "reject_loosened_ceiling derived from valid_bundle_v2_literal instead: the delegation "
+        "at seq 1 raises the summarizer's max_rows ceiling to 250000 under a parent bounded at "
+        "100000, with the scope sets a literal subset and the ttl untouched, so only a ceiling "
+        "check can fail it. Chain re-hashed and re-anchored. Required: monotonicity on the "
+        "spawn (seq 1), node the child.",
+        _mutate(literal, _loosen_granted_ceiling),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    def _drop_granted_ttl(es):
+        es[1]["granted"]["ttl"] = None
+
+    cases.append(_case(
+        "reject_null_ttl_literal",
+        "The delegation at seq 1 grants the summarizer no ttl at all (`ttl` null) under a "
+        "parent holding 3600: the child never expires under a parent that does, which is the "
+        "ttl dimension failing by omission rather than by growth. Derived from "
+        "valid_bundle_v2_literal, so the scope sets are a literal subset and only a ttl check "
+        "can fail it; the ceiling is untouched. Chain re-hashed and re-anchored. Required: "
+        "monotonicity on the spawn (seq 1), node the child. This build names it ('ttl "
+        "unbounded, parent 3600'); only reason and position are scored.",
+        _mutate(literal, _drop_granted_ttl),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    def _omit_granted_ceiling(es):
+        es[1]["granted"]["constraints"] = []
+
+    cases.append(_case(
+        "reject_omitted_ceiling_literal",
+        "The delegation at seq 1 grants the summarizer no ceilings at all (`constraints` empty) "
+        "under a parent bounded at max_rows 100000: the child is unbounded on a dimension its "
+        "parent bounds, which is the ceiling dimension failing by omission rather than by "
+        "growth. Derived from valid_bundle_v2_literal, so the scope sets are a literal subset "
+        "and only a ceiling check can fail it; the ttl is untouched. Chain re-hashed and "
+        "re-anchored. Required: monotonicity on the spawn (seq 1), node the child. This build "
+        "names it ('ceiling max_rows unbounded, parent holds max_rows<=100000'); only reason "
+        "and position are scored.",
+        _mutate(literal, _omit_granted_ceiling),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
     return cases
 
 
@@ -455,8 +547,9 @@ def _document(cases: list) -> dict:
             "the exact reason and the exact position (`seq`/`node`, null when the failure is "
             "chain-level); a conformant verifier MAY report additional failures — one broken "
             "record often makes a second check unsatisfiable — but never fewer, and never at a "
-            "different position. Every rejecting bundle is derived from `valid_bundle_v2` by "
-            "exactly one change, so each case isolates one rule. `version` is the compatibility "
+            "different position. Every rejecting bundle is derived from an accepting case by "
+            "exactly one change, so each case isolates one rule: from `valid_bundle_v2` unless "
+            "its description names `valid_bundle_v2_literal`. `version` is the compatibility "
             "contract and does not move when cases are appended; `revision` does. Verify an anchor as "
             "hex(HMAC-SHA256(secret, JCS(anchor without kid/sig/verified))) and each entry as "
             "hex(SHA-256(prev_hash_ascii || JCS(entry without hash))); see "

@@ -75,7 +75,7 @@ class TestBundleVectors(unittest.TestCase):
         # an implementation that scored bundle_vectors_v1 still scores it. `revision` is the
         # additive counter that does move, so a reader can name the corpus they ran.
         self.assertEqual(self.document["version"], "bundle_vectors_v1")
-        self.assertEqual(self.document["revision"], "bundle_vectors_v1.1")
+        self.assertEqual(self.document["revision"], "bundle_vectors_v1.2")
         self.assertEqual([c["name"] for c in self.document["cases"]], [
             "valid_bundle_v2",
             "reject_params_mismatch",
@@ -91,6 +91,14 @@ class TestBundleVectors(unittest.TestCase):
             "reject_uncontained_allow",
             "reject_increased_ttl",
             "reject_loosened_ceiling",
+            # revision v1.2 — the literal-subset base and the four rows that can fail ONLY on
+            # ttl or a ceiling (the two v1.1 rows above are also rejected, for a scope reason,
+            # by a verifier that compares scope lists literally and skips both dimensions).
+            "valid_bundle_v2_literal",
+            "reject_increased_ttl_literal",
+            "reject_loosened_ceiling_literal",
+            "reject_null_ttl_literal",
+            "reject_omitted_ceiling_literal",
         ])
 
     def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
@@ -102,7 +110,11 @@ class TestBundleVectors(unittest.TestCase):
         for name, reason, other in (("reject_widened_scope", "monotonicity", "containment"),
                                     ("reject_uncontained_allow", "containment", "monotonicity"),
                                     ("reject_increased_ttl", "monotonicity", "containment"),
-                                    ("reject_loosened_ceiling", "monotonicity", "containment")):
+                                    ("reject_loosened_ceiling", "monotonicity", "containment"),
+                                    ("reject_increased_ttl_literal", "monotonicity", "containment"),
+                                    ("reject_loosened_ceiling_literal", "monotonicity", "containment"),
+                                    ("reject_null_ttl_literal", "monotonicity", "containment"),
+                                    ("reject_omitted_ceiling_literal", "monotonicity", "containment")):
             with self.subTest(case=name):
                 case = by_name[name]
                 self.assertEqual(case["expect"], "reject")
@@ -116,18 +128,22 @@ class TestBundleVectors(unittest.TestCase):
                 # Exactly one finding: these two cases have no permitted extras.
                 self.assertEqual(_positions(report), case["expect_failures"])
 
-    def test_each_rejecting_case_differs_from_the_valid_bundle_by_one_entry(self):
+    def test_each_rejecting_case_differs_from_its_base_by_one_entry(self):
         # The rule the README states and every case is built on. Compared entry by entry against
-        # `valid_bundle_v2`, ignoring the hash chain and the anchor, which every mutation
-        # legitimately rewrites. The three cases that insert, transpose or leave the chain broken
-        # are exempt from the count, not from the rule.
-        base = next(c for c in self.document["cases"] if c["name"] == "valid_bundle_v2")
-        base_entries = base["bundle"]["entries"]
+        # the accepting case it derives from — `valid_bundle_v2`, or `valid_bundle_v2_literal`
+        # for the rows whose name ends in `_literal` — ignoring the hash chain and the anchor,
+        # which every mutation legitimately rewrites. The three cases that insert, transpose or
+        # leave the chain broken are exempt from the count, not from the rule.
+        by_name = {c["name"]: c for c in self.document["cases"]}
         reshaped = {"reject_outcome_before_allow", "reject_duplicate_outcome"}
         for case in self.document["cases"]:
             if case["expect"] != "reject" or case["name"] in reshaped:
                 continue
             with self.subTest(case=case["name"]):
+                base_name = "valid_bundle_v2_literal" if case["name"].endswith("_literal") else "valid_bundle_v2"
+                if base_name != "valid_bundle_v2":
+                    self.assertIn(base_name, case["description"])   # a row off the second base names it
+                base_entries = by_name[base_name]["bundle"]["entries"]
                 entries = case["bundle"]["entries"]
                 self.assertEqual(len(entries), len(base_entries))
                 skip = ("hash", "prev_hash")
@@ -136,6 +152,47 @@ class TestBundleVectors(unittest.TestCase):
                              != {k: v for k, v in b.items() if k not in skip}]
                 self.assertEqual(len(differing), 1,
                                  f"{case['name']} changed entries {differing}, expected exactly 1")
+
+    def test_the_literal_base_differs_from_the_valid_bundle_in_the_root_authority_only(self):
+        by_name = {c["name"]: c for c in self.document["cases"]}
+        a = by_name["valid_bundle_v2"]["bundle"]["entries"]
+        b = by_name["valid_bundle_v2_literal"]["bundle"]["entries"]
+        self.assertEqual(len(a), len(b))
+        skip = ("hash", "prev_hash")
+        differing = [i for i, (x, y) in enumerate(zip(a, b))
+                     if {k: v for k, v in x.items() if k not in skip}
+                     != {k: v for k, v in y.items() if k not in skip}]
+        self.assertEqual(differing, [0])
+        self.assertEqual(a[0]["authority"]["scopes"], ["crm.*", "mail.send"])
+        self.assertEqual(b[0]["authority"]["scopes"], ["crm.read", "mail.send"])
+        self.assertEqual(a[1]["granted"], b[1]["granted"])
+
+    def test_the_literal_rows_show_no_scope_difference_to_a_literal_comparison(self):
+        # What revision v1.2 exists for. A verifier that compares scope LISTS and never looks at
+        # ttl or ceilings — attenu-guard through 0.11.0 was one — rejects the two v1.1 rows
+        # anyway, for a scope reason, at the declared position: crm.read is not literally in
+        # {crm.*, mail.send}. Such a verifier passes those rows without ever checking the
+        # dimension they are about. On the four v1.2 rows that literal comparison finds nothing,
+        # so only a ttl or ceiling check can produce the required failure.
+        by_name = {c["name"]: c for c in self.document["cases"]}
+
+        def literal_scope_widening(case):
+            es = case["bundle"]["entries"]
+            parent = set(es[0]["authority"]["scopes"]); child = set(es[1]["granted"]["scopes"])
+            return sorted(child - parent)
+
+        for name in ("reject_increased_ttl", "reject_loosened_ceiling"):
+            with self.subTest(case=name):
+                self.assertEqual(literal_scope_widening(by_name[name]), ["crm.read"])
+        for name in ("reject_increased_ttl_literal", "reject_loosened_ceiling_literal",
+                     "reject_null_ttl_literal", "reject_omitted_ceiling_literal"):
+            with self.subTest(case=name):
+                self.assertEqual(literal_scope_widening(by_name[name]), [])
+                # and the only thing that differs from the base is the spawn's ttl or ceilings
+                base = by_name["valid_bundle_v2_literal"]["bundle"]["entries"][1]["granted"]
+                granted = by_name[name]["bundle"]["entries"][1]["granted"]
+                self.assertEqual(granted["scopes"], base["scopes"])
+                self.assertTrue(granted["ttl"] != base["ttl"] or granted["constraints"] != base["constraints"])
 
     def test_every_case_is_a_complete_v2_bundle_with_execution_binding(self):
         for case in self.document["cases"]:
@@ -203,7 +260,7 @@ class TestBundleVectors(unittest.TestCase):
         self.assertEqual(vectors.read_bundle_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_bundle_vectors()
         self.assertEqual(loaded["version"], "bundle_vectors_v1")
-        self.assertEqual(loaded["revision"], "bundle_vectors_v1.1")
+        self.assertEqual(loaded["revision"], "bundle_vectors_v1.2")
         self.assertEqual([c["name"] for c in loaded["cases"]],
                          [c["name"] for c in self.document["cases"]])
 
