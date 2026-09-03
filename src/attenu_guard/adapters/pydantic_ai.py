@@ -1,8 +1,8 @@
 """
 attenu_guard.adapters.pydantic_ai — a thin attenu-guard integration for Pydantic AI.
 
-Tested against pydantic-ai-slim 2.31.1 and re-verified against 2.37.0 (Python >= 3.10);
-line numbers below are as of 2.37.0.
+Tested against pydantic-ai-slim 2.31.1 and re-verified against 2.38.0 (Python >= 3.10);
+line numbers below are as of 2.37.0, the last release they were read against.
 
 HOOK POINTS USED
 ----------------
