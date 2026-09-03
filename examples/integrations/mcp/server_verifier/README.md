@@ -23,7 +23,7 @@ gets its own audience-bound token. That is the right foundation, and this recipe
 3. **The record verifies offline** — the server's ledger, and the client's own bundle, with no service involved.
 
 ```bash
-pip install 'attenu-guard' mcp
+pip install 'attenu-guard' 'mcp<2'   # this recipe is pinned to mcp 1.x; see issue #12 for 2.x
 python examples/integrations/mcp/server_verifier/demo.py
 # RUN_LIVE=1 python examples/integrations/mcp/server_verifier/live_smoke.py   # the same server over stdio
 ```
