@@ -7,7 +7,8 @@ denied before its body runs — with a kill switch that revokes the coworker's
 whole subtree on that first strike, and a signed, offline-verifiable evidence
 bundle at the end.
 
-Tested against **crewai 1.15.16** (Python 3.12; CrewAI needs >=3.10,
+Tested against **crewai 1.15.16** (the version CI pins) and re-verified on
+**1.15.18** on 2026-09-03 (Python 3.12; CrewAI needs >=3.10,
 attenu-guard supports 3.9+).
 
 ## What this recipe teaches
@@ -47,7 +48,7 @@ attenu-guard supports 3.9+).
 
 Denials become `crewai.hooks.HookAborted`, **not** `AuthorityDenied`: CrewAI's
 dispatcher swallows every other exception fail-open
-(`crewai/hooks/dispatch.py:264`), so a raised `AuthorityDenied` would be
+(`crewai/hooks/dispatch.py:265` on 1.15.18), so a raised `AuthorityDenied` would be
 silently ignored and the tool would run. A paired `after_tool_call` hook
 replaces CrewAI's generic "Tool execution blocked by hook." with the
 attenu-guard reason, so the model learns *why* and can adapt.
@@ -160,7 +161,8 @@ in-process, at CrewAI's own hook dispatch, and holds:
 
 - as long as the bridge is installed (`with bridge:` in this recipe, or an
   equivalent context-manager scope in your own app). CrewAI's dispatcher
-  swallows a raised `AuthorityDenied` fail-open (`hooks/dispatch.py:264`),
+  swallows a raised `AuthorityDenied` fail-open (`hooks/dispatch.py:265` on
+  1.15.18),
   which is exactly why this bridge translates every denial into
   `HookAborted` instead — the one exception CrewAI's own dispatch treats as
   a real abort.
