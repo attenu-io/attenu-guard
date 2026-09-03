@@ -124,6 +124,12 @@ nothing, and that audit tampering is detected. The red-team harness (see
 finding is fixed and pinned as a regression. If you can break one, the core claim
 is false; please [tell us](SECURITY.md).
 
+## Writing
+
+Runs, not claims, on what each agent framework does at a handoff — one post per finding, versions pinned,
+output pasted: [attenu.io/blog](https://attenu.io/blog/) ([feed](https://attenu.io/feed.xml)). Start with
+[Does a sub-agent inherit its parent's permissions? Five frameworks, five answers.](https://attenu.io/blog/sub-agent-permissions-five-frameworks/)
+
 ## Standards
 
 The protocol is designed to be IETF-acceptable: it reuses the OAuth/JOSE stack
