@@ -501,8 +501,7 @@ def _witness_public_key(kid, value) -> bytes:
             raise ValueError(f"witness key {kid!r}: an Ed25519 public key is 32 bytes, "
                              f"got {len(key)}")
         return key
-    raise ValueError(f"witness key {kid!r}: expected 64 hex characters or 32 bytes, got "
-                     f"{type(value).__name__}")
+    raise ValueError(f"witness key {kid!r}: expected 64 hex characters or 32 bytes")
 
 
 def _trusted_witnesses(witness_keys) -> dict:
@@ -524,7 +523,7 @@ def _trusted_witnesses(witness_keys) -> dict:
     trusted = {}
     for kid, value in rows:
         if not isinstance(kid, str):
-            raise ValueError(f"witness key kid must be a string, got {type(kid).__name__}")
+            raise ValueError("witness key kid must be a string")
         if isinstance(value, Mapping):
             alg = value.get("alg")
             if alg != ENVELOPE_ALG:
@@ -657,7 +656,11 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
 
     # (1) version — a `v` or `typ` this build does not know is a DIFFERENT CONTRACT, and
     # nothing further about it can be read safely.
-    if envelope.get("v") != ENVELOPE_VERSION or envelope.get("typ") != ENVELOPE_TYP:
+    # `_is_seq` guards the version too: `True == 1` in Python, so a boolean `v` would otherwise
+    # pass a version check the TypeScript implementation refuses, and the two would disagree
+    # about the same bundle. Found by the cross-language hostile-value matrix.
+    if (not _is_seq(envelope.get("v")) or envelope.get("v") != ENVELOPE_VERSION
+            or envelope.get("typ") != ENVELOPE_TYP):
         report("envelope_unknown_version",
                f"envelope v={envelope.get('v')!r} typ={envelope.get('typ')!r}, this build "
                f"knows v={ENVELOPE_VERSION} typ={ENVELOPE_TYP!r}", subject)
@@ -669,7 +672,10 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
                                    ("observed", envelope.get("observed"), ENVELOPE_OBSERVED_MEMBERS),
                                    ("witness", envelope.get("witness"), ENVELOPE_WITNESS_MEMBERS)):
         if not isinstance(value, Mapping) or set(value) != expected:
-            got = sorted(value) if isinstance(value, Mapping) else type(value).__name__
+            # "not an object" rather than the type's name: Python and TypeScript spell their type
+            # names differently (`str`/`string`, `NoneType`/`null`, `list`/`object`) and the two
+            # implementations report the same failure strings for the same bundle.
+            got = sorted(value) if isinstance(value, Mapping) else "not an object"
             report("envelope_unknown_member",
                    f"{label} member set is {got}, expected {sorted(expected)}", subject)
             return None, None, None
@@ -677,8 +683,9 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     # (3) subject — the event decides the member set; a member ADDED to it is unknown_member,
     # one MISSING is subject_mismatch (a subject that does not say what it covers).
     if not isinstance(subject, Mapping):
-        report("envelope_subject_mismatch",
-               f"subject is {type(subject).__name__}, expected a JSON object", subject)
+        # No type name, for the same reason as the member-set message above: the two languages
+        # spell their type names differently and report the same strings for the same bundle.
+        report("envelope_subject_mismatch", "subject is not a JSON object", subject)
         return None, None, None
     event = subject.get("event")
     if not isinstance(event, str):
