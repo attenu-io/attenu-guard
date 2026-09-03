@@ -479,22 +479,85 @@ def sign_envelope(entries: list[dict], seq: int, seed: bytes, *, kid: str,
     return envelope
 
 
+def _witness_public_key(kid, value) -> bytes:
+    """The 32-byte Ed25519 public key for `kid`, or a `ValueError` naming it.
+
+    A trust set is CALLER CONFIGURATION, not bundle content, so a malformed row is a mistake in
+    the deployment and failing loudly is the only way it does not become a silent downgrade:
+    `bytes(32)` on an int fabricates 32 zero bytes, and every envelope from that witness would
+    then fail on its SIGNATURE, reading as a witness who signed badly rather than as a trust set
+    that was never configured."""
+    if isinstance(value, str):
+        if len(value) != 64:
+            raise ValueError(f"witness key {kid!r}: public_key_hex must be 64 hex characters "
+                             f"(a 32-byte Ed25519 key), got {len(value)}")
+        try:
+            return bytes.fromhex(value)
+        except ValueError:
+            raise ValueError(f"witness key {kid!r}: public_key_hex is not hexadecimal") from None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        key = bytes(value)
+        if len(key) != 32:
+            raise ValueError(f"witness key {kid!r}: an Ed25519 public key is 32 bytes, "
+                             f"got {len(key)}")
+        return key
+    raise ValueError(f"witness key {kid!r}: expected 64 hex characters or 32 bytes, got "
+                     f"{type(value).__name__}")
+
+
 def _trusted_witnesses(witness_keys) -> dict:
     """kid -> (alg, raw public key bytes), from the vector file's own `witness_keys` shape
     (`[{"kid", "alg", "public_key_hex"}]`) or from a plain `{kid: public_key_bytes}` mapping.
 
     `None` means no trust anchor is configured, which is an EMPTY set, not an absent check: an
     envelope naming a kid nobody trusts is `envelope_unknown_witness`, and that is the honest
-    answer whether the trust set is empty or merely does not contain it."""
+    answer whether the trust set is empty or merely does not contain it.
+
+    Every row is validated here and a bad one raises `ValueError` naming its kid. This is the one
+    envelope input that is NOT attacker-supplied — the deployment chose these keys — so a mistake
+    in them is reported to the caller rather than folded into a finding about the bundle. v1
+    defines Ed25519 and no other algorithm, so a row declaring anything else is refused too."""
     if witness_keys is None:
         return {}
-    if isinstance(witness_keys, Mapping):
-        return {kid: (ENVELOPE_ALG, bytes(key) if not isinstance(key, str) else bytes.fromhex(key))
-                for kid, key in witness_keys.items()}
+    rows = (witness_keys.items() if isinstance(witness_keys, Mapping)
+            else [(k.get("kid") if isinstance(k, Mapping) else None, k) for k in witness_keys])
     trusted = {}
-    for k in witness_keys:
-        trusted[k.get("kid")] = (k.get("alg"), bytes.fromhex(k.get("public_key_hex") or ""))
+    for kid, value in rows:
+        if not isinstance(kid, str):
+            raise ValueError(f"witness key kid must be a string, got {type(kid).__name__}")
+        if isinstance(value, Mapping):
+            alg = value.get("alg")
+            if alg != ENVELOPE_ALG:
+                raise ValueError(f"witness key {kid!r}: alg must be {ENVELOPE_ALG!r}, got {alg!r}")
+            value = value.get("public_key_hex")
+        trusted[kid] = (ENVELOPE_ALG, _witness_public_key(kid, value))
     return trusted
+
+
+def _envelope_raw_bytes(raw):
+    """One `envelope_bytes` element as bytes, or None when it is not bytes at all.
+
+    `bytes(raw)` on an int fabricates that many ZERO bytes, which would turn a caller's mistake
+    into a canonicality finding about the bundle; hex that does not parse is the same mistake in
+    a different shape. Neither is coerced: the caller is told, through the one reason that can
+    carry it, and the envelope is not scored on invented bytes."""
+    if isinstance(raw, str):
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return None
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        return bytes(raw)
+    return None
+
+
+def _is_seq(value) -> bool:
+    """A subject `seq` this build will look an entry up by: a JSON integer, and never a bool.
+
+    `True` hashes equal to `1` in Python, so an unguarded lookup would find the entry at seq 1
+    for `"seq": true`; a dict or a list is not hashable at all and would raise. The type check
+    comes first, and every use of `seq` is behind it."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _envelope_line(state: str, result) -> str:
@@ -569,10 +632,16 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     otherwise sound: the point of the check is that no one can decide what an earlier witness
     said by appending after it."""
     def position(subject):
+        # Every failure is positioned by `subject.seq`, and `subject` is attacker-supplied, so
+        # the lookup is guarded: a dict or a list is not hashable and `by_seq.get` would raise
+        # on it. A seq that is not an integer positions nothing, which is honest — it names no
+        # entry — and it is never used as a key.
         s = subject.get("seq") if isinstance(subject, Mapping) else None
+        if not _is_seq(s):
+            return None, None
         entry = by_seq.get(s)
         if entry is None:
-            return (s if isinstance(s, int) else None), None
+            return s, None
         return entry.get("seq"), entry.get("node")
 
     def report(reason: str, detail: str, subject) -> tuple:
@@ -612,6 +681,11 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
                f"subject is {type(subject).__name__}, expected a JSON object", subject)
         return None, None, None
     event = subject.get("event")
+    if not isinstance(event, str):
+        # `event` selects the subject member set, so it is a dict key here as well: a dict or a
+        # list would raise on the lookup below. Found by the hostile-value suite, not by review.
+        report("envelope_subject_mismatch", "subject event is not a string", subject)
+        return None, None, None
     if event not in ENVELOPE_SUBJECT_MEMBERS:
         report("envelope_subject_mismatch",
                f"subject event={event!r}; envelope v{ENVELOPE_VERSION} defines a subject for "
@@ -630,7 +704,12 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
         return None, None, None
 
     # (3a) the binding member. `seq` is the lookup key, so there is nothing to compare it
-    # against; the entry it finds supplies the hash the subject is checked against.
+    # against; the entry it finds supplies the hash the subject is checked against. It is also
+    # the one subject member this build uses as a KEY, so its type is checked before it is used
+    # as one: a dict or a list would raise, and `true` would silently find the entry at seq 1.
+    if not _is_seq(subject.get("seq")):
+        report("envelope_subject_mismatch", "subject seq is not an integer", subject)
+        return None, None, None
     entry = by_seq.get(subject.get("seq"))
     if entry is None:
         report("envelope_subject_mismatch",
@@ -675,13 +754,20 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     # because formatting and escaping do not survive a parse.
     non_canonical = False
     if raw is not None:
-        raw = bytes.fromhex(raw) if isinstance(raw, str) else bytes(raw)
+        received = _envelope_raw_bytes(raw)
+        if received is None:
+            report("envelope_non_canonical", "envelope_bytes entry is not hex or bytes", subject)
+            return None, None, None
+        raw = received
         try:
             recanonicalized = canonical.dumps(dict(envelope))
         except canonical.CanonicalizationError as exc:
-            recanonicalized, non_canonical = None, True
+            # A value JCS cannot represent at all — a non-finite number, an integer outside the
+            # binary64 safe range, a lone surrogate. There is no canonical form to compare the
+            # received bytes with and none to verify a signature over, so this is the end of it.
             report("envelope_non_canonical", f"the envelope cannot be canonicalized: {exc}", subject)
-        if recanonicalized is not None and recanonicalized != raw:
+            return None, None, None
+        if recanonicalized != raw:
             non_canonical = True
             report("envelope_non_canonical",
                    "the bytes as received are not JCS of what they parse to "
@@ -691,20 +777,44 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     # witness-signed: the kid names the key, and that is the key it has to verify under.
     witness = envelope.get("witness")
     kid, alg = witness.get("kid"), witness.get("alg")
+    if not isinstance(kid, str):
+        # `kid` names a key, so it is a lookup key here too, and an unhashable one would raise.
+        report("envelope_unknown_witness", "witness kid is not a string", subject)
+        return None, None, None
+    if alg != ENVELOPE_ALG:
+        # v1 defines Ed25519 and nothing else. Without this, `"alg": "none"` on both sides — in
+        # the envelope and in a trust-set row — agreed with each other and read as witness-signed.
+        report("envelope_unknown_witness",
+               f"witness alg={alg!r} is not {ENVELOPE_ALG!r}; envelope v{ENVELOPE_VERSION} "
+               "defines Ed25519 and no other algorithm", subject)
+        return None, None, None
     known = trusted.get(kid)
-    if known is None or known[0] != alg:
+    if known is None:
         report("envelope_unknown_witness",
                f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
-               f"({sorted(k for k in trusted if k is not None)})", subject)
+               f"({sorted(trusted)})", subject)
         return None, None, None
 
     # (6) the signature, over JCS(envelope minus "sig").
     _sign, verify, _public = _ed25519_backend()
+    sig = envelope.get("sig")
+    if not isinstance(sig, str):
+        # `bytes.fromhex` raises TypeError on a non-string, which is not the ValueError the hex
+        # parse below is written for. A `sig` that is not a string is not a signature.
+        report("envelope_bad_signature", "sig is not a hex string", subject)
+        return None, None, None
     try:
-        signature = bytes.fromhex(envelope.get("sig") or "")
+        signature = bytes.fromhex(sig)
     except ValueError:
         signature = b""
-    if not verify(known[1], envelope_signing_input(envelope), signature):
+    try:
+        signing_input = envelope_signing_input(envelope)
+    except canonical.CanonicalizationError as exc:
+        # Reached only when no `envelope_bytes` were supplied, so step (4) did not run: the
+        # envelope holds a value JCS cannot represent and there is nothing to verify OVER.
+        report("envelope_non_canonical", f"the envelope cannot be canonicalized: {exc}", subject)
+        return None, None, None
+    if not verify(known[1], signing_input, signature):
         report("envelope_bad_signature",
                f"the signature does not verify under the key kid={kid!r} names", subject)
         return None, None, None

@@ -480,6 +480,23 @@ def gen_cases() -> list:
         expect="reject",
         expect_failures=[_fail("envelope_duplicate_subject", SPAWN_SEQ, n1)]))
 
+    unknown_alg = copy.deepcopy(spawn_envelope)
+    unknown_alg["witness"]["alg"] = "none"
+    cases.append(_case(
+        "reject_unknown_alg",
+        f"`witness.alg` set to \"none\", re-signed with {WITNESS_KID!r}'s real key so the "
+        "signature is genuine and the kid is one the trust set carries. Everything else is "
+        "valid_spawn_envelope. envelope v1 defines EdDSA and no other algorithm, so the alg is "
+        "checked against the CONTRACT and not merely against whatever the trust-set row happens "
+        "to say: a verifier that compares the envelope's alg with the row's alg accepts this "
+        "envelope the moment both say \"none\", and one that ignores the alg entirely hands "
+        "\"none\" or \"HS256\" to its Ed25519 verifier and reports a signature failure, which "
+        "names the wrong cause. Required: `envelope_unknown_witness` at the covered entry "
+        f"({n1} at seq {SPAWN_SEQ}), and seq {SPAWN_SEQ} MUST report `process-asserted`.",
+        with_envelopes(base, [_resign(unknown_alg)]),
+        expect="reject",
+        expect_failures=[_fail("envelope_unknown_witness", SPAWN_SEQ, n1)]))
+
     return cases
 
 

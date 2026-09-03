@@ -61,8 +61,9 @@ CASE_NAMES = [
     "reject_unknown_witness",
     # Appended at @safal207's proposal. Cases are appended, never inserted: nothing above moves.
     "reject_locator_mismatch",
-    # Appended at revision v1.1, with the duplicate-subject rule it pins.
+    # Appended at revision v1.1: the duplicate-subject rule, and the algorithm check.
     "reject_duplicate_subject",
+    "reject_unknown_alg",
 ]
 
 # The failures a chain mutation, the envelope's own contents, or the array they sit in can
@@ -81,6 +82,7 @@ REQUIRED_BY_ROW = {
     "reject_unknown_witness": "envelope_unknown_witness",
     "reject_locator_mismatch": "envelope_subject_mismatch",
     "reject_duplicate_subject": "envelope_duplicate_subject",
+    "reject_unknown_alg": "envelope_unknown_witness",
 }
 
 
@@ -571,6 +573,227 @@ class TestEnvelopeSurface(unittest.TestCase):
         report = evidence.verify_envelopes(bundle, witness_keys=keys)
         self.assertTrue(report["ok"], report["failures"])
         self.assertEqual(report["witness_signed"], [1])
+
+
+# =========================================================================
+# Hostile bundle content: verify_bundle reports, it never raises
+# =========================================================================
+class TestHostileEnvelopeContent(unittest.TestCase):
+    """A bundle is attacker-supplied. Every envelope member is therefore an untrusted JSON
+    value of ANY type, and the one thing a verifier may never do with one is raise: a caller
+    that has to wrap `verify_bundle` in `try/except Exception` cannot tell a rejected bundle
+    from a crashed verifier, and a crash on a malformed bundle is a denial of service against
+    whoever is checking it.
+
+    Four crash paths were reachable before this suite existed, all of them from values that a
+    JSON parser produces without complaint: an unhashable `subject.seq` or `witness.kid` used as
+    a lookup key, a `sig` that is not a string reaching `bytes.fromhex`, and a value JCS cannot
+    represent reaching the canonicalizer at the signature step."""
+
+    #: JSON values a parser yields and this scorer must survive: the unhashable ones, the two
+    #: numeric forms JCS refuses, the bool that hashes equal to 1, and the empty and unparseable
+    #: strings.
+    HOSTILE = ({"a": 1}, [1], True, False, None, 1.5, -1, 0, "", "zz", "0" * 63,
+               float("nan"), float("inf"), 2 ** 53 + 1, [{"b": [1]}])
+
+    #: Every member of the envelope, at every level v1 defines.
+    PATHS = (("v",), ("typ",), ("sig",), ("subject",), ("observed",), ("witness",),
+             ("subject", "chain_id"), ("subject", "node"), ("subject", "seq"),
+             ("subject", "entry_hash"), ("subject", "event"),
+             ("observed", "result"), ("observed", "at"), ("observed", "method"),
+             ("witness", "kid"), ("witness", "alg"))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])
+        cls.signer = HS256TestSigner(bytes.fromhex(cls.case["signer"]["secret_hex"]),
+                                     kid=cls.case["signer"]["kid"])
+        cls.honest = cls.case["bundle"]["envelopes"][0]
+
+    def _mutated(self, path, value):
+        envelope = copy.deepcopy(self.honest)
+        target = envelope
+        for member in path[:-1]:
+            target = target[member]
+        target[path[-1]] = value
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"] = [envelope]
+        return bundle
+
+    def test_no_hostile_value_in_any_envelope_member_makes_verify_bundle_raise(self):
+        # Scored with and without the received bytes, and with hostile bytes too: the
+        # canonicality branch only runs when bytes are supplied, so both paths need covering.
+        raw_variants = (None, [canonical.dumps(self.honest)], ["zz"], [12345], [None])
+        for path in self.PATHS:
+            for value in self.HOSTILE:
+                for raw in raw_variants:
+                    with self.subTest(path=".".join(path), value=repr(value), raw=repr(raw)[:20]):
+                        report = evidence.verify_bundle(
+                            self._mutated(path, value), self.signer,
+                            witness_keys=self.case["witness_keys"], envelope_bytes=raw)
+                        self.assertLessEqual({"ok", "checks", "failures", "failure_details",
+                                              "envelopes"}, set(report))
+                        # Every mutation changes the envelope away from the bytes the witness
+                        # signed, so every one of them must reject — a report that says ok here
+                        # would mean a hostile value had been accepted, not merely survived.
+                        self.assertFalse(report["ok"])
+                        self.assertTrue(report["failures"])
+                        for detail in report["failure_details"]:
+                            self.assertIn(detail["reason"],
+                                          set(evidence.ENVELOPE_FAILURES) | {"integrity(anchor)"})
+
+    def test_a_subject_seq_that_is_not_an_integer_is_a_mismatch_positioned_nowhere(self):
+        # `seq` is the one subject member used as a lookup KEY. A dict or a list is unhashable
+        # and raised; `true` is hashable and found the entry at seq 1.
+        for value in ({"a": 1}, [1], True, False, 1.5, "1", None):
+            with self.subTest(seq=repr(value)):
+                report = evidence.verify_envelopes(
+                    self._mutated(("subject", "seq"), value),
+                    witness_keys=self.case["witness_keys"])
+                detail = report["failure_details"][0]
+                self.assertEqual(detail["reason"], "envelope_subject_mismatch")
+                self.assertEqual((detail["seq"], detail["node"]), (None, None))
+                self.assertIn("subject seq is not an integer", detail["detail"])
+
+    def test_a_true_seq_is_not_the_entry_at_seq_one(self):
+        # The concrete consequence: True == 1 and hash(True) == hash(1) in Python, so an
+        # unguarded lookup returns the spawn at seq 1 and the subject is then checked against
+        # an entry it never named.
+        report = evidence.verify_envelopes(self._mutated(("subject", "seq"), True),
+                                           witness_keys=self.case["witness_keys"])
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual([d["seq"] for d in report["failure_details"]], [None])
+
+    def test_a_value_jcs_cannot_represent_is_non_canonical_rather_than_a_crash(self):
+        # Reached at the signature step with no bytes supplied, and at the canonicality step
+        # with them. One failure either way, never two, and never an exception.
+        # Only members no earlier check reads: a hostile `subject.chain_id` is a locator
+        # mismatch long before anything is canonicalized.
+        for path in (("observed", "at"), ("observed", "method"), ("witness", "kid")):
+            for value in (float("nan"), float("inf"), 2 ** 53 + 1):
+                for raw in (None, [b"{}"]):
+                    with self.subTest(path=".".join(path), value=repr(value), raw=raw is not None):
+                        report = evidence.verify_envelopes(
+                            self._mutated(path, value),
+                            witness_keys=self.case["witness_keys"], envelope_bytes=raw)
+                        reasons = [d["reason"] for d in report["failure_details"]]
+                        if path == ("witness", "kid") and raw is None:
+                            # A non-string kid is refused before anything is canonicalized.
+                            self.assertEqual(reasons, ["envelope_unknown_witness"])
+                        else:
+                            self.assertEqual(reasons, ["envelope_non_canonical"])
+
+    def test_a_witness_kid_that_is_not_a_string_is_an_unknown_witness(self):
+        for value in ({"a": 1}, [1], 5, None, True):
+            with self.subTest(kid=repr(value)):
+                report = evidence.verify_envelopes(self._mutated(("witness", "kid"), value),
+                                                   witness_keys=self.case["witness_keys"])
+                detail = report["failure_details"][0]
+                self.assertEqual(detail["reason"], "envelope_unknown_witness")
+                self.assertIn("witness kid is not a string", detail["detail"])
+
+    def test_a_sig_that_is_not_a_string_is_a_bad_signature(self):
+        # `bytes.fromhex` raises TypeError on a non-string, which the ValueError the hex parse
+        # is written for does not catch. `sig: 0` and `sig: false` were already survivable only
+        # because they are falsy.
+        for value in (12345, True, ["ab"], {"a": 1}, 0, False, None):
+            with self.subTest(sig=repr(value)):
+                report = evidence.verify_envelopes(self._mutated(("sig",), value),
+                                                   witness_keys=self.case["witness_keys"])
+                detail = report["failure_details"][0]
+                self.assertEqual(detail["reason"], "envelope_bad_signature")
+                self.assertIn("sig is not a hex string", detail["detail"])
+
+
+# =========================================================================
+# witness.alg, and the trust set as caller configuration
+# =========================================================================
+class TestWitnessAlgorithm(unittest.TestCase):
+    """`witness.alg` is part of the CONTRACT, not a negotiation between the envelope and the
+    trust-set row. v1 defines EdDSA and no other algorithm, so an envelope naming anything else
+    is an unknown witness — whatever the row it is compared with happens to say."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])
+        cls.seed = generate_envelopes.SEEDS[generate_envelopes.WITNESS_KID]
+        cls.kid = generate_envelopes.WITNESS_KID
+
+    def _with_alg(self, alg):
+        envelope = copy.deepcopy(self.case["bundle"]["envelopes"][0])
+        envelope["witness"]["alg"] = alg
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"] = [_resign(envelope)]
+        return bundle
+
+    def test_an_alg_other_than_eddsa_is_an_unknown_witness(self):
+        # "none" is the row the corpus pins; HS256 is the other shape of the same hole — it used
+        # to reach the Ed25519 verifier and be reported as a SIGNATURE failure, naming the wrong
+        # cause on an envelope whose signature was never the problem.
+        for alg in ("none", "HS256", "ES256", "", None, 1):
+            with self.subTest(alg=repr(alg)):
+                report = evidence.verify_envelopes(self._with_alg(alg),
+                                                   witness_keys=self.case["witness_keys"])
+                detail = report["failure_details"][0]
+                self.assertEqual(detail["reason"], "envelope_unknown_witness")
+                self.assertIn("is not 'EdDSA'", detail["detail"])
+
+    def test_a_trust_set_row_naming_another_algorithm_is_refused(self):
+        # The other half: "none" on BOTH sides used to agree with itself and verify. It cannot
+        # even be configured now.
+        rows = [dict(k) for k in self.case["witness_keys"]]
+        rows[0]["alg"] = "none"
+        with self.assertRaises(ValueError) as raised:
+            evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)
+        self.assertIn(self.kid, str(raised.exception))
+        self.assertIn("EdDSA", str(raised.exception))
+
+    def test_a_trust_set_key_that_is_not_a_key_is_refused_and_names_the_kid(self):
+        # {kid: 32} fabricated 32 zero bytes through `bytes(32)`, and every envelope from that
+        # witness then failed on its signature — a silent downgrade of a misconfiguration into
+        # a finding about the bundle.
+        for keys in ({self.kid: 32}, {self.kid: b"short"}, {self.kid: "zz" * 32},
+                     {self.kid: "aa" * 31}, {self.kid: None}, {5: b"x" * 32}):
+            with self.subTest(keys=repr(keys)[:40]):
+                with self.assertRaises(ValueError):
+                    evidence.verify_envelopes(self.case["bundle"], witness_keys=keys)
+
+    def test_a_list_row_with_a_bad_public_key_is_refused_and_names_the_kid(self):
+        for bad in ("zz" * 32, "aa" * 31, "", None, 32):
+            rows = [dict(k) for k in self.case["witness_keys"]]
+            rows[0]["public_key_hex"] = bad
+            with self.subTest(public_key_hex=repr(bad)):
+                with self.assertRaises(ValueError) as raised:
+                    evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)
+                self.assertIn(self.kid, str(raised.exception))
+
+    def test_a_well_formed_trust_set_still_verifies_in_both_forms(self):
+        # The validation must not have narrowed what a correct caller may pass.
+        public = evidence._ed25519_backend()[2](self.seed)
+        for keys in (self.case["witness_keys"], {self.kid: public}, {self.kid: public.hex()}):
+            with self.subTest(form=type(keys).__name__):
+                self.assertTrue(evidence.verify_envelopes(self.case["bundle"],
+                                                          witness_keys=keys)["ok"])
+
+    def test_envelope_bytes_that_are_not_hex_or_bytes_are_reported_not_coerced(self):
+        # `bytes(32)` on an int is 32 zero bytes, which would have read as a canonicality
+        # finding about the envelope rather than as the caller error it is.
+        for raw in (12345, ["ab"], {"a": 1}, "zz", "abc", 0.5):
+            with self.subTest(raw=repr(raw)):
+                report = evidence.verify_envelopes(self.case["bundle"],
+                                                   witness_keys=self.case["witness_keys"],
+                                                   envelope_bytes=[raw])
+                detail = report["failure_details"][0]
+                self.assertEqual(detail["reason"], "envelope_non_canonical")
+                self.assertIn("envelope_bytes entry is not hex or bytes", detail["detail"])
+
+    def test_the_received_bytes_still_verify_when_they_are_hex_or_bytes(self):
+        honest = canonical.dumps(self.case["bundle"]["envelopes"][0])
+        for raw in (honest, honest.hex(), bytearray(honest), memoryview(honest)):
+            with self.subTest(form=type(raw).__name__):
+                self.assertTrue(evidence.verify_envelopes(
+                    self.case["bundle"], witness_keys=self.case["witness_keys"],
+                    envelope_bytes=[raw])["ok"])
 
 
 def _resign(envelope):

@@ -301,6 +301,28 @@ class TestReasonVocabulary(unittest.TestCase):
     #: written literally; `ev` is "allow" or "deny" at that site and nowhere else.
     _INVALID_EVENTS = ("allow", "deny")
 
+    def _envelope_reasons_in_source(self) -> set:
+        """Every reason `_score_envelope` can report, read out of its own body.
+
+        The scorer reports through one `report()` helper, so `fail.add` sees the reason as a
+        variable and the literal-site regex below cannot see it. Trusting
+        `evidence.ENVELOPE_FAILURES` instead made the vocabulary check BLIND for envelopes in
+        both directions: a reason added to the scorer without a row here and without a row in
+        the README passed, because the tuple was the only thing either side was compared with.
+        Reading the call sites is what closes that."""
+        import re
+        body = self.SOURCE.split("\ndef _score_envelope(", 1)
+        self.assertEqual(len(body), 2, "evidence.py has no _score_envelope")
+        body = body[1].split("\ndef ", 1)[0]
+        found = set(re.findall(r'(?:report|fail\.add)\(\s*"([^"]+)"', body))
+        self.assertTrue(found, "no reason literals found in _score_envelope")
+        return found
+
+    def test_the_envelope_scorer_reports_exactly_the_declared_envelope_failures(self):
+        # Both directions: a reason the scorer can report that ENVELOPE_FAILURES does not name,
+        # and a name in ENVELOPE_FAILURES no site can produce, are each a failure here.
+        self.assertEqual(self._envelope_reasons_in_source(), set(evidence.ENVELOPE_FAILURES))
+
     def _reported_reasons(self) -> set:
         import re
         literal = set(re.findall(r'(?:log|fail|failures)\.add\(\s*"([^"]+)"', self.SOURCE))
@@ -308,9 +330,9 @@ class TestReasonVocabulary(unittest.TestCase):
         # not an invention this test carries on its own.
         self.assertIn('failures.add(f"invalid_{ev}"', self.SOURCE)
         literal |= {f"invalid_{ev}" for ev in self._INVALID_EVENTS}
-        # The envelope scorer reports through one `report()` helper, so its reasons reach
-        # `fail.add` as a variable; the module states the set.
-        literal |= set(evidence.ENVELOPE_FAILURES)
+        # The envelope scorer's reasons, read from the scorer rather than taken from the tuple
+        # that names them — the tuple is checked against the same reading just above.
+        literal |= self._envelope_reasons_in_source()
         return literal
 
     def _documented_reasons(self) -> set:

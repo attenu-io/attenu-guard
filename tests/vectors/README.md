@@ -317,11 +317,11 @@ observer-envelope section below is their full treatment.
 |---|---|---|
 | `envelope_unknown_version` | a `v` or `typ` this verifier does not know | the covered entry |
 | `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` | the covered entry |
-| `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry |
+| `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` or `event` that is not an integer or a string, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry, or nowhere when `seq` names no entry |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named | the covered entry |
-| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to | the covered entry |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` | the covered entry |
-| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names | the covered entry |
+| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all | the covered entry |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA | the covered entry |
+| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string | the covered entry |
 
 `tests/test_bundle_vectors.py` asserts that this vocabulary and the reasons `evidence.py` can
 actually report are the same set, so a new check cannot be added without a row here.
@@ -591,6 +591,23 @@ two together, in the same form for all three results: `witness-signed
 (matched)`, `witness-signed (not_matched)`, `witness-signed (indeterminate)`. A
 process-asserted entry gets no result.
 
+**`witness.alg` is part of the contract, not a negotiation.** v1 defines
+`EdDSA` and no other algorithm, so an envelope naming anything else is
+`envelope_unknown_witness` — whatever the trust-set row it is compared with
+happens to say. A verifier that only compares the two algs accepts `"none"` the
+moment both sides say it; one that ignores the alg hands `"HS256"` to its
+Ed25519 verifier and reports a signature failure, naming the wrong cause on an
+envelope whose signature was never the problem.
+
+**A bundle is attacker-supplied, so a verifier reports and never raises.** Every
+envelope member is an untrusted JSON value of any type. A `seq` that is not an
+integer, an `event` or a `witness.kid` that is not a string, a `sig` that is not
+a hex string, and a value JCS cannot represent are each a reason in the table
+above, never an exception out of the verifier. `witness_keys` is the one
+envelope input that is NOT attacker-supplied — the deployment chose those keys —
+so a malformed row there raises, naming its `kid`, rather than being folded into
+a finding about the bundle.
+
 **One entry, at most one envelope.** A second envelope naming a `subject.seq` an
 earlier envelope in the same array already named is `envelope_duplicate_subject`
 at the covered entry, and that entry reports **`process-asserted`**. Two
@@ -708,11 +725,11 @@ is reported on its own.
 |---|---|
 | `envelope_unknown_version` | a `v` or `typ` this build does not know |
 | `envelope_unknown_member` | a member added anywhere in the envelope at `v: 1` |
-| `envelope_subject_mismatch` | a subject missing a member its `event` requires, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
+| `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` that is not an integer or an `event` that is not a string, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named |
-| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys` |
-| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names |
+| `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA |
+| `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string |
 
 ### Scoring, and the two rules on where a failure may land
 
@@ -849,6 +866,15 @@ at seq 1 (`vectors:n1`) and the `allow`s at seq 2 (`vectors:n0`) and seq 4
   the other order scores differently. Required: `envelope_duplicate_subject` at
   the covered entry, and seq 1 MUST report `process-asserted`. (Appended at
   revision `envelope_vectors_v1.1`, after row 16.)
+- `reject_unknown_alg` — `witness.alg` set to `"none"` and the envelope
+  **re-signed with the witness's real key**, so the signature is genuine and the
+  `kid` is one the trust set carries. Required: `envelope_unknown_witness` at
+  the covered entry, and seq 1 MUST report `process-asserted`. The row
+  discriminates two verifiers a signature check alone would pass: one that
+  compares the envelope's `alg` with the trust-set row's and accepts when both
+  say `"none"`, and one that ignores `alg` and reports
+  `envelope_bad_signature` — the right verdict for the wrong reason.
+  (Appended at revision `envelope_vectors_v1.1`, after row 17.)
 
 ### Regenerating
 

@@ -185,7 +185,7 @@ jobs:
           doc = vectors.load_envelope_vectors()
           assert doc["version"] == "envelope_vectors_v1", doc["version"]
           assert doc["revision"] == "envelope_vectors_v1.1", doc["revision"]
-          assert len(doc["cases"]) == 17, len(doc["cases"])
+          assert len(doc["cases"]) == 18, len(doc["cases"])
           for case in doc["cases"]:
               signer = None
               if case["signer"] is not None:
