@@ -175,7 +175,8 @@ One JSON object holding every case:
 
 ```jsonc
 {
-  "version": "bundle_vectors_v1",
+  "version": "bundle_vectors_v1",         // compatibility contract; does not move
+  "revision": "bundle_vectors_v1.1",      // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -217,6 +218,12 @@ rejecting case declares `expect_failures`: the **minimal set** of
   change, so each case isolates one rule. Unless a case says otherwise, the
   chain was re-hashed and a fresh anchor signed over it after the change, so
   integrity is NOT what fails.
+- Cases are **appended, never inserted, changed or removed**: a case's name,
+  position and declared minimal set are stable for life. So `version` is the
+  compatibility contract and stays `bundle_vectors_v1` — an implementation that
+  scored the file before still scores it — while `revision` moves with each
+  addition, which is what a report should name (`bundle_vectors_v1.1`, twelve
+  cases). Iterate `cases`; do not assume a length.
 
 Score yourself with nothing but `pip install attenu-guard`:
 
@@ -266,7 +273,78 @@ of the human-readable `failures` list.
   names its own equivalent unpositioned integrity failure is conformant.
 - `reject_tampered_entry` — the same edit with nothing re-hashed. The stored
   hash no longer covers the entry's contents, so the chain check fails AT that
-  entry. Required: `integrity`, positioned on it.
+  entry. Required: `integrity`, positioned on it. This build additionally
+  reports `integrity(anchor)` for the same mismatch, because the anchor check
+  re-walks the chain before comparing heads; that is the one finding seen
+  twice, permitted, not required. (Found by the first independent run.)
+- `reject_widened_scope` — the `spawn` grants the child a scope its parent does
+  not hold (`{crm.read}` becomes `{crm.read, pay.transfer}` under a parent
+  holding `{crm.*, mail.send}`). Authority growing across a handoff is the one
+  thing this library exists to make impossible, and a bundle is where an
+  auditor catches it after the fact. Required: `monotonicity`, positioned on
+  the **spawn that granted too much**, with the child as its node — not on any
+  later action, because the spawn is where the authority was created.
+  (Asked for by the first two independent runs; added in revision v1.1.)
+- `reject_uncontained_allow` — an `allow` authorizes a scope outside what the
+  acting node was granted (`crm.export` on a node holding `{crm.read}`). The
+  chain root does hold `crm.*` and could have delegated it, so this is the
+  acting node over-reaching against its own recorded grant, which is why
+  containment is checked separately from monotonicity; the same bundle still
+  carries the honest deny of that scope on that node, so the ledger
+  contradicts itself in a way a reader can see. Required: `containment`,
+  positioned on the allow. (Asked for by the first two independent runs; added
+  in revision v1.1.)
+
+- `reject_increased_ttl` — the `spawn` grants a ttl of 7200 under a parent
+  holding 3600, so the child outlives the authority it was cut from. No scope
+  is added: the grant is still exactly `{crm.read}`. Required:
+  `monotonicity` on the spawn. (Added in revision v1.1.)
+- `reject_loosened_ceiling` — the `spawn` raises the child's `max_rows` to
+  250000 under a parent bounded at 100000, so the child may read more per call
+  than the node that delegated to it. No scope is added and the ttl is
+  untouched. Required: `monotonicity` on the spawn. (Added in revision v1.1.)
+
+None of the four v1.1 cases has a permitted extra: each fails exactly one
+check and reports exactly one failure.
+
+Attenuation is a lattice relation over three dimensions, not a scope list, so
+the last two cases add no scope at all. A verifier that compares scope sets
+alone accepts both and reports nothing. Two further widenings fail the same
+relation by omission rather than by growth, and a verifier should reject them
+too, though neither has a vector: a child that omits a ceiling its parent holds
+is unbounded on that dimension, and a child with no ttl under a parent that has
+one never expires. Both were accepted by attenu-guard through 0.11.0, whose
+monotonicity check was gated on a literal, non-wildcard-aware scope difference;
+the gate is gone and the relation alone now decides.
+
+### Permitted extras, and where implementations legitimately differ
+
+Two cases have drawn different extras from different implementations. Both
+differences are declared implementation choices inside the minimal-set rule,
+not defects, and neither changes what is required.
+
+On `reject_duplicate_call_id`, the required failure is `duplicate_call_id` at
+seq 4. Which further failures follow depends on how an implementation binds an
+outcome to an allow when one `call_id` names two of them. This build binds each
+outcome to the **last** allow bearing that `call_id`, so the summarizer's
+outcome at seq 6 still binds to its own allow at seq 4 and the only consequence
+is the orchestrator's now-unclaimed outcome, reported as `outcome_without_allow`
+at seq 3. Two code-independent implementations bound to the **first sighting**
+instead and reported the same three downstream consequences as each other: the
+orphan at seq 3, and a node mismatch and a params mismatch at seq 6, because
+under that rule the summarizer's outcome binds back to the orchestrator's allow
+on a different node with a different argument commitment. All of these remain
+MAY under minimal-set scoring — one, three or none, at the implementation's
+discretion, as long as `duplicate_call_id` at seq 4 is reported.
+
+On `reject_tampered_entry`, the required failure is `integrity` positioned at
+seq 3, and whether `integrity(anchor)` also appears is the stored-head versus
+recomputed-head choice: this build re-walks the chain inside its anchor check
+and so reports the anchor failure too, while an implementation that verifies
+the anchor's signature and compares its `head` against the ledger's **stored**
+head reports only the positioned failure, because in this case nothing was
+re-hashed and the stored head is untouched. Both are conformant; the
+`integrity(anchor)` extra is a MAY.
 
 ### Verifying a bundle from the file alone
 
@@ -307,6 +385,30 @@ time- or randomness-dependent, so running it twice produces identical bytes.
 The generator self-checks every case against this build's own
 `verify_bundle()` before exiting 0, and `tests/test_bundle_vectors.py`
 regenerates and re-scores the whole file on every test run.
+
+### Independent runs
+
+Runs of this file by verifiers that share no code with this repository, pinned so a reader can
+re-run them. Each carries the claim boundary its author stated, and nothing wider.
+
+- **@safal207, 2026-09-02** — a standalone, stdlib-only Python verifier (no `attenu_guard`
+  import; the fixture read as raw bytes) scored the released `bundle_vectors_v1.json` at
+  attenu-guard `v0.11.0` / attenu-guard-ts `v0.6.0`: 8 of 8 cases conformant, every required
+  `{reason, seq, node}` at its declared position, two diagnostic differences inside the
+  minimal-set rule. Proof tree, verifier and machine-readable report:
+  `safal207/ContractGraph-QA` at commit `052aa3d` (his corrected proof tree; the earlier `61dc428` carried a report not produced by the pinned verifier, which he replaced), `proofs/attenu-guard-v0.11.0-independent`.
+  Stated boundary: the released corpus only; no claim of general verifier completeness,
+  runtime correctness, production security or certification.
+- **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-02** — a Rust verifier
+  (`crates/guard-verify/src/attenu/` in `XuebinMa/agent-guard`, pinned at commit
+  `7c96469bafb609af8d071de8e71b18806546c0cd`), written from this README and the per-case
+  descriptions, by the author's account without reading either reference implementation:
+  8 of 8 cases conformant. How it was checked from this side: the vendored fixture is the
+  same git blob as ours at `v0.11.0`; the nine Rust files in the crate contain no reference
+  to `attenu_guard`, `evidence.py`, `evidence.ts`, `audit.py` or `verifyBundle`; the run was
+  not reproduced here, but the repository's `Rust Tests (Workspace)` check is green on that
+  commit and its test command covers both the fixture-pin test and the scoring test. His
+  extras on `reject_duplicate_call_id` match the previous entry's, position for position.
 
 ## Why HS256 for interop vectors carrying a published secret
 

@@ -136,8 +136,11 @@ jobs:
           python - <<'PY'
           from attenu_guard import evidence, vectors, wire
           doc = vectors.load_bundle_vectors()
+          # `version` is the compatibility contract and stays put as cases are appended;
+          # `revision` and the count move together, so both are pinned deliberately here.
           assert doc["version"] == "bundle_vectors_v1", doc["version"]
-          assert len(doc["cases"]) == 8, len(doc["cases"])
+          assert doc["revision"] == "bundle_vectors_v1.1", doc["revision"]
+          assert len(doc["cases"]) == 12, len(doc["cases"])
           for case in doc["cases"]:
               signer = wire.HS256TestSigner(bytes.fromhex(case["signer"]["secret_hex"]),
                                             kid=case["signer"]["kid"])

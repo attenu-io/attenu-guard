@@ -31,6 +31,7 @@ from typing import Any, Mapping
 from attenu_guard import canonical
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.authority import Authority
+from attenu_guard.ceilings import describe as _describe_ceiling
 from attenu_guard.reasons import Capture, BodyState
 from attenu_guard.params import ParamsHashReason
 
@@ -209,6 +210,47 @@ def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dic
             try: auth[e["node"]] = Authority.from_wire(e["granted"])
             except Exception as exc: fail.add("unreadable_granted", f"spawn {e.get('node')}: unreadable granted ({exc})", seq=e.get("seq"), node=e.get("node"))  # noqa: BLE001
     return auth, parent, fail, defined_by
+
+
+def _monotonicity_detail(child: Authority, parent: Authority) -> str:
+    """Why `child` is not ⊆ `parent`, rendered for the monotonicity failure message.
+
+    Called only once `Authority.is_narrower_than` has already returned False, and it walks the
+    dimensions in the ORDER that relation compares them — scopes, then ceilings by key, then ttl
+    — so the message names the dimension that actually failed. Every dimension the relation can
+    fail on has a branch here:
+
+      scopes    a scope the parent does not cover (wildcard-aware);
+      ceilings  a key the parent bounds and the child does not (child unbounded there, so MORE
+                powerful), or one the child bounds more loosely than the parent;
+      ttl       a child that never expires under a parent that does, or one that outlives it.
+
+    Reports the FIRST failing dimension: one message per unsound delegation, as before. The
+    final fallback can only be reached if a future dimension is added to `is_narrower_than`
+    without a branch here, and exists so that such a dimension cannot fail SILENTLY.
+    """
+    # Unchanged since 0.4.0, byte for byte. A scope failure always leaves this list non-empty:
+    # a scope literally present in the parent's set is covered by it, so anything the parent
+    # does not cover is also absent from that set.
+    if not all(parent.covers_scope(s) for s in child.scopes):
+        return f"child scopes {sorted(set(child.scopes) - set(parent.scopes))} not held by parent"
+
+    child_by_key = {c.key: c for c in child.ceilings}
+    for key, parent_ceiling in sorted(((c.key, c) for c in parent.ceilings), key=lambda kv: kv[0]):
+        child_ceiling = child_by_key.get(key)
+        if child_ceiling is None:
+            return f"ceiling {key} unbounded, parent holds {_describe_ceiling(parent_ceiling)}"
+        if not parent_ceiling.subsumes(child_ceiling):
+            return (f"ceiling {_describe_ceiling(child_ceiling)} looser than parent "
+                    f"{_describe_ceiling(parent_ceiling)}")
+
+    if parent.ttl is not None:
+        if child.ttl is None:
+            return f"ttl unbounded, parent {parent.ttl}"
+        if child.ttl > parent.ttl:
+            return f"ttl {child.ttl} > parent {parent.ttl}"
+
+    return "child not narrower than parent"
 
 
 def delegation_graph(bundle: dict) -> dict:
@@ -791,11 +833,16 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     for node, pid in parent.items():
         if pid is None or pid not in auth or node not in auth:
             continue
-        if not auth[node].is_narrower_than(auth[pid]) and set(auth[node].scopes) - set(auth[pid].scopes):
+        # 0.11.x: the subsumption relation ALONE decides. This used to be gated on a literal,
+        # non-wildcard-aware scope difference, which silently accepted a delegation that widened
+        # only ttl or a ceiling whenever the child's scopes happened to be literally a subset of
+        # the parent's — the child was more powerful and the bundle verified clean. The relation
+        # already compares every dimension; `_monotonicity_detail` names the one that failed.
+        if not auth[node].is_narrower_than(auth[pid]):
             mono = False
             spawn_e = defined_by.get(node) or {}
             log.add("monotonicity",
-                    f"monotonicity: {node} not ⊆ parent {pid} (child scopes {sorted(set(auth[node].scopes) - set(auth[pid].scopes))} not held by parent)",
+                    f"monotonicity: {node} not ⊆ parent {pid} ({_monotonicity_detail(auth[node], auth[pid])})",
                     seq=spawn_e.get("seq"), node=node)
     checks["monotonicity"] = mono and not afail
 

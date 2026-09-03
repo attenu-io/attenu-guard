@@ -57,6 +57,11 @@ from attenu_guard.reasons import BodyState, Capture  # noqa: E402
 BUNDLES_DIRNAME = "bundles"
 VECTORS_FILENAME = "bundle_vectors_v1.json"
 VECTORS_VERSION = "bundle_vectors_v1"
+# Cases are ADDED to this file, never changed or removed, so `version` is the compatibility
+# contract and stays put: an implementation that scored `bundle_vectors_v1` still scores it.
+# `revision` is the additive counter — it moves whenever a case is appended, so a reader can
+# tell which corpus they ran without diffing case lists.
+VECTORS_REVISION = "bundle_vectors_v1.1"
 
 VECTORS_DIR = Path(__file__).resolve().parent / BUNDLES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -84,6 +89,14 @@ ORPHAN_CALL_ID = "0123456789abcdef0123456789abcdef"
 # A hash shape-valid (64 lowercase hex) and different from every real commitment — the
 # substituted argument hash in reject_params_mismatch.
 SUBSTITUTED_PARAMS_HASH = "11" * 32
+
+# A scope no node in this chain holds and no wildcard in it covers (the root holds crm.* and
+# mail.send) — the scope the summarizer grants ITSELF in reject_widened_scope.
+UNHELD_SCOPE = "pay.transfer"
+# A scope the ROOT holds (covered by its crm.*) but never delegated to the summarizer, whose
+# grant is exactly {crm.read} — the scope forged onto the summarizer's allow in
+# reject_uncontained_allow, and the one its honest deny at seq 5 refuses.
+UNDELEGATED_SCOPE = "crm.export"
 
 
 def _signer() -> wire.HS256TestSigner:
@@ -344,12 +357,96 @@ def gen_cases() -> list:
         _mutate(base, _restate_duration, rehash=False, reanchor=False),
         expect="reject", expect_failures=[_fail("integrity", 3, n0)]))
 
+    # ---- delegation containment (added in revision v1.1) -----------------
+    # The first two independent runs of this file both reported the same gap: every rejecting
+    # case above exercises integrity or execution binding, and none exercises the two checks
+    # the library exists for — that a delegation narrows, and that an authorization stayed
+    # inside what the acting node held. These two close that gap, one rule each.
+
+    def _widen_granted_scopes(es):
+        es[1]["granted"]["scopes"] = sorted(["crm.read", UNHELD_SCOPE])
+
+    cases.append(_case(
+        "reject_widened_scope",
+        "The delegation at seq 1 grants the summarizer a scope its parent does not hold: "
+        f"{{crm.read}} becomes {{crm.read, {UNHELD_SCOPE}}}, and the orchestrator's authority is "
+        "{crm.*, mail.send}, which covers neither literally nor by wildcard. This is the "
+        "violation the whole library exists to make impossible — authority growing across a "
+        "handoff — and a bundle is where an auditor catches it after the fact, with no engine "
+        "in the loop. Nothing else is touched: the chain was re-hashed and a fresh anchor "
+        "signed over it, both tool calls still bind to their outcomes, and the allow at seq 4 "
+        "is still crm.read, so containment holds. The failure is positioned on the SPAWN that "
+        "granted too much (seq 1), not on any later action, because the spawn is where the "
+        "authority was created. Its node is the child, the node whose grant is unsound.",
+        _mutate(base, _widen_granted_scopes),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    def _forge_allow_scope(es):
+        es[4]["scope"] = UNDELEGATED_SCOPE
+
+    cases.append(_case(
+        "reject_uncontained_allow",
+        f"The summarizer's allow at seq 4 authorizes {UNDELEGATED_SCOPE}, which is outside the "
+        "{crm.read} it was granted at seq 1. Note what this is NOT: the orchestrator holds "
+        f"crm.* and could legitimately have delegated {UNDELEGATED_SCOPE}, so the chain root is "
+        "not over-reaching — the acting node is, against its own recorded grant, which is the "
+        "point of checking containment separately from monotonicity. The same bundle still "
+        f"carries the honest deny of {UNDELEGATED_SCOPE} on the same node at seq 5, so the "
+        "ledger contradicts itself in a way a reader can see. Only the allow's `scope` is "
+        "changed: its call_id, capture, adapter and authorized_params_hash are untouched, the "
+        "outcome at seq 6 still binds to it with matching arguments, the chain was re-hashed "
+        "and re-anchored, and the delegation at seq 1 is still strictly narrower, so "
+        "monotonicity holds. The failure is positioned on the allow itself.",
+        _mutate(base, _forge_allow_scope),
+        expect="reject", expect_failures=[_fail("containment", 4, n1)]))
+
+    # Authority is a lattice, not a scope list: a delegation can widen without naming a single
+    # new scope, by living longer or by spending more. These two cases pin the other two
+    # dimensions `Authority.is_narrower_than` compares. Both were accepted by 0.11.0, whose
+    # monotonicity check reported nothing unless the LITERAL scope difference was non-empty.
+
+    def _widen_granted_ttl(es):
+        es[1]["granted"]["ttl"] = 7200
+
+    cases.append(_case(
+        "reject_increased_ttl",
+        "The delegation at seq 1 grants the summarizer a ttl of 7200 seconds under a parent "
+        "holding 3600: the child outlives the authority it was cut from, so there is a window "
+        "in which it still acts and its parent no longer can. Not one scope is added — the "
+        "grant is still exactly {crm.read} under a parent holding {crm.*, mail.send} — which is "
+        "the point of this case. Attenuation is a lattice relation over scopes, ceilings AND "
+        "ttl, so a verifier that compares scope lists alone accepts this bundle and reports "
+        "nothing. Chain re-hashed and re-anchored, containment and execution binding untouched. "
+        "Required: monotonicity on the spawn (seq 1), node the child. This build names the "
+        "dimension in its message ('ttl 7200 > parent 3600'); an implementation that names its "
+        "own equivalent is conformant, since only reason and position are scored.",
+        _mutate(base, _widen_granted_ttl),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
+    def _loosen_granted_ceiling(es):
+        es[1]["granted"]["constraints"] = [{"key": "max_rows", "max": 250_000}]
+
+    cases.append(_case(
+        "reject_loosened_ceiling",
+        "The delegation at seq 1 raises the summarizer's max_rows ceiling to 250000 under a "
+        "parent bounded at 100000: the child may read more rows per call than the node that "
+        "delegated to it. Again no scope is added and the ttl is untouched, so this is the "
+        "ceiling dimension in isolation. A ceiling is not decoration — it is the difference "
+        "between a summarizer that reads a page and one that exfiltrates a table — and a bound "
+        "that a delegation can raise bounds nothing. Chain re-hashed and re-anchored. Required: "
+        "monotonicity on the spawn (seq 1), node the child. The same rule fails the other way "
+        "too: a child that simply OMITS a ceiling its parent holds is unbounded on that "
+        "dimension and so is not narrower, which the verifier reports the same way.",
+        _mutate(base, _loosen_granted_ceiling),
+        expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
+
     return cases
 
 
 def _document(cases: list) -> dict:
     return {
         "version": VECTORS_VERSION,
+        "revision": VECTORS_REVISION,
         "description": (
             "Bundle-level offline-verification vectors for attenu-guard evidence bundles "
             "(schema_version=2, with execution binding). Each case is a complete bundle plus the "
@@ -359,7 +456,8 @@ def _document(cases: list) -> dict:
             "chain-level); a conformant verifier MAY report additional failures — one broken "
             "record often makes a second check unsatisfiable — but never fewer, and never at a "
             "different position. Every rejecting bundle is derived from `valid_bundle_v2` by "
-            "exactly one change, so each case isolates one rule. Verify an anchor as "
+            "exactly one change, so each case isolates one rule. `version` is the compatibility "
+            "contract and does not move when cases are appended; `revision` does. Verify an anchor as "
             "hex(HMAC-SHA256(secret, JCS(anchor without kid/sig/verified))) and each entry as "
             "hex(SHA-256(prev_hash_ascii || JCS(entry without hash))); see "
             "tests/vectors/README.md."),
