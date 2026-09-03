@@ -324,6 +324,16 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   `safal207/ContractGraph-QA` at commit `61dc428`, `proofs/attenu-guard-v0.11.0-independent`.
   Stated boundary: the released corpus only; no claim of general verifier completeness,
   runtime correctness, production security or certification.
+- **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-02** — a Rust verifier
+  (`crates/guard-verify/src/attenu/` in `XuebinMa/agent-guard`, pinned at commit
+  `7c96469bafb609af8d071de8e71b18806546c0cd`), written from this README and the per-case
+  descriptions, by the author's account without reading either reference implementation:
+  8 of 8 cases conformant. How it was checked from this side: the vendored fixture is the
+  same git blob as ours at `v0.11.0`; the nine Rust files in the crate contain no reference
+  to `attenu_guard`, `evidence.py`, `evidence.ts`, `audit.py` or `verifyBundle`; the run was
+  not reproduced here, but the repository's `Rust Tests (Workspace)` check is green on that
+  commit and its test command covers both the fixture-pin test and the scoring test. His
+  extras on `reject_duplicate_call_id` match the previous entry's, position for position.
 
 ## Why HS256 for interop vectors carrying a published secret
 
