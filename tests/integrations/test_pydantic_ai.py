@@ -566,8 +566,8 @@ def test_delegation_guard_declares_innermost_ordering():
 def test_delegation_guard_rejects_dual_instrumentation_with_guarded_toolset_at_construction():
     """Round 2 (finding 5): DelegationGuard + GuardedToolset on the SAME agent is a real double-
     check() risk -- for_agent() walks agent.toolsets and rejects it at AGENT CONSTRUCTION time,
-    not per-call, when GuardedToolset is directly in toolsets=[...] or nested inside another
-    WrapperToolset."""
+    not per-call. This is the DIRECT case, GuardedToolset itself in toolsets=[...]; the nested
+    shapes it can hide in have their own test, below, for both agent-wide authorizers."""
     toolset = FunctionToolset()
     guarded = dg_pai.GuardedToolset(toolset, policies={})
     guard_cap = dg_pai.DelegationGuard(policies={})
@@ -1245,37 +1245,55 @@ def test_toolset_capability_over_a_hand_built_guarded_toolset_is_refused():
         _plain_agent([dg_pai.GuardedToolsetCapability(policies={})], toolsets=[guarded])
 
 
-@pytest.mark.parametrize(
-    "guard",
-    [dg_pai.GuardedToolsetCapability, dg_pai.DelegationGuard],
-    ids=["toolset-capability", "hook"],
-)
-def test_a_guarded_toolset_nested_in_a_combined_toolset_is_still_refused(guard):
-    """A toolset tree nests two ways. `WrapperToolset` chains through `.wrapped`, which both
-    `for_agent` walks followed; `CombinedToolset` BRANCHES through `.toolsets`, which they did
-    not. So a hand-built `GuardedToolset` one level inside a `CombinedToolset` in `toolsets=[...]`
-    slipped past both agent-wide authorizers and every call was authorized twice -- measured
-    before the fix as two allow entries and two outcome entries on the ledger for one tool body,
-    on both classes."""
+def _hidden_guarded_toolset(shape: str):
+    """A hand-built `GuardedToolset` buried in one of the shapes a toolset tree actually takes.
+
+    `wrapper` exercises the `.wrapped` descent, `combined` the `.toolsets` branch, and
+    `wrapper-over-combined` both in one tree -- a walk that follows only one of the two misses
+    at least one of these."""
     inner = FunctionToolset()
 
     @inner.tool_plain
     def crm_query(rows: int) -> str:  # pragma: no cover - must never be reached
         return f"{rows} rows"
 
-    nested = CombinedToolset([dg_pai.GuardedToolset(inner, policies=_QUERY_POLICIES)])
+    guarded = dg_pai.GuardedToolset(inner, policies=_QUERY_POLICIES)
+    if shape == "wrapper":
+        return _MarkedToolset(guarded, label="outer")
+    if shape == "combined":
+        return CombinedToolset([guarded])
+    return _MarkedToolset(CombinedToolset([guarded]), label="outer")
 
+
+@pytest.mark.parametrize("shape", ["wrapper", "combined", "wrapper-over-combined"])
+@pytest.mark.parametrize(
+    "guard",
+    [dg_pai.GuardedToolsetCapability, dg_pai.DelegationGuard],
+    ids=["toolset-capability", "hook"],
+)
+def test_a_guarded_toolset_hidden_in_the_toolset_tree_is_still_refused(guard, shape):
+    """A toolset tree nests two ways and a `GuardedToolset` can hide behind either. Following
+    only `.wrapped` missed the `CombinedToolset` branch, which is how a hand-built guard reached
+    an agent that already had an agent-wide authorizer -- measured before the fix as two allow
+    entries and two outcome entries on the ledger for one tool body, on both classes. Following
+    only `.toolsets` would miss the `WrapperToolset` chain the same way. Both descents, both
+    classes, and a tree that needs both at once."""
     with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
-        _plain_agent([guard(policies=_QUERY_POLICIES)], toolsets=[nested])
+        _plain_agent([guard(policies=_QUERY_POLICIES)], toolsets=[_hidden_guarded_toolset(shape)])
 
 
-def test_a_combined_toolset_with_no_guarded_toolset_does_not_trip_the_check():
-    """The negative case for the deeper walk: branching through `.toolsets` must not start
-    reporting ordinary nested toolsets."""
-    _plain_agent(
-        [dg_pai.GuardedToolsetCapability(policies={})],
-        toolsets=[CombinedToolset([FunctionToolset(), FunctionToolset()])],
-    )
+@pytest.mark.parametrize("shape", ["wrapper", "combined", "wrapper-over-combined"])
+def test_an_unguarded_toolset_tree_of_the_same_shape_does_not_trip_the_check(shape):
+    """The negative case for both descents: walking deeper must not start reporting ordinary
+    nested toolsets. Same three shapes, with no `GuardedToolset` anywhere in them."""
+    plain = FunctionToolset()
+    trees = {
+        "wrapper": lambda: _MarkedToolset(plain, label="outer"),
+        "combined": lambda: CombinedToolset([plain, FunctionToolset()]),
+        "wrapper-over-combined": lambda: _MarkedToolset(CombinedToolset([plain]), label="outer"),
+    }
+
+    _plain_agent([dg_pai.GuardedToolsetCapability(policies={})], toolsets=[trees[shape]()])
 
 
 @pytest.mark.parametrize("entry_point", ["capability", "hand-built"])
