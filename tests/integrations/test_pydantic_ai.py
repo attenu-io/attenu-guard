@@ -14,9 +14,12 @@ The test drives the SHIPPED example (`examples/integrations/pydantic_ai/demo.py`
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib.util
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,7 +31,7 @@ from pydantic_ai.capabilities.combined import CombinedCapability  # noqa: E402
 from pydantic_ai.exceptions import ModelRetry  # noqa: E402
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
-from pydantic_ai.toolsets import FunctionToolset  # noqa: E402
+from pydantic_ai.toolsets import FunctionToolset, WrapperToolset  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
     Authority,
@@ -923,3 +926,362 @@ def test_snapshot_freeze_never_aliases_a_custom_deepcopy_that_returns_itself():
     assert snapshot["x"] is not live["x"], "the snapshot aliased the live mutable container"
     live["x"].append(2)
     assert snapshot["x"] == [1], "mutating the live container changed the snapshot"
+
+
+# ==========================================================================
+# The TOOLSET layer: `GuardedToolsetCapability`.
+#
+# pydantic-ai runs the whole hook chain ABOVE the whole toolset chain
+# (pydantic/pydantic-ai#8007, comment 5546076540), so `DelegationGuard`'s
+# `handler` is the composed agent toolset and any contributed wrapper toolset
+# runs INSIDE it. These tests pin the difference: with the toolset-layer
+# capability, nothing sits between the guard and the tool body.
+# ==========================================================================
+
+@dataclass
+class _MarkedToolset(WrapperToolset[Any]):
+    """A wrapper toolset that overrides `call_tool` -- the shape that lands between a hook-layer
+    guard and the tool body. It records itself, so a trace shows exactly where it ran."""
+
+    label: str = "?"
+
+    async def call_tool(self, name, tool_args, ctx, tool):
+        _TRACE.append(f"{self.label}:enter")
+        try:
+            return await super().call_tool(name, tool_args, ctx, tool)
+        finally:
+            _TRACE.append(f"{self.label}:exit")
+
+
+class _MarkedToolsetCapability(AbstractCapability):
+    """A third-party-shaped capability that contributes `_MarkedToolset`, optionally claiming the
+    `innermost` tier -- the collision `GuardedToolsetCapability`'s "THE TIER CAVEAT" describes."""
+
+    def __init__(self, label: str, position: str | None = None):
+        self.label = label
+        self.position = position
+
+    def get_ordering(self):
+        return CapabilityOrdering(position=self.position) if self.position else None
+
+    def get_wrapper_toolset(self, toolset):
+        return _MarkedToolset(toolset, label=self.label)
+
+
+@dataclass
+class _TracedGuardedToolset(dg_pai.GuardedToolset):
+    async def call_tool(self, name, tool_args, ctx, tool):
+        _TRACE.append("guard-ts:enter")
+        try:
+            return await super().call_tool(name, tool_args, ctx, tool)
+        finally:
+            _TRACE.append("guard-ts:exit")
+
+
+class _TracingGuardedToolsetCapability(dg_pai.GuardedToolsetCapability):
+    """The shipped capability with a trace marker on either side of the real check. Everything
+    else -- `get_ordering()`, `for_agent()` -- is inherited."""
+
+    def get_wrapper_toolset(self, toolset):
+        return _TracedGuardedToolset(
+            toolset,
+            policies=self.policies,
+            get_guard=self.get_guard,
+            on_unmapped=self.on_unmapped,
+            on_denial=self.on_denial,
+        )
+
+
+# Nothing at all between "guard-ts:enter" and "raw-body": the guard's `self.wrapped.call_tool`
+# IS the call that reaches the tool. Both marked wrappers run outside it.
+_TOOLSET_INNERMOST_TRACE = [
+    "A:enter", "B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit", "A:exit",
+]
+
+
+@pytest.mark.parametrize("order", ["guard-first", "guard-middle", "guard-last"])
+def test_toolset_capability_reaches_the_raw_body_in_every_list_order(order):
+    """(a) Two other capabilities each contribute a `call_tool`-overriding wrapper toolset.
+    `position="innermost"` sorts this capability LAST in the capability chain, and
+    `CombinedCapability.get_wrapper_toolset` applies the wrappers over `reversed(...)`, so
+    chain-last is toolset-INNERMOST: both marked wrappers end up outside the guard, in every
+    list order."""
+    _TRACE.clear()
+    guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
+    a, b = _MarkedToolsetCapability("A"), _MarkedToolsetCapability("B")
+    capabilities = {
+        "guard-first": [guard_cap, a, b],
+        "guard-middle": [a, guard_cap, b],
+        "guard-last": [a, b, guard_cap],
+    }[order]
+
+    root = _run_traced(_ordering_agent(capabilities))
+
+    assert _TRACE == _TOOLSET_INNERMOST_TRACE
+    _assert_outcome_is_the_raw_body(root)
+
+
+def test_the_hook_layer_cannot_reach_the_raw_body_past_a_wrapper_toolset():
+    """The limit `GuardedToolsetCapability` exists to remove, pinned as behaviour rather than
+    prose: `DelegationGuard` is sorted last among CAPABILITIES and still runs outside both
+    contributed wrapper toolsets, because the hook chain is above the toolset chain. The call is
+    authorized before anything runs -- enforcement is unaffected -- but the outcome recorded
+    around `handler` is A's, not the tool body's."""
+    _TRACE.clear()
+    guard_cap = _TracingDelegationGuard(policies=_QUERY_POLICIES)
+    capabilities = [guard_cap, _MarkedToolsetCapability("A"), _MarkedToolsetCapability("B")]
+
+    _run_traced(_ordering_agent(capabilities))
+
+    assert _TRACE == [
+        "guard:enter", "A:enter", "B:enter", "raw-body", "B:exit", "A:exit", "guard:exit",
+    ]
+    assert _TRACE.index("guard:enter") < _TRACE.index("A:enter")
+
+
+def test_toolset_capability_denied_call_never_runs_the_body_and_lands_on_the_ledger():
+    """(b) A denial in the toolset layer raises before `self.wrapped.call_tool`, so the body
+    never runs; the deny entry is on the chain's ledger and no outcome is bound to it."""
+    _TRACE.clear()
+    agent = _ordering_agent([
+        dg_pai.GuardedToolsetCapability(
+            policies={"crm_query": dg_pai.ToolPolicy("crm.export", context=lambda a: {"egress": "any"})}
+        )
+    ])
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    child = root.delegate("summarizer", demo.SUMMARIZER_AUTHORITY, task="summarize")
+
+    with pytest.raises(AuthorityDenied):
+        _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=child, app=None)))
+
+    assert "raw-body" not in _TRACE, "THE TOOL BODY RAN — enforcement failed"
+    entries = root.audit_log().entries
+    assert any(e["event"] == "deny" and e.get("tool") == "crm_query" for e in entries)
+    assert [e for e in entries if e["event"] == "outcome"] == []
+
+
+def test_toolset_capability_v2_allowed_call_records_a_returned_outcome():
+    """(c) The v2 wrapper capture, through the capability rather than a hand-built
+    `GuardedToolset`: one allow, one RETURNED outcome bound to it, and the ledger names the
+    toolset hook point rather than the hook-layer one."""
+    _TRACE.clear()
+    agent = _ordering_agent([dg_pai.GuardedToolsetCapability(policies=_QUERY_POLICIES)])
+
+    root = _run_traced(agent)
+
+    assert "raw-body" in _TRACE
+    entries = root.audit_log().entries
+    allow = next(e for e in entries if e["event"] == "allow" and e.get("tool") == "crm_query")
+    outcome = next(e for e in entries if e["event"] == "outcome" and e.get("call_id") == allow["call_id"])
+    assert allow["capture"] == Capture.WRAPPER_ASYNC
+    assert allow["adapter"]["hook_path"].endswith("GuardedToolset.call_tool")
+    assert outcome["body_state"] == BodyState.RETURNED
+
+
+def test_a_per_run_injected_wrapper_toolset_lands_outside_the_guard():
+    """(d), first half. `agent.run(..., capabilities=[...])` composes a SECOND
+    `CombinedCapability` and sorts it the same way. An injected capability with no ordering of
+    its own stays ahead of this one in the chain, so its wrapper toolset is applied later --
+    outside the guard. The guarantee survives the injection."""
+    _TRACE.clear()
+    agent = _ordering_agent([_TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)])
+
+    root = _run_traced(agent, capabilities=[_MarkedToolsetCapability("B")])
+
+    assert _TRACE == ["B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit"]
+    _assert_outcome_is_the_raw_body(root)
+
+
+def test_a_per_run_injected_innermost_wrapper_toolset_lands_INSIDE_the_guard():
+    """(d), second half, and the honest half: `position="innermost"` is a TIER whose only
+    tiebreak is list order, and a per-run injection is composed AFTER the agent's own
+    capabilities. So an injected capability that also claims `innermost` and contributes a
+    `call_tool`-overriding wrapper toolset takes the innermost slot, and the guard records ITS
+    execution rather than the tool body's. This is the documented tier caveat, measured; on a
+    pydantic-ai carrying `exclusive_execution` the same list is refused instead."""
+    _TRACE.clear()
+    agent = _ordering_agent([_TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)])
+
+    _run_traced(agent, capabilities=[_MarkedToolsetCapability("B", position="innermost")])
+
+    assert _TRACE == ["guard-ts:enter", "B:enter", "raw-body", "B:exit", "guard-ts:exit"]
+
+
+@pytest.mark.parametrize("order", ["guard-first", "guard-last"])
+def test_the_tier_caveat_is_decided_by_list_position(order):
+    """The registered-capability form of the same caveat, both directions. Listed BEFORE another
+    `innermost` toolset capability, the guard loses the innermost slot; listed AFTER it, the
+    guard keeps it. Until `exclusive_execution` ships, this capability goes LAST."""
+    _TRACE.clear()
+    guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
+    other = _MarkedToolsetCapability("B", position="innermost")
+    capabilities = [guard_cap, other] if order == "guard-first" else [other, guard_cap]
+
+    _run_traced(_ordering_agent(capabilities))
+
+    if order == "guard-first":
+        assert _TRACE == ["guard-ts:enter", "B:enter", "raw-body", "B:exit", "guard-ts:exit"]
+    else:
+        assert _TRACE == ["B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit"]
+
+
+def test_tool_search_discovery_is_seen_by_the_hook_layer_and_not_the_toolset_layer():
+    """`ToolSearch` is auto-injected and declares `position="outermost"`, so `ToolSearchToolset`
+    is outside every other wrapper; it serves the built-in `search_tools` call itself and never
+    delegates it inward. The toolset-layer guard therefore never sees `search_tools` and a
+    fail-closed `on_unmapped="deny"` does not trip on it. The hook-layer guard does see it, and
+    refuses it as unmapped -- which is why a `DelegationGuard` agent with deferred tools must
+    give `search_tools` a policy."""
+    from pydantic_ai import Tool
+
+    def deferred_tool(rows: int) -> str:  # pragma: no cover - never called
+        return f"{rows} rows"
+
+    def search_script(messages, info):
+        if _step(messages) == 0:
+            return ModelResponse(parts=[ToolCallPart("search_tools", {"queries": ["deferred"]})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    def build(capability):
+        return Agent(
+            FunctionModel(search_script),
+            deps_type=dg_pai.GuardedDeps,
+            tools=[Tool(deferred_tool, defer_loading=True)],
+            capabilities=[capability],
+        )
+
+    def go(capability):
+        root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+        _run(build(capability).run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    go(dg_pai.GuardedToolsetCapability(policies={}))  # not seen: no unmapped refusal
+
+    with pytest.raises(dg_pai.UnmappedToolError, match="search_tools"):
+        go(dg_pai.DelegationGuard(policies={}))
+
+
+# --------------------------------------------------------------------------
+# (e) Two authorizers on one agent is always a double `guard.check()`.
+# --------------------------------------------------------------------------
+
+def _plain_agent(capabilities, toolsets=None):
+    return Agent(
+        FunctionModel(lambda m, i: ModelResponse(parts=[TextPart("done")])),
+        deps_type=dg_pai.GuardedDeps,
+        toolsets=toolsets if toolsets is not None else [FunctionToolset()],
+        capabilities=capabilities,
+    )
+
+
+@pytest.mark.parametrize("order", ["toolset-first", "hook-first"])
+def test_toolset_capability_and_delegation_guard_together_are_refused(order):
+    """A capability-contributed `GuardedToolset` never appears in `agent.toolsets`, so the pair
+    is only visible in the capability chain -- both classes walk it, and whichever `for_agent`
+    runs first refuses with a message naming both."""
+    caps = [dg_pai.GuardedToolsetCapability(policies={}), dg_pai.DelegationGuard(policies={})]
+    if order == "hook-first":
+        caps.reverse()
+
+    with pytest.raises(dg_pai.UserError) as excinfo:
+        _plain_agent(caps)
+
+    message = str(excinfo.value)
+    assert "both registered on this agent" in message
+    assert "GuardedToolsetCapability" in message and "DelegationGuard" in message
+
+
+def test_two_toolset_capabilities_on_one_agent_are_refused():
+    with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
+        _plain_agent([
+            dg_pai.GuardedToolsetCapability(policies={}),
+            dg_pai.GuardedToolsetCapability(policies={}),
+        ])
+
+
+def test_toolset_capability_over_a_hand_built_guarded_toolset_is_refused():
+    """The capability would wrap a toolset that already guards itself: two checks, one call."""
+    guarded = dg_pai.GuardedToolset(FunctionToolset(), policies={})
+
+    with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
+        _plain_agent([dg_pai.GuardedToolsetCapability(policies={})], toolsets=[guarded])
+
+
+def test_the_toolset_capability_alone_constructs_and_runs():
+    """The negative case for all three refusals above: on its own, with an ordinary toolset, it
+    must build without complaint."""
+    _plain_agent([dg_pai.GuardedToolsetCapability(policies={})])
+
+
+# --------------------------------------------------------------------------
+# (f) `exclusive_execution` is feature-detected, not assumed.
+# --------------------------------------------------------------------------
+
+@dataclasses.dataclass
+class _OrderingWithoutFlag:
+    """`CapabilityOrdering` as every RELEASED pydantic-ai has it -- checked against 2.31.1,
+    2.37.0 and 2.39.0. Passing `exclusive_execution` to this is a TypeError."""
+
+    position: Any = None
+    wraps: Any = ()
+    wrapped_by: Any = ()
+    requires: Any = ()
+
+
+@dataclasses.dataclass
+class _OrderingWithFlag(_OrderingWithoutFlag):
+    """`CapabilityOrdering` as pydantic/pydantic-ai#8067 has it (probed at head 9f5863f)."""
+
+    exclusive_execution: bool = False
+
+
+def test_get_ordering_omits_exclusive_execution_when_the_field_does_not_exist(monkeypatch):
+    monkeypatch.setattr(dg_pai, "CapabilityOrdering", _OrderingWithoutFlag)
+
+    ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
+
+    assert isinstance(ordering, _OrderingWithoutFlag)
+    assert ordering.position == "innermost"
+    assert not hasattr(ordering, "exclusive_execution")
+
+
+def test_get_ordering_sets_exclusive_execution_when_the_field_exists(monkeypatch):
+    monkeypatch.setattr(dg_pai, "CapabilityOrdering", _OrderingWithFlag)
+
+    ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
+
+    assert isinstance(ordering, _OrderingWithFlag)
+    assert ordering.position == "innermost"
+    assert ordering.exclusive_execution is True
+
+
+def test_get_ordering_against_the_installed_pydantic_ai_is_constructible():
+    """Whatever is installed, `position` is "innermost" and the object builds -- the detection
+    must never hand `CapabilityOrdering` a keyword it does not have."""
+    ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
+
+    assert isinstance(ordering, CapabilityOrdering)
+    assert ordering.position == "innermost"
+    assert getattr(ordering, "exclusive_execution", False) is dg_pai._ordering_supports(
+        "exclusive_execution"
+    )
+
+
+@pytest.mark.parametrize(
+    "guard", [dg_pai.GuardedToolsetCapability, dg_pai.DelegationGuard], ids=["toolset", "hook"]
+)
+def test_the_shipped_example_denies_the_export_under_either_hook_point(guard):
+    """The two capabilities differ in WHERE the check sits, not in what it decides. The shipped
+    scenario is run through both: the poisoned export is denied before its body either way."""
+    ops = demo.Ops()
+    root, orchestrator, _ = demo.build_scenario(
+        ops, summarizer_script=poisoned_summarizer_script, guard=guard
+    )
+
+    with pytest.raises(AuthorityDenied):
+        _run(orchestrator.run("Summarise Q3", deps=dg_pai.GuardedDeps(guard=root, app=ops)))
+
+    assert ops.exported_to is None, "THE TOOL BODY RAN — enforcement failed"
+    assert ops.rows_returned == 4200
+    assert any(
+        e["event"] == "deny" and e.get("tool") == "crm_export" for e in root.audit_log().entries
+    )

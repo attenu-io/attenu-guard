@@ -27,7 +27,12 @@ from attenu_guard import (
     AuditLog, Authority, AuthorityDenied, AuthorityError, EgressRank, Guard, RowLimit,
 )
 
-from attenu_guard.adapters.pydantic_ai import UNGUARDED, DelegationGuard, GuardedDeps, ToolPolicy
+from attenu_guard.adapters.pydantic_ai import (
+    UNGUARDED,
+    GuardedDeps,
+    GuardedToolsetCapability,
+    ToolPolicy,
+)
 
 # ==========================================================================
 # 1. The authorities. This is the security decision, written once, in code.
@@ -77,12 +82,19 @@ class Ops:
 # 4. The agents
 # ==========================================================================
 
-def build_scenario(ops: Ops, *, summarizer_script, on_denial: str = "raise"):
+def build_scenario(ops: Ops, *, summarizer_script, on_denial: str = "raise",
+                   guard=GuardedToolsetCapability):
     """Return `(root_guard, orchestrator_agent, summarizer_agent)`, wired offline.
 
     The summarizer is returned too so a caller can re-run it directly with a
     child `Guard` it already holds — which is how cascade revocation is observed:
     running the orchestrator again would simply mint a fresh (unrevoked) child.
+
+    `guard` selects the tool-invocation hook point. The default,
+    `GuardedToolsetCapability`, authorizes from inside the toolset chain, closest to the
+    tool body. Pass `DelegationGuard` for the hook-layer capability, which also covers the
+    built-in `search_tools` discovery call but sits outside every wrapper toolset an
+    agent's other capabilities contribute. Both deny the export below, identically.
     """
 
     # ---- the sub-agent, and its tools -----------------------------------
@@ -90,7 +102,7 @@ def build_scenario(ops: Ops, *, summarizer_script, on_denial: str = "raise"):
         FunctionModel(summarizer_script),
         deps_type=GuardedDeps,
         instructions="Summarise the CRM pipeline.",
-        capabilities=[DelegationGuard(SUMMARIZER_POLICIES, on_denial=on_denial)],
+        capabilities=[guard(SUMMARIZER_POLICIES, on_denial=on_denial)],
     )
 
     @summarizer.tool
@@ -113,12 +125,12 @@ def build_scenario(ops: Ops, *, summarizer_script, on_denial: str = "raise"):
         FunctionModel(_orchestrator_script),
         deps_type=GuardedDeps,
         instructions="Delegate summarising work, then report.",
-        capabilities=[DelegationGuard(ORCHESTRATOR_POLICIES, on_denial=on_denial)],
+        capabilities=[guard(ORCHESTRATOR_POLICIES, on_denial=on_denial)],
     )
 
     @orchestrator.tool
     async def summarize_pipeline(ctx: RunContext[GuardedDeps], query: str) -> str:
-        """HOOK POINT 1: mint the child's attenuated Guard, then hand off."""
+        """DELEGATION: mint the child's attenuated Guard, then hand off."""
         child = ctx.deps.delegate("summarizer", SUMMARIZER_AUTHORITY, task=f"summarize: {query}")
         ctx.deps.app.delegated["summarizer"] = child.guard
         result = await summarizer.run(query, deps=child, usage=ctx.usage)

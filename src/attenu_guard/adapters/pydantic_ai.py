@@ -14,7 +14,15 @@ HOOK POINTS USED
    child's attenuated `Guard` and passes it down as the child run's `deps`.
    `RunContext.deps` (`pydantic_ai/_run_context.py:64`) is the carrier.
 
-2. Tool invocation — `DelegationGuard.wrap_tool_execute(...)`, a subclass of
+2. Tool invocation, TOOLSET layer (preferred) — `GuardedToolsetCapability`, a subclass of
+   `pydantic_ai.capabilities.AbstractCapability` that overrides NO execution hook and instead
+   contributes ONE `GuardedToolset` through `get_wrapper_toolset`. Pydantic AI runs the whole
+   hook chain ABOVE the whole toolset chain, so this is the only layer in which a check can be
+   innermost -- closest to the tool body, with nothing user-supplied in between. One
+   registration covers function tools, every `Toolset` on the agent, and MCP servers, exactly
+   like the hook capability below. This is the shape to reach for.
+
+3. Tool invocation, HOOK layer — `DelegationGuard.wrap_tool_execute(...)`, a subclass of
    `pydantic_ai.capabilities.AbstractCapability`
    (`pydantic_ai/capabilities/abstract.py:209`), registered with
    `Agent(capabilities=[...])`. Since 0.10.0 this is the ONLY hook `DelegationGuard`
@@ -27,24 +35,29 @@ HOOK POINTS USED
    `pydantic_ai/tool_manager.py:464`, where `do_execute` is the only path to
    `toolset.call_tool` (`pydantic_ai/tool_manager.py:1009`). Raising from
    `wrap_tool_execute` (or simply never calling `handler`) therefore provably
-   prevents the tool body from running. `get_ordering()` declares
-   `position="innermost", wrapped_by=[AbstractCapability]`, and that `wrapped_by`
-   edge names every sibling at once, so the sorter settles this capability LAST in
-   the chain in every list order -- `handler` is the raw tool body, not another
-   capability's wrapping (the class docstring's "ORDERING" has the mechanism, the
-   version floor and the one case it cannot cover). This is agent-wide: it covers
-   function tools, `Toolset`s, and MCP servers alike, with one registration.
+   prevents the tool body from running: ENFORCEMENT is exact here. `get_ordering()`
+   declares `position="innermost", wrapped_by=[AbstractCapability]`, and that
+   `wrapped_by` edge names every sibling at once, so the sorter settles this
+   capability LAST in the chain in every list order -- no other CAPABILITY's
+   `wrap_tool_execute` can sit inside it. What that cannot reach is the TOOLSET
+   chain, which pydantic-ai runs entirely below the hook chain: `handler` is the
+   composed agent toolset, so a wrapper toolset contributed by any capability sits
+   between this hook and the tool body, and the OUTCOME recorded here is that
+   wrapper's rather than the body's (the class docstring's "THE LIMIT OF THE HOOK
+   LAYER"). This is agent-wide: it covers function tools, `Toolset`s, and MCP
+   servers alike, with one registration.
 
-   `GuardedToolset` is the alternative, narrower hook: a
+   `GuardedToolset` is the toolset-layer primitive: a
    `pydantic_ai.toolsets.WrapperToolset` whose `call_tool` authorizes before
    delegating to `self.wrapped.call_tool` (`pydantic_ai/toolsets/wrapper.py:67`).
-   Use it to guard one specific (e.g. third-party or MCP) toolset rather than
-   every tool the agent can reach.
+   Construct one yourself to guard one specific (e.g. third-party or MCP) toolset
+   rather than every tool the agent can reach; `GuardedToolsetCapability` is the
+   same object placed over the agent's whole composed toolset.
 
 USAGE
 -----
 Give each agent a policy map from tool name to the authority that tool consumes,
-register `DelegationGuard` as a capability, and run the agent with `GuardedDeps`
+register `GuardedToolsetCapability` as a capability, and run the agent with `GuardedDeps`
 carrying its `Guard`. Inside a delegating tool, call `ctx.deps.delegate(...)` to
 mint the sub-agent's narrower `Guard` and pass the result as the sub-run's
 `deps`. Every tool call is then checked against *that* agent's authority before
@@ -52,7 +65,8 @@ its body runs, and every allow/deny lands in the chain's hash-chained audit log.
 
     POLICIES = {"crm_query": ToolPolicy("crm.read", context=lambda a: {"rows": a["rows"]}),
                 "crm_export": ToolPolicy("crm.export", context=lambda a: {"egress": "any"})}
-    agent = Agent(model, deps_type=GuardedDeps, capabilities=[DelegationGuard(POLICIES)])
+    agent = Agent(model, deps_type=GuardedDeps,
+                  capabilities=[GuardedToolsetCapability(POLICIES)])
     await agent.run(prompt, deps=GuardedDeps(guard=child_guard, app=my_deps))
 
 This module is deliberately dependency-light: it imports `pydantic_ai` and
@@ -71,10 +85,12 @@ same way `adapters.langgraph`'s reference wiring does:
     replaced). On a v2 chain it passes `capture`/`adapter`/`authorized_params` through to
     `guard.check()` directly and records the outcome around `handler(args)` in the same
     call; on `schema_version=1` it authorizes the same way and calls `handler` unrecorded.
-  * `GuardedToolset.call_tool`: a `WrapperToolset.call_tool` override that already calls
+  * `GuardedToolset.call_tool` (used on its own, or installed agent-wide by
+    `GuardedToolsetCapability`): a `WrapperToolset.call_tool` override that already calls
     `self.wrapped.call_tool(...)` directly -- no cross-hook correlation needed at all;
     authorization and the wrapper capture live in the same method, exactly like
-    `adapters.langgraph`'s `guard_node`.
+    `adapters.langgraph`'s `guard_node`. Installed innermost, `self.wrapped` is pydantic-ai's
+    own routing and the next `call_tool` reached is the one that runs the tool.
 
 Both report `BodyState.RAISED` (with `error_code`) on a genuine exception from the tool
 body -- pydantic-ai does not swallow it before either hook runs -- and `BodyState.ABANDONED`
@@ -85,6 +101,7 @@ nothing to bind an outcome to.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import time
 from dataclasses import dataclass, field
@@ -95,7 +112,7 @@ from pydantic_ai.capabilities.combined import CombinedCapability
 from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets.abstract import ToolsetTool
+from pydantic_ai.toolsets.abstract import AbstractToolset, ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
@@ -106,6 +123,15 @@ _ADAPTER_INFO = {
     "version": __version__,
     "hook_path": f"{__name__}.DelegationGuard.wrap_tool_execute",
 }
+
+_TOOLSET_ADAPTER_INFO = {
+    "module": __name__,
+    "version": __version__,
+    "hook_path": f"{__name__}.GuardedToolset.call_tool",
+}
+"""The ledger says WHICH hook point observed a call, because the two see different things: the
+hook layer's `handler` is the composed agent toolset, the toolset layer's `self.wrapped` is the
+toolset that owns the tool -- see `GuardedToolsetCapability`'s "THE GUARANTEE"."""
 
 
 def _is_deferred_result(result: Any) -> bool:
@@ -134,6 +160,7 @@ __all__ = [
     "GuardedDeps",
     "DelegationGuard",
     "GuardedToolset",
+    "GuardedToolsetCapability",
     "MissingGuardError",
     "UnmappedToolError",
     "authorize_tool_call",
@@ -311,16 +338,19 @@ def _authorize_v2(
     args: Mapping[str, Any],
     *,
     on_denial: OnDenial,
+    adapter: Mapping[str, Any] = _ADAPTER_INFO,
 ) -> tuple[Decision, Any]:
     """Like `authorize_tool_call`, for a `schema_version=2` chain: passes `capture`/`adapter`/
     `authorized_params` and RETURNS `(decision, snapshot)` on allow instead of `None`, so the
     caller can bind an outcome to `decision.call_id`. Never called for `UNGUARDED`
-    (`policy.scope is None`) -- callers check that first, exactly as `authorize_tool_call` does."""
+    (`policy.scope is None`) -- callers check that first, exactly as `authorize_tool_call` does.
+    `adapter` names the hook point that observed the call: the two differ in what their wrapper
+    capture actually encloses, so the ledger records which one it was."""
     snapshot = _snapshot_params(args)
     context = dict(policy.context(args)) if policy.context is not None else {}
     decision = guard.check(
         policy.scope, context=context, metered=policy.metered, tool=tool_name,
-        disposition=policy.disposition, capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO,
+        disposition=policy.disposition, capture=Capture.WRAPPER_ASYNC, adapter=dict(adapter),
         authorized_params=snapshot,
     )
     if decision:
@@ -418,6 +448,49 @@ def _find_execution_wrapper_nested_inside(
     return None
 
 
+def _capability_leaves(agent: Any) -> list[AbstractCapability[Any]]:
+    """Every capability leaf bound to `agent`, outer-first.
+
+    `CombinedCapability.apply` is pydantic-ai's own public visitor; a lone capability is not
+    combined at all, so it is its own single leaf."""
+    root = getattr(agent, "root_capability", None)
+    if isinstance(root, CombinedCapability):
+        leaves: list[AbstractCapability[Any]] = []
+        root.apply(leaves.append)
+        return leaves
+    return [root] if isinstance(root, AbstractCapability) else []
+
+
+def _other_authorizer_capability(
+    agent: Any, mine: AbstractCapability[Any]
+) -> Optional[AbstractCapability[Any]]:
+    """Another attenu-guard authorizing CAPABILITY on the same agent, or `None`.
+
+    Both `DelegationGuard` and `GuardedToolsetCapability` authorize every tool call on the
+    agent, so two of them (of either kind) means `guard.check()` runs twice per call. A
+    capability-contributed `GuardedToolset` never appears in `agent.toolsets` -- it is built
+    during toolset composition, not registered -- so the capability chain is the only place
+    this pair is visible."""
+    for leaf in _capability_leaves(agent):
+        if leaf is mine:
+            continue
+        if isinstance(leaf, (DelegationGuard, GuardedToolsetCapability)):
+            return leaf
+    return None
+
+
+def _two_authorizers_message(mine: str, other: str, where: str) -> str:
+    return (
+        f"{mine} and {other} are both registered on this agent ({where}). Each is a complete, "
+        "independent authorization path, so using both means guard.check() runs TWICE for the "
+        "same call: two allow/outcome pairs on the ledger for one body, and (with metered=True) "
+        "the call counted twice against any CallLimit. Use exactly one -- "
+        "GuardedToolsetCapability to guard every tool with the record taken at the tool body, "
+        "DelegationGuard to guard every tool from the hook layer, or a GuardedToolset you build "
+        "yourself to guard one toolset and leave the rest alone."
+    )
+
+
 def _execution_wrapper_nested_inside_message(sibling: AbstractCapability[Any]) -> str:
     return (
         f"DelegationGuard is ordered OUTSIDE {type(sibling).__name__}, which also wraps tool "
@@ -438,20 +511,54 @@ def _execution_wrapper_nested_inside_message(sibling: AbstractCapability[Any]) -
 # ==========================================================================
 
 class DelegationGuard(AbstractCapability[Any]):
-    """Authorize every tool call this agent makes, before the tool body runs.
+    """Authorize every tool call this agent makes, in the HOOK layer, before anything runs.
 
     Registered via `Agent(capabilities=[DelegationGuard(policies)])`. Because the
     hook lives in `ToolManager`, one registration covers function tools, every
     `Toolset` on the agent, and MCP servers.
 
+    PREFER `GuardedToolsetCapability` (below) unless you need what only this layer sees. Both
+    authorize every tool call before its body runs; they differ in where the wrapper capture
+    closes, which is what makes a recorded outcome an outcome OF the tool body -- see "THE
+    LIMIT OF THE HOOK LAYER".
+
     Output tools are exempt by design — Pydantic AI does not fire tool hooks for
     them (`pydantic_ai/tool_manager.py:455`); they produce the run's result and
     reach no external system.
 
+    THE LIMIT OF THE HOOK LAYER. Pydantic AI runs the ENTIRE hook chain above the ENTIRE
+    toolset chain -- `ToolManager._run_execute_hooks` calls `wrap_tool_execute` with a `handler`
+    that leads to `toolset.call_tool`, and every wrapper toolset any capability contributes
+    through `get_wrapper_toolset` is applied below that. So this capability is outside all of
+    them no matter how it is ordered AMONG CAPABILITIES: `position`/`wrapped_by` settle hooks
+    against hooks, not hooks against toolsets. Pydantic AI's maintainer states it directly in
+    pydantic/pydantic-ai#8007 (comment 5546076540): the hook chain is above the toolset chain,
+    and the innermost position a check can hold is in the toolset chain.
+
+    What that costs, precisely. ENFORCEMENT is unaffected -- a denial raises before `handler` is
+    ever called, so no body of any kind runs. The RECORD is what drifts: `handler` resolves to
+    the composed agent toolset, so a wrapper toolset that overrides `call_tool` sits between
+    this capability and the tool, and the outcome recorded around `handler` is that wrapper's.
+    A failure inside such a wrapper BEFORE it reaches the tool is recorded here as a `RAISED`
+    body for a body that never ran. Live-probed on 2.31.1 with two contributed wrapper toolsets
+    A and B: the trace is `guard-hook:enter, A:enter, B:enter, TOOL BODY`. When the record must
+    be of the tool body itself, use `GuardedToolsetCapability`.
+
+    WHAT ONLY THIS LAYER SEES. Being outside every toolset wrapper is also the one thing this
+    capability has that the toolset one does not: the built-in `search_tools` discovery call.
+    `ToolSearchToolset` serves it and never delegates it inward (`pydantic_ai/toolsets/
+    _tool_search.py:424-429`), and the auto-injected `ToolSearch` capability declares
+    `position="outermost"`, so that toolset is outermost of all. Probed on 2.31.1: a
+    `search_tools` call reaches `wrap_tool_execute` and reaches no toolset-layer guard. With
+    `on_unmapped="deny"` and a `defer_loading=True` tool on the agent, give `search_tools` a
+    policy (`UNGUARDED` is the honest one -- discovery reads tool definitions and reaches no
+    external system) or it is refused as unmapped.
+
     ORDERING: `get_ordering()` declares `position="innermost", wrapped_by=[AbstractCapability]`.
     Authorization and outcome-recording are ONE operation, both inside `wrap_tool_execute`
     (there is no `before_tool_execute` override at all -- see "WHY ONE OPERATION, NOT TWO"
-    below), so what `handler` actually is decides whether a recorded outcome is honest.
+    below), so what `handler` actually is decides whether a recorded outcome is honest --
+    within the limit above.
 
     `wrapped_by` is a RELATIVE constraint -- "these capabilities are outside me" -- and a TYPE
     ref is resolved with `issubclass` over every other capability's leaves, with the self-edge
@@ -459,9 +566,10 @@ class DelegationGuard(AbstractCapability[Any]):
     `AbstractCapability` is therefore the ref that names EVERY sibling without knowing any of
     them in advance: the sorter adds an edge from this capability to each of the others and
     settles it LAST, in every list order, including past the capabilities pydantic-ai injects
-    itself. Last is innermost -- the chain runs outer to inner and the last capability wraps the
-    raw tool invocation -- so `handler` IS the raw tool body, and an outcome recorded around it
-    is an outcome of that body and nothing else. `position="innermost"` is kept alongside it:
+    itself. Last is innermost among HOOKS -- the chain runs outer to inner and the last
+    capability wraps the tool invocation -- so no other capability's `wrap_tool_execute` sits
+    inside this one. (Not the same as being innermost overall: see "THE LIMIT OF THE HOOK
+    LAYER" for what remains below.) `position="innermost"` is kept alongside it:
     it is the tier pydantic-ai's own two-phase `for_agent` binding reads, and it is the
     declaration a reader looks for; the `wrapped_by` edge is what makes it exact rather than a
     tier shared with other members.
@@ -516,13 +624,16 @@ class DelegationGuard(AbstractCapability[Any]):
     execute`) raises before this one's own `wrap_tool_execute` is ever reached, THIS capability's
     `guard.check()` simply never ran either -- no allow, no leak, nothing false.
 
-    DO NOT also wrap the SAME tool with `GuardedToolset` (below): each is an independent,
-    complete authorization path, and using both on one tool means `guard.check()` runs TWICE
-    for the same call -- two `allow`/`outcome` pairs on the ledger for one body, and (with
-    `metered=True`) the call counted twice against any `CallLimit`. Pick exactly one hook point
-    per tool: `DelegationGuard` for "every tool on this agent", `GuardedToolset` for "just this
-    one toolset, leave the rest alone". `for_agent()` rejects this combination at AGENT
-    CONSTRUCTION time (not per-call) when it can be detected -- see its docstring.
+    DO NOT also install a second attenu-guard authorizer on the same agent -- a
+    `GuardedToolset` you built yourself, or a `GuardedToolsetCapability`. Each is an
+    independent, complete authorization path, and using two on one tool means `guard.check()`
+    runs TWICE for the same call -- two `allow`/`outcome` pairs on the ledger for one body, and
+    (with `metered=True`) the call counted twice against any `CallLimit`. Pick exactly one:
+    `GuardedToolsetCapability` for "every tool on this agent, recorded at the body",
+    `DelegationGuard` for "every tool on this agent, including `search_tools`",
+    `GuardedToolset` for "just this one toolset, leave the rest alone". `for_agent()` rejects
+    the combinations at AGENT CONSTRUCTION time (not per-call) when it can be detected -- see
+    its docstring.
     """
 
     def __init__(
@@ -549,8 +660,12 @@ class DelegationGuard(AbstractCapability[Any]):
         return CapabilityOrdering(position="innermost", wrapped_by=[AbstractCapability])
 
     def for_agent(self, agent: Any) -> "DelegationGuard":
-        """Rejects `DelegationGuard` + `GuardedToolset` dual instrumentation on the SAME agent
-        at AGENT CONSTRUCTION time. Called after the agent's toolsets are fully assembled
+        """Rejects a SECOND attenu-guard authorizer on the SAME agent at AGENT CONSTRUCTION
+        time -- a `GuardedToolsetCapability` in `capabilities=[...]`, found by walking
+        `agent.root_capability` (a capability-contributed `GuardedToolset` is built during
+        toolset composition and never appears in `agent.toolsets`, so the capability chain is
+        the only place it shows), or a `GuardedToolset` the caller built and passed in
+        `toolsets=[...]`. Called after the agent's toolsets are fully assembled
         (`AbstractCapability.for_agent`'s own docstring: an `innermost` capability's `for_agent`
         runs in a second phase specifically so `agent.toolsets` is complete), so `agent.toolsets`
         is walked here, unwrapping `WrapperToolset` chains, for a `GuardedToolset` instance --
@@ -570,6 +685,12 @@ class DelegationGuard(AbstractCapability[Any]):
         against the chain a run actually resolves. A sibling that ALSO demands the last slot
         never reaches this method at all: the sorter refuses it first, with its own cycle error.
         """
+        other = _other_authorizer_capability(agent, self)
+        if other is not None:
+            raise UserError(_two_authorizers_message(
+                "DelegationGuard", type(other).__name__, "both in capabilities=[...]"
+            ))
+
         for toolset in getattr(agent, "toolsets", None) or ():
             seen = toolset
             while seen is not None:
@@ -664,7 +785,10 @@ class GuardedToolset(WrapperToolset[Any]):
             return await self.wrapped.call_tool(name, tool_args, ctx, tool)
         guard, policy = resolved
         if policy.scope is not None and guard.schema_version == 2:
-            decision, snapshot = _authorize_v2(guard, policy, name, tool_args, on_denial=self.on_denial)
+            decision, snapshot = _authorize_v2(
+                guard, policy, name, tool_args, on_denial=self.on_denial,
+                adapter=_TOOLSET_ADAPTER_INFO,
+            )
             return await _run_wrapped_and_record_outcome(
                 guard, decision.call_id, snapshot,
                 lambda: self.wrapped.call_tool(name, tool_args, ctx, tool),
@@ -676,3 +800,154 @@ class GuardedToolset(WrapperToolset[Any]):
     # `for_run` / `for_run_step` / `visit_and_replace`. The extra fields above ride
     # along automatically *because they are declared as dataclass fields* — declare
     # config on a wrapper toolset any other way and it is silently lost per run step.
+
+
+# ==========================================================================
+# Hook point 2c — the toolset-layer capability: one GuardedToolset over the
+# agent's whole composed toolset, innermost, no execution hook at all.
+# ==========================================================================
+
+def _ordering_supports(field_name: str) -> bool:
+    """Does the INSTALLED `CapabilityOrdering` accept `field_name`?
+
+    Read at call time, not import time, so this tracks whatever pydantic-ai is actually in the
+    environment. `dataclasses.fields` is the direct question for the dataclass it is today; the
+    signature fallback covers it becoming something else. Anything unexpected answers `False`:
+    an unknown keyword would be a `TypeError` at agent construction, and refusing to guard is
+    never the right failure here -- the ordering it names is a sharpening, not the check."""
+    try:
+        return any(f.name == field_name for f in dataclasses.fields(CapabilityOrdering))
+    except TypeError:
+        pass
+    try:
+        return field_name in inspect.signature(CapabilityOrdering).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+class GuardedToolsetCapability(AbstractCapability[Any]):
+    """Authorize every tool call this agent makes, from INSIDE the toolset chain.
+
+    Registered via `Agent(capabilities=[GuardedToolsetCapability(policies)])`. It contributes
+    ONE `GuardedToolset` over the agent's composed toolset through `get_wrapper_toolset`, and
+    overrides no execution hook at all -- `wrap_tool_execute` is untouched. Like
+    `DelegationGuard`, one registration covers function tools, every `Toolset` on the agent,
+    and MCP servers. Unlike it, the call it authorizes is the call that reaches the tool.
+
+    THE GUARANTEE, AND WHY IT LIVES HERE. Pydantic AI runs the entire HOOK chain above the
+    entire TOOLSET chain (pydantic-ai maintainer DouweM, pydantic/pydantic-ai#8007, comment
+    5546076540). A capability that authorizes in `wrap_tool_execute` is therefore outside every
+    wrapper toolset, however it is ordered among capabilities -- so a wrapper toolset that
+    overrides `call_tool` sits between that check and the tool, and the outcome it records is
+    that wrapper's. Moving the check into the toolset chain is what makes innermost reachable:
+    `CombinedCapability.get_wrapper_toolset` applies the contributed wrappers over
+    `reversed(self.capabilities)` (`pydantic_ai/capabilities/combined.py:254-262` as of 2.31.1),
+    so the FIRST wrapper applied -- the innermost -- comes from the LAST capability in the
+    settled chain. `get_ordering()` declares `position="innermost"`, which sorts this capability
+    into that last tier, and its `GuardedToolset.call_tool` then calls the toolset that owns the
+    tool.
+
+    WHAT IS INSIDE IT, AND WHAT IS OUTSIDE. Verified on 2.31.1 by reading the composed chain
+    from inside the guard: what remains below is `PreparedToolset`, which overrides `get_tools`
+    only and never `call_tool`, and `CombinedToolset`, which only routes the call to the toolset
+    that owns the tool. Both are pydantic-ai's own plumbing; neither executes a body of its own,
+    so the next `call_tool` that runs is the tool's. Outside sits `ToolSearchToolset`, because
+    the auto-injected `ToolSearch` capability declares `position="outermost"`
+    (`pydantic_ai/capabilities/_tool_search.py:152-153`). It serves the built-in `search_tools`
+    discovery call itself and never delegates it inward, so `search_tools` is NOT seen here;
+    `DelegationGuard`, in the hook layer, does see it. Discovery reads tool definitions and
+    reaches no external system.
+
+    THE TIER CAVEAT. `position="innermost"` is a TIER, not a unique slot: among the capabilities
+    in it, LIST order is preserved, so the one listed LAST becomes toolset-innermost. If another
+    capability also declares `position="innermost"` AND contributes a wrapper toolset that
+    overrides `call_tool`, then:
+
+      * listed AFTER this one, it takes the innermost slot and sits between this guard and the
+        tool body -- the defect this class exists to remove, reintroduced;
+      * listed BEFORE this one, this guard is innermost and the guarantee holds.
+
+    Both directions live-probed on 2.31.1. Until the flag below is released, LIST THIS
+    CAPABILITY LAST. The realistic collision is a durability capability such as
+    `TemporalDurability`, which also claims `position="innermost"`: listed after this one its
+    durable toolset sits inside the guard, and the call this guard records is that wrapper's.
+
+    CLOSING THE CAVEAT. `CapabilityOrdering` gained an `exclusive_execution` flag on the branch
+    of pydantic/pydantic-ai#8067 (probed at head 9f5863f, which reports itself as
+    2.38.1.dev36). No RELEASED version has it: checked against 2.31.1, 2.37.0 and 2.39.0, the
+    latest release. `get_ordering()` feature-detects the field and sets it when present, so on a
+    build that has it this capability takes the innermost slot in EVERY list order (probed), and
+    two capabilities that both demand it are refused by pydantic-ai at agent construction with a
+    diagnostic naming both. The flag needs `position="innermost"` alongside it -- setting it
+    alone is a cycle error -- which is why both are declared. So: refused where the flag exists;
+    tier-ordered, with this capability's slot decided by list position, where it does not.
+
+    DO NOT install a second attenu-guard authorizer on the same agent -- a `DelegationGuard`, a
+    second `GuardedToolsetCapability`, or a `GuardedToolset` you built and passed in
+    `toolsets=[...]`, which this capability would then wrap. Each is a complete, independent
+    authorization path; two means `guard.check()` runs twice per call. `for_agent()` refuses all
+    three at agent construction time.
+    """
+
+    def __init__(
+        self,
+        policies: Mapping[str, ToolPolicy],
+        *,
+        get_guard: Callable[[RunContext[Any]], Guard | None] = _default_get_guard,
+        on_unmapped: Literal["deny", "allow"] = "deny",
+        on_denial: OnDenial = "raise",
+        id: str | None = None,
+    ) -> None:
+        self.policies = dict(policies)
+        self.get_guard = get_guard
+        self.on_unmapped = on_unmapped
+        self.on_denial = on_denial
+        self.id = id
+
+    def get_ordering(self) -> CapabilityOrdering:
+        """`position="innermost"` always; `exclusive_execution=True` too where the installed
+        `CapabilityOrdering` has that field -- see the class docstring's "THE TIER CAVEAT" and
+        "CLOSING THE CAVEAT". The flag is passed only when it exists, so this stays constructible
+        on every released pydantic-ai, which does not have it."""
+        kwargs: dict[str, Any] = {"position": "innermost"}
+        if _ordering_supports("exclusive_execution"):
+            kwargs["exclusive_execution"] = True
+        return CapabilityOrdering(**kwargs)
+
+    def get_wrapper_toolset(self, toolset: AbstractToolset[Any]) -> AbstractToolset[Any]:
+        """One `GuardedToolset` around whatever the agent composed. Called once per agent build
+        with this capability's own configuration forwarded whole, so the capability and the
+        hand-built wrapper below behave identically -- there is one authorization path, not two
+        implementations of one."""
+        return GuardedToolset(
+            toolset,
+            policies=self.policies,
+            get_guard=self.get_guard,
+            on_unmapped=self.on_unmapped,
+            on_denial=self.on_denial,
+        )
+
+    def for_agent(self, agent: Any) -> "GuardedToolsetCapability":
+        """Refuses a second attenu-guard authorizer at AGENT CONSTRUCTION time: a
+        `DelegationGuard` or another `GuardedToolsetCapability` in `capabilities=[...]` (walked
+        off `agent.root_capability`), or a `GuardedToolset` the caller built and passed in
+        `toolsets=[...]`, which this capability would wrap -- two checks, one call. What it
+        cannot see is a `GuardedToolset` constructed dynamically inside a tool and never listed;
+        the class docstring's "DO NOT install a second..." is what covers that."""
+        other = _other_authorizer_capability(agent, self)
+        if other is not None:
+            raise UserError(_two_authorizers_message(
+                "GuardedToolsetCapability", type(other).__name__, "both in capabilities=[...]"
+            ))
+
+        for toolset in getattr(agent, "toolsets", None) or ():
+            seen = toolset
+            while seen is not None:
+                if isinstance(seen, GuardedToolset):
+                    raise UserError(_two_authorizers_message(
+                        "GuardedToolsetCapability", "GuardedToolset",
+                        f"the capability wraps the agent's toolsets, and {seen.wrapped!r} is "
+                        "already wrapped by a GuardedToolset in toolsets=[...]",
+                    ))
+                seen = getattr(seen, "wrapped", None)
+        return self
