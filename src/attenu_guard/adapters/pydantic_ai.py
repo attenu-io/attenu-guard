@@ -470,7 +470,11 @@ def _other_authorizer_capability(
     agent, so two of them (of either kind) means `guard.check()` runs twice per call. A
     capability-contributed `GuardedToolset` never appears in `agent.toolsets` -- it is built
     during toolset composition, not registered -- so the capability chain is the only place
-    this pair is visible."""
+    this pair would be visible. In practice it is not reached on current pydantic-ai: both
+    classes declare `wrapped_by=[AbstractCapability]`, so any pair of them cycles in
+    `sort_capabilities` before `for_agent` runs (probed on 2.31.1 for both combinations). This
+    is kept as belt-and-braces for an ordering primitive that stopped cycling, and it reads the
+    settled chain rather than re-deriving it."""
     for leaf in _capability_leaves(agent):
         if leaf is mine:
             continue
@@ -487,7 +491,11 @@ def _two_authorizers_message(mine: str, other: str, where: str) -> str:
         "the call counted twice against any CallLimit. Use exactly one -- "
         "GuardedToolsetCapability to guard every tool with the record taken at the tool body, "
         "DelegationGuard to guard every tool from the hook layer, or a GuardedToolset you build "
-        "yourself to guard one toolset and leave the rest alone."
+        "yourself to guard one toolset and leave the rest alone. (Registering two attenu-guard "
+        "CAPABILITIES instead surfaces as pydantic-ai's own "
+        "\"Circular ordering constraints among capabilities\": each declares "
+        "wrapped_by=[AbstractCapability] to hold the innermost slot, so the sorter refuses the "
+        "pair before this message could be produced. Same mistake, different messenger.)"
     )
 
 
@@ -592,9 +600,14 @@ class DelegationGuard(AbstractCapability[Any]):
     THE ONE CASE THE CHECKS CANNOT IMPROVE: two capabilities that BOTH demand the last slot.
     A sibling declaring `wrapped_by=[AbstractCapability]` (or `wrapped_by=[DelegationGuard]`,
     or an instance ref to this one) makes each depend on the other, and `sort_capabilities`
-    raises `UserError("Circular ordering constraints among capabilities")`. Refusal is the
-    correct outcome -- they cannot both be innermost -- but the diagnostic is pydantic-ai's and
-    names neither capability, and this file cannot reword it: the sort runs inside
+    raises `UserError("Circular ordering constraints among capabilities")`. `GuardedToolset
+    Capability` is now exactly that sibling -- it declares the same edge to hold the innermost
+    slot in the toolset chain -- so registering BOTH guards on one agent lands here. That is the
+    right verdict (two authorizers means `guard.check()` runs twice per call), and it arrives
+    before either `for_agent` can name them: IF YOU SEE "Circular ordering constraints among
+    capabilities" ON AN AGENT THAT USES THIS ADAPTER, YOU REGISTERED TWO AUTHORIZERS. Refusal is
+    the correct outcome -- they cannot both be innermost -- but the diagnostic is pydantic-ai's
+    and names neither capability, and this file cannot reword it: the sort runs inside
     `CombinedCapability.__post_init__`, which `Agent.__init__` calls BEFORE any capability's
     `for_agent`, so no adapter frame is on the stack to catch it. The same is true of a per-run
     `agent.run(..., capabilities=[...])` injection of such a sibling, which composes (and sorts)
@@ -635,8 +648,10 @@ class DelegationGuard(AbstractCapability[Any]):
     (with `metered=True`) the call counted twice against any `CallLimit`. Pick exactly one:
     `GuardedToolsetCapability` for "every tool on this agent, recorded at the body",
     `DelegationGuard` for "every tool on this agent, including `search_tools`",
-    `GuardedToolset` for "just this one toolset, leave the rest alone". `for_agent()` rejects
-    the combinations at AGENT CONSTRUCTION time (not per-call) when it can be detected -- see
+    `GuardedToolset` for "just this one toolset, leave the rest alone". All are refused at AGENT
+    CONSTRUCTION time (not per-call): the `GuardedToolsetCapability` pair by the sorter, as
+    "Circular ordering constraints among capabilities" (see "THE ONE CASE THE CHECKS CANNOT
+    IMPROVE"), the hand-built `GuardedToolset` by `for_agent()` with a message of its own -- see
     its docstring.
     """
 
@@ -665,11 +680,14 @@ class DelegationGuard(AbstractCapability[Any]):
 
     def for_agent(self, agent: Any) -> "DelegationGuard":
         """Rejects a SECOND attenu-guard authorizer on the SAME agent at AGENT CONSTRUCTION
-        time -- a `GuardedToolsetCapability` in `capabilities=[...]`, found by walking
-        `agent.root_capability` (a capability-contributed `GuardedToolset` is built during
-        toolset composition and never appears in `agent.toolsets`, so the capability chain is
-        the only place it shows), or a `GuardedToolset` the caller built and passed in
-        `toolsets=[...]`. Called after the agent's toolsets are fully assembled
+        time -- in practice a `GuardedToolset` the caller built and passed in `toolsets=[...]`.
+        A `GuardedToolsetCapability` in `capabilities=[...]` is rejected too, but by the sorter:
+        it declares `wrapped_by=[AbstractCapability]` exactly as this class does, so the pair
+        cycles before any `for_agent` runs (see the class docstring's "THE ONE CASE THE CHECKS
+        CANNOT IMPROVE"). The capability-chain walk here is belt-and-braces for an ordering
+        primitive that stopped cycling; a capability-contributed `GuardedToolset` is built during
+        toolset composition and never appears in `agent.toolsets`, so the capability chain would
+        be the only place it shows. Called after the agent's toolsets are fully assembled
         (`AbstractCapability.for_agent`'s own docstring: an `innermost` capability's `for_agent`
         runs in a second phase specifically so `agent.toolsets` is complete), so `agent.toolsets`
         is walked here, unwrapping `WrapperToolset` chains, for a `GuardedToolset` instance --
@@ -839,9 +857,9 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     `CombinedCapability.get_wrapper_toolset` applies the contributed wrappers over
     `reversed(self.capabilities)` (`pydantic_ai/capabilities/combined.py:254-262` as of 2.31.1),
     so the FIRST wrapper applied -- the innermost -- comes from the LAST capability in the
-    settled chain. `get_ordering()` declares `position="innermost"`, which sorts this capability
-    into that last tier, and its `GuardedToolset.call_tool` then calls the toolset that owns the
-    tool.
+    settled chain. `get_ordering()` declares `position="innermost", wrapped_by=[AbstractCapability]`
+    and settles this capability there in EVERY list order, so its `GuardedToolset.call_tool` is
+    the call that reaches the toolset owning the tool.
 
     WHAT IS INSIDE IT, AND WHAT IS OUTSIDE. Verified on 2.31.1 by reading the composed chain
     from inside the guard: what remains below is `PreparedToolset`, which overrides `get_tools`
@@ -854,17 +872,20 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     `DelegationGuard`, in the hook layer, does see it. Discovery reads tool definitions and
     reaches no external system.
 
-    THE TIER CAVEAT. `position="innermost"` is a TIER, not a unique slot: among the capabilities
-    in it, LIST order is preserved, so the one listed LAST becomes toolset-innermost. If another
-    capability also declares `position="innermost"` AND contributes a wrapper toolset that
-    overrides `call_tool`, then:
-
-      * listed AFTER this one, it takes the innermost slot and sits between this guard and the
-        tool body -- the defect this class exists to remove, reintroduced;
-      * listed BEFORE this one, this guard is innermost and the guarantee holds.
-
-    Both directions live-probed on 2.31.1. Until the flag below is released, LIST THIS
-    CAPABILITY LAST.
+    THE TIER, AND THE EDGE THAT CLOSES IT. `position="innermost"` on its own is a TIER, not a
+    unique slot: among the capabilities in it LIST order is preserved, so the one listed LAST
+    becomes toolset-innermost. That alone would leave the guarantee depending on where the
+    caller happened to type this capability -- another capability claiming the tier and
+    contributing a `call_tool`-overriding wrapper toolset would take the innermost slot whenever
+    it was listed after this one, and sit between the guard and the tool body. So
+    `get_ordering()` also declares `wrapped_by=[AbstractCapability]`, the same edge
+    `DelegationGuard` uses: a TYPE ref is resolved with `issubclass` over every other
+    capability's leaves with the self-edge skipped, so it names EVERY sibling at once without
+    knowing any in advance, and the sorter settles this capability last however the caller lists
+    it. Live-probed on 2.31.1, which has no `exclusive_execution` at all: with a sibling
+    innermost wrapper toolset in BOTH list orders, and with one injected per-run through
+    `agent.run(..., capabilities=[...])` with and without an ordering of its own, the trace is
+    `B:enter, guard:enter, TOOL BODY` every time. There is no "list it last" rule to remember.
 
     BESIDE A DURABILITY CAPABILITY. `BaseDurabilityCapability` -- Temporal, DBOS, Prefect --
     also declares `position="innermost"` (`pydantic_ai/durable_exec/_base.py:282-285` as of
@@ -881,21 +902,31 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     capability, not both. This file adds no refusal of its own here; on a released pydantic-ai
     the composition is sound and worth keeping.
 
-    CLOSING THE CAVEAT. `CapabilityOrdering` gained an `exclusive_execution` flag on the branch
-    of pydantic/pydantic-ai#8067 (probed at head 9f5863f, which reports itself as
-    2.38.1.dev36). No RELEASED version has it: checked against 2.31.1, 2.37.0 and 2.39.0, the
-    latest release. `get_ordering()` feature-detects the field and sets it when present, so on a
-    build that has it this capability takes the innermost slot in EVERY list order (probed), and
-    two capabilities that both demand it are refused by pydantic-ai at agent construction with a
-    diagnostic naming both. The flag needs `position="innermost"` alongside it -- setting it
-    alone is a cycle error -- which is why both are declared. So: refused where the flag exists;
-    tier-ordered, with this capability's slot decided by list position, where it does not.
+    `exclusive_execution`, WHERE IT EXISTS. `CapabilityOrdering` gained that flag on the branch
+    of pydantic/pydantic-ai#8067 (probed at head 9f5863f, which reports itself as 2.38.1.dev36).
+    No RELEASED version has it: checked against 2.31.1, 2.37.0 and 2.39.0, the latest release.
+    `get_ordering()` feature-detects the field and sets it when present, so the ordering stays
+    constructible on every released build. It is a sharpening rather than the fix -- the
+    `wrapped_by` edge above already holds the slot on released pydantic-ai -- and what it adds is
+    a better diagnostic: two capabilities that both declare it are refused at construction with a
+    message naming both and explaining why only one can be innermost, instead of the bare cycle
+    error the edge produces. It needs `position="innermost"` alongside it (setting it alone is a
+    cycle error), and all three declarations compose: probed together at the PR head, this
+    capability still takes the innermost slot in every list order.
 
     DO NOT install a second attenu-guard authorizer on the same agent -- a `DelegationGuard`, a
     second `GuardedToolsetCapability`, or a `GuardedToolset` you built and passed in
     `toolsets=[...]`, which this capability would then wrap. Each is a complete, independent
-    authorization path; two means `guard.check()` runs twice per call. `for_agent()` refuses all
-    three at agent construction time.
+    authorization path; two means `guard.check()` runs twice per call. All three are refused at
+    agent construction, but not all by this file: the two CAPABILITY pairs each declare
+    `wrapped_by=[AbstractCapability]`, so each demands to be outside the other and
+    `sort_capabilities` raises `UserError("Circular ordering constraints among capabilities")`
+    first. IF YOU SEE THAT ERROR ON AN AGENT THAT USES THIS ADAPTER, YOU REGISTERED TWO
+    AUTHORIZERS. The sort runs inside `CombinedCapability.__post_init__`, which `Agent.__init__`
+    calls BEFORE any capability's `for_agent`, so no adapter frame is on the stack to reword it.
+    `for_agent()` still refuses the hand-built `GuardedToolset` case with a message of its own,
+    and keeps the capability-chain check as belt-and-braces for an ordering primitive that
+    stopped cycling.
     """
 
     def __init__(
@@ -914,11 +945,15 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
         self.id = id
 
     def get_ordering(self) -> CapabilityOrdering:
-        """`position="innermost"` always; `exclusive_execution=True` too where the installed
-        `CapabilityOrdering` has that field -- see the class docstring's "THE TIER CAVEAT" and
-        "CLOSING THE CAVEAT". The flag is passed only when it exists, so this stays constructible
-        on every released pydantic-ai, which does not have it."""
-        kwargs: dict[str, Any] = {"position": "innermost"}
+        """`position="innermost", wrapped_by=[AbstractCapability]` always -- the tier plus the
+        per-sibling edge that makes it exact in every list order; `exclusive_execution=True` too
+        where the installed `CapabilityOrdering` has that field. See the class docstring's "THE
+        TIER, AND THE EDGE THAT CLOSES IT" and "`exclusive_execution`, WHERE IT EXISTS". The flag
+        is passed only when it exists, so this stays constructible on every released
+        pydantic-ai, none of which has it."""
+        kwargs: dict[str, Any] = {
+            "position": "innermost", "wrapped_by": [AbstractCapability],
+        }
         if _ordering_supports("exclusive_execution"):
             kwargs["exclusive_execution"] = True
         return CapabilityOrdering(**kwargs)
@@ -937,12 +972,15 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
         )
 
     def for_agent(self, agent: Any) -> "GuardedToolsetCapability":
-        """Refuses a second attenu-guard authorizer at AGENT CONSTRUCTION time: a
-        `DelegationGuard` or another `GuardedToolsetCapability` in `capabilities=[...]` (walked
-        off `agent.root_capability`), or a `GuardedToolset` the caller built and passed in
-        `toolsets=[...]`, which this capability would wrap -- two checks, one call. What it
-        cannot see is a `GuardedToolset` constructed dynamically inside a tool and never listed;
-        the class docstring's "DO NOT install a second..." is what covers that."""
+        """Refuses a second attenu-guard authorizer at AGENT CONSTRUCTION time: in practice the
+        `GuardedToolset` the caller built and passed in `toolsets=[...]`, which this capability
+        would wrap -- two checks, one call. The CAPABILITY pairs (a `DelegationGuard` or another
+        `GuardedToolsetCapability` in `capabilities=[...]`) never reach this method: both classes
+        declare `wrapped_by=[AbstractCapability]`, so the sorter raises "Circular ordering
+        constraints among capabilities" first. The capability-chain walk is kept as
+        belt-and-braces for an ordering primitive that stopped cycling. What none of it can see
+        is a `GuardedToolset` constructed dynamically inside a tool and never listed; the class
+        docstring's "DO NOT install a second..." is what covers that."""
         other = _other_authorizer_capability(agent, self)
         if other is not None:
             raise UserError(_two_authorizers_message(

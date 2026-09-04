@@ -1095,51 +1095,61 @@ def test_toolset_capability_v2_allowed_call_records_a_returned_outcome():
     assert outcome["body_state"] == BodyState.RETURNED
 
 
-def test_a_per_run_injected_wrapper_toolset_lands_outside_the_guard():
-    """(d), first half. `agent.run(..., capabilities=[...])` composes a SECOND
-    `CombinedCapability` and sorts it the same way. An injected capability with no ordering of
-    its own stays ahead of this one in the chain, so its wrapper toolset is applied later --
-    outside the guard. The guarantee survives the injection."""
+@pytest.mark.parametrize("injected", [None, "innermost"], ids=["no-ordering", "innermost"])
+def test_a_per_run_injected_wrapper_toolset_lands_outside_the_guard(injected):
+    """(d). `agent.run(..., capabilities=[...])` composes a SECOND `CombinedCapability` and sorts
+    it the same way, AFTER the agent's own capabilities -- so on `position="innermost"` alone an
+    injected capability claiming that tier would win the innermost slot on list order. The
+    `wrapped_by=[AbstractCapability]` edge is per-sibling and matched by `issubclass`, so it
+    reaches the injected capability too: the guard stays innermost either way."""
     _TRACE.clear()
     agent = _ordering_agent([_TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)])
 
-    root = _run_traced(agent, capabilities=[_MarkedToolsetCapability("B")])
+    root = _run_traced(agent, capabilities=[_MarkedToolsetCapability("B", position=injected)])
 
     assert _TRACE == ["B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit"]
     _assert_outcome_is_the_raw_body(root)
 
 
-def test_a_per_run_injected_innermost_wrapper_toolset_lands_INSIDE_the_guard():
-    """(d), second half, and the honest half: `position="innermost"` is a TIER whose only
-    tiebreak is list order, and a per-run injection is composed AFTER the agent's own
-    capabilities. So an injected capability that also claims `innermost` and contributes a
-    `call_tool`-overriding wrapper toolset takes the innermost slot, and the guard records ITS
-    execution rather than the tool body's. This is the documented tier caveat, measured; on a
-    pydantic-ai carrying `exclusive_execution` the same list is refused instead."""
-    _TRACE.clear()
-    agent = _ordering_agent([_TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)])
-
-    _run_traced(agent, capabilities=[_MarkedToolsetCapability("B", position="innermost")])
-
-    assert _TRACE == ["guard-ts:enter", "B:enter", "raw-body", "B:exit", "guard-ts:exit"]
-
-
 @pytest.mark.parametrize("order", ["guard-first", "guard-last"])
-def test_the_tier_caveat_is_decided_by_list_position(order):
-    """The registered-capability form of the same caveat, both directions. Listed BEFORE another
-    `innermost` toolset capability, the guard loses the innermost slot; listed AFTER it, the
-    guard keeps it. Until `exclusive_execution` ships, this capability goes LAST."""
+def test_the_tier_is_not_decided_by_list_position(order):
+    """The tier caveat, closed. `position="innermost"` alone is a TIER whose only tiebreak is
+    LIST order, so a sibling claiming it and contributing a `call_tool`-overriding wrapper
+    toolset used to take the innermost slot whenever it was listed after this capability -- and
+    then sat between the guard and the tool body. `wrapped_by=[AbstractCapability]` adds an edge
+    to every sibling at once, so the sorter settles this capability LAST in both directions and
+    the sibling wrapper runs outside it. Probed on 2.31.1, which has no `exclusive_execution`."""
     _TRACE.clear()
     guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
     other = _MarkedToolsetCapability("B", position="innermost")
     capabilities = [guard_cap, other] if order == "guard-first" else [other, guard_cap]
 
-    _run_traced(_ordering_agent(capabilities))
+    root = _run_traced(_ordering_agent(capabilities))
 
-    if order == "guard-first":
-        assert _TRACE == ["guard-ts:enter", "B:enter", "raw-body", "B:exit", "guard-ts:exit"]
-    else:
-        assert _TRACE == ["B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit"]
+    assert _TRACE == ["B:enter", "guard-ts:enter", "raw-body", "guard-ts:exit", "B:exit"]
+    _assert_outcome_is_the_raw_body(root)
+
+
+@pytest.mark.parametrize("order", ["guard-first", "guard-middle", "guard-last"])
+def test_the_shipped_toolset_capability_is_the_last_leaf_of_the_resolved_chain(order):
+    """The same fact read off the settled chain, on the SHIPPED class rather than the tracing
+    subclass: `apply` yields leaves outer-first, and wrapper toolsets are applied over
+    `reversed(...)`, so being LAST in the capability chain IS being innermost in the toolset
+    chain. Last past pydantic-ai's own injected capabilities too."""
+    guard_cap = dg_pai.GuardedToolsetCapability(policies=_QUERY_POLICIES)
+    a = _MarkedToolsetCapability("A", position="innermost")
+    b = _MarkedToolsetCapability("B")
+    capabilities = {
+        "guard-first": [guard_cap, a, b],
+        "guard-middle": [a, guard_cap, b],
+        "guard-last": [a, b, guard_cap],
+    }[order]
+
+    leaves: list = []
+    _ordering_agent(capabilities).root_capability.apply(leaves.append)
+
+    assert leaves[-1] is guard_cap
+    assert leaves.index(a) < leaves.index(guard_cap)
 
 
 def test_tool_search_discovery_is_seen_by_the_hook_layer_and_not_the_toolset_layer():
@@ -1192,23 +1202,26 @@ def _plain_agent(capabilities, toolsets=None):
 
 @pytest.mark.parametrize("order", ["toolset-first", "hook-first"])
 def test_toolset_capability_and_delegation_guard_together_are_refused(order):
-    """A capability-contributed `GuardedToolset` never appears in `agent.toolsets`, so the pair
-    is only visible in the capability chain -- both classes walk it, and whichever `for_agent`
-    runs first refuses with a message naming both."""
+    """Refused, but by the SORTER, not by this file. Both classes declare
+    `wrapped_by=[AbstractCapability]`, so each demands to be outside the other and
+    `sort_capabilities` raises before any `for_agent` runs. Refusal is the correct outcome --
+    two authorizers means `guard.check()` twice per call -- but the diagnostic is pydantic-ai's
+    and names neither capability, which is why both class docstrings say that
+    "Circular ordering constraints among capabilities" on an attenu-guard agent means exactly
+    this. The sort happens inside `CombinedCapability.__post_init__`, which `Agent.__init__`
+    calls before binding, so no adapter frame is on the stack to reword it."""
     caps = [dg_pai.GuardedToolsetCapability(policies={}), dg_pai.DelegationGuard(policies={})]
     if order == "hook-first":
         caps.reverse()
 
-    with pytest.raises(dg_pai.UserError) as excinfo:
+    with pytest.raises(dg_pai.UserError, match="Circular ordering constraints"):
         _plain_agent(caps)
-
-    message = str(excinfo.value)
-    assert "both registered on this agent" in message
-    assert "GuardedToolsetCapability" in message and "DelegationGuard" in message
 
 
 def test_two_toolset_capabilities_on_one_agent_are_refused():
-    with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
+    """Same mechanism, same verdict: two of this capability each demand to be outside the other,
+    so the sorter refuses the pair before `for_agent` could name them."""
+    with pytest.raises(dg_pai.UserError, match="Circular ordering constraints"):
         _plain_agent([
             dg_pai.GuardedToolsetCapability(policies={}),
             dg_pai.GuardedToolsetCapability(policies={}),
@@ -1258,6 +1271,7 @@ def test_get_ordering_omits_exclusive_execution_when_the_field_does_not_exist(mo
 
     assert isinstance(ordering, _OrderingWithoutFlag)
     assert ordering.position == "innermost"
+    assert list(ordering.wrapped_by) == [AbstractCapability]
     assert not hasattr(ordering, "exclusive_execution")
 
 
@@ -1268,6 +1282,7 @@ def test_get_ordering_sets_exclusive_execution_when_the_field_exists(monkeypatch
 
     assert isinstance(ordering, _OrderingWithFlag)
     assert ordering.position == "innermost"
+    assert list(ordering.wrapped_by) == [AbstractCapability]
     assert ordering.exclusive_execution is True
 
 
@@ -1278,6 +1293,7 @@ def test_get_ordering_against_the_installed_pydantic_ai_is_constructible():
 
     assert isinstance(ordering, CapabilityOrdering)
     assert ordering.position == "innermost"
+    assert list(ordering.wrapped_by) == [AbstractCapability]
     assert getattr(ordering, "exclusive_execution", False) is dg_pai._ordering_supports(
         "exclusive_execution"
     )

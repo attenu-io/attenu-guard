@@ -9,13 +9,17 @@ Tested against **pydantic-ai-slim 2.31.1** (the pinned CI version), re-verified 
 | Hook point | API used |
 |---|---|
 | Child creation | `GuardedDeps.delegate(...)`, called inside the delegating tool; the child `Guard` rides down as the sub-run's `deps` (`RunContext.deps`). Pydantic AI has no callback at the delegation site, so this is a construction-site integration. |
-| **Tool invocation — start here** | `GuardedToolsetCapability`, an `AbstractCapability` registered via `Agent(capabilities=[...])` that overrides no execution hook and contributes one `GuardedToolset` over the agent's composed toolset. `get_ordering()` declares `position="innermost"`, and `CombinedCapability.get_wrapper_toolset` applies contributed wrappers over `reversed(...)`, so chain-last is toolset-**innermost**: the guard's `self.wrapped.call_tool` is the call that reaches the tool. One registration covers function tools, every toolset, and MCP. |
+| **Tool invocation — start here** | `GuardedToolsetCapability`, an `AbstractCapability` registered via `Agent(capabilities=[...])` that overrides no execution hook and contributes one `GuardedToolset` over the agent's composed toolset. `get_ordering()` declares `position="innermost", wrapped_by=[AbstractCapability]`, and `CombinedCapability.get_wrapper_toolset` applies contributed wrappers over `reversed(...)`, so chain-last is toolset-**innermost**: the guard's `self.wrapped.call_tool` is the call that reaches the tool, in every list order. One registration covers function tools, every toolset, and MCP. |
 | Tool invocation (alt) | `DelegationGuard.wrap_tool_execute` — the hook-layer capability. Same coverage, plus the built-in `search_tools` discovery call, and a denial still stops the body cold. The limit: pydantic-ai runs the whole hook chain **above** the whole toolset chain, so a wrapper toolset another capability contributes sits between this hook and the tool, and the recorded outcome is that wrapper's rather than the body's. |
 | Tool invocation (one toolset) | `GuardedToolset`, a `WrapperToolset` that checks inside `call_tool`. Build one yourself to guard exactly one toolset (say a single MCP server) instead of the whole agent. |
 
 All three share `authorize_tool_call(...)`, which never returns on a denial. Register exactly
 one of them per agent: each is a complete authorization path, and two means `guard.check()`
-runs twice for the same call. The adapter refuses the combinations at agent construction.
+runs twice for the same call. All the combinations are refused at agent construction. Two
+attenu-guard **capabilities** are refused by pydantic-ai itself, as `Circular ordering
+constraints among capabilities` — each declares `wrapped_by=[AbstractCapability]` to hold the
+innermost slot, so the sorter rejects the pair before the adapter can name them. If you see
+that error on an attenu-guard agent, you registered two authorizers.
 
 ### Where the toolset guard sits
 
@@ -30,14 +34,19 @@ ToolSearchToolset          <- outside; serves `search_tools` itself, never deleg
           FunctionToolset  <- runs the tool body
 ```
 
-**Known limit.** `position="innermost"` is a *tier*, not a unique slot: among capabilities in
-it, list order is preserved and the one listed **last** becomes toolset-innermost. So if
-another capability also claims `innermost` and contributes a wrapper toolset that overrides
-`call_tool`, **list `GuardedToolsetCapability` after it**. pydantic-ai's `CapabilityOrdering`
-gains an `exclusive_execution` flag on the branch of
-[pydantic/pydantic-ai#8067](https://github.com/pydantic/pydantic-ai/pull/8067) that removes the
-caveat entirely; no released version has it (checked against 2.31.1, 2.37.0 and 2.39.0), and
-`get_ordering()` feature-detects it and sets it as soon as it ships.
+**Why the ordering is exact.** `position="innermost"` on its own is a *tier*: among
+capabilities in it, list order is preserved and the one listed **last** wins the slot, so the
+guarantee would depend on where you typed this capability. `wrapped_by=[AbstractCapability]`
+adds an edge to every sibling at once (a type ref is matched with `issubclass`, self-edge
+skipped), so the sorter settles it last however you list it. Probed on 2.31.1 against a sibling
+`innermost` wrapper toolset in both orders, and against one injected per-run — the guard is
+innermost every time. There is no "list it last" rule to remember.
+
+pydantic-ai's `CapabilityOrdering` gains an `exclusive_execution` flag on the branch of
+[pydantic/pydantic-ai#8067](https://github.com/pydantic/pydantic-ai/pull/8067); no released
+version has it (checked against 2.31.1, 2.37.0 and 2.39.0). `get_ordering()` feature-detects it
+and sets it as soon as it ships. It is a better diagnostic rather than a fix: the edge already
+holds the slot today.
 
 **Durable execution composes today.** Temporal, DBOS and Prefect claim `innermost` too, but
 they swap *leaf* toolsets for durable ones rather than wrapping the composed toolset, so the
