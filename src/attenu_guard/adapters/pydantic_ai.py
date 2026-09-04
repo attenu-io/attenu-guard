@@ -431,10 +431,10 @@ def _find_execution_wrapper_nested_inside(
     tier, which is why it stays correct if pydantic-ai's ordering primitives change.
 
     With `get_ordering()` declaring `wrapped_by=[AbstractCapability]` nothing can be ordered
-    after `mine`, so this is belt-and-braces on both call sites (`for_agent`, over
-    `agent.root_capability`, and `wrap_tool_execute`, over `ctx.root_capability`) -- see the
-    class docstring's "ORDERING". If `mine` is not in the chain at all its position cannot be
-    established, so every execution wrapper in the chain is reported: fail closed."""
+    after `mine`, so this is belt-and-braces at its ONE call site -- `wrap_tool_execute`, over
+    `ctx.root_capability`, once per call; see the class docstring's "ORDERING". If `mine` is not
+    in the chain at all its position cannot be established, so every execution wrapper in the
+    chain is reported: fail closed."""
     if not isinstance(capabilities, CombinedCapability):
         return None
     leaves: list[AbstractCapability[Any]] = []
@@ -577,13 +577,17 @@ class DelegationGuard(AbstractCapability[Any]):
     VERSION FLOOR: `wrapped_by` is present since at least 2.29.0, below the `pydantic-ai-slim
     >=2.31` extra floor, and `capabilities/_ordering.py` is byte-identical from 2.31.0 to 2.37.0.
 
-    THE TWO CHECKS ARE BELT-AND-BRACES, NOT THE GUARANTEE. `for_agent()` and
-    `wrap_tool_execute` both ask `_find_execution_wrapper_nested_inside(...)` whether anything
-    in the RESOLVED chain is ordered after this capability and overrides `wrap_tool_execute` --
-    i.e. whether anything at all sits between it and the raw body. Under the ordering above
-    nothing can, and both checks stay silent; they are kept for a future pydantic-ai ordering
-    primitive that could out-rank `wrapped_by`, and they read the settled chain directly rather
-    than inferring position from a tier, so they remain correct if that machinery changes.
+    THE CHECK IS BELT-AND-BRACES, NOT THE GUARANTEE. `wrap_tool_execute` asks
+    `_find_execution_wrapper_nested_inside(...)`, once per call, whether anything in the chain
+    the RUN resolved is ordered after this capability and overrides `wrap_tool_execute` -- i.e.
+    whether another capability's hook sits between it and the tool invocation. Under the
+    ordering above nothing can, and the check stays silent; it is kept for a future pydantic-ai
+    ordering primitive that could out-rank `wrapped_by`, and it reads the settled chain directly
+    rather than inferring position from a tier, so it remains correct if that machinery changes.
+    `for_agent()` carried a second copy and no longer does: it could only fire on a chain
+    assembled past the sorter and it could not see per-run additions, both of which the per-call
+    re-read handles. `for_agent()` still refuses a second AUTHORIZER, which is a different
+    question and one that construction time can answer.
 
     THE ONE CASE THE CHECKS CANNOT IMPROVE: two capabilities that BOTH demand the last slot.
     A sibling declaring `wrapped_by=[AbstractCapability]` (or `wrapped_by=[DelegationGuard]`,
@@ -675,15 +679,13 @@ class DelegationGuard(AbstractCapability[Any]):
         call and never listed in `agent.toolsets` at all) -- there is no hook this file can use
         to see that ahead of time; the class docstring's warning is what covers it.
 
-        It then asks `_find_execution_wrapper_nested_inside` whether anything in
-        `agent.root_capability` is ordered AFTER this capability and overrides
-        `wrap_tool_execute` (checked via `type(leaf).wrap_tool_execute is not
-        AbstractCapability.wrap_tool_execute`, the same idiom pydantic-ai's own
-        `_has_wrap_node_run` uses internally for the analogous check). `get_ordering()`'s
-        `wrapped_by=[AbstractCapability]` edge means nothing can be, so this is belt-and-braces
-        -- see the class docstring's "ORDERING", and `wrap_tool_execute` for the same check
-        against the chain a run actually resolves. A sibling that ALSO demands the last slot
-        never reaches this method at all: the sorter refuses it first, with its own cycle error.
+        It does NOT ask whether anything is ordered INSIDE this capability. That check ran here
+        too until this release and was removed: `wrapped_by=[AbstractCapability]` means nothing
+        can be, so a construction-time copy could only ever fire on a chain assembled past the
+        sorter, and it could not see per-run additions at all. The per-call re-read in
+        `wrap_tool_execute` covers the same ground against the chain a run actually resolves, so
+        that is where the one copy lives. A sibling that ALSO demands the last slot never
+        reaches this method either: the sorter refuses it first, with its own cycle error.
         """
         other = _other_authorizer_capability(agent, self)
         if other is not None:
@@ -703,11 +705,6 @@ class DelegationGuard(AbstractCapability[Any]):
                         "whole agent, or GuardedToolset for just this toolset (not both)."
                     )
                 seen = getattr(seen, "wrapped", None)
-
-        root = getattr(agent, "root_capability", None)
-        nested = _find_execution_wrapper_nested_inside(root, self)
-        if nested is not None:
-            raise UserError(_execution_wrapper_nested_inside_message(nested))
         return self
 
     async def wrap_tool_execute(
@@ -719,15 +716,14 @@ class DelegationGuard(AbstractCapability[Any]):
         args: dict[str, Any],
         handler: Callable[[dict[str, Any]], Any],
     ) -> Any:
-        """The same nesting check as `for_agent()`, against the chain the RUN actually resolved.
-        `ctx.root_capability` is the agent's own documented mechanism for this ("the effective
+        """The nesting check, against the chain the RUN actually resolved -- the only copy of
+        it; `for_agent()` no longer carries one. `ctx.root_capability` is the agent's own documented mechanism for this ("the effective
         root capability for this run... capability implementations can use this to validate
         per-run additions" -- `pydantic_ai._run_context.RunContext.root_capability`'s own
         docstring), so it reflects what construction cannot see: a sibling whose `for_agent()`
         REBINDS to an execution wrapper, and a per-run `agent.run(..., capabilities=[...])`
         injection. Both now sort OUTSIDE this capability rather than inside it (class docstring,
-        "ORDERING"), so like `for_agent()`'s copy this is belt-and-braces against a future
-        ordering primitive. It still runs BEFORE `_resolve()` or `guard.check()`, so a rejection
+        "ORDERING"), so this is belt-and-braces against a future ordering primitive. It still runs BEFORE `_resolve()` or `guard.check()`, so a rejection
         writes nothing to the ledger, exactly as an unresolved tool or a missing Guard does."""
         nested = _find_execution_wrapper_nested_inside(ctx.root_capability, self)
         if nested is not None:

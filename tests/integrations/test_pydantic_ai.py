@@ -819,11 +819,10 @@ def _conflict_agent(sink: dict, capabilities):
 
 
 def test_a_wrapper_nested_inside_is_refused_per_call_before_any_ledger_write(monkeypatch):
-    """The other half of the belt-and-braces: that the per-call re-read of `ctx.root_capability`
-    is still WIRED to refuse, and refuses BEFORE `_resolve()`/`guard.check()` -- zero allow or
-    outcome entries, tool body never reached. The detector is stubbed because, as above, no
-    legal capability list reaches this state; the agent is built first so `for_agent()`'s own
-    copy of the check runs unstubbed."""
+    """The belt-and-braces check as it now exists: ONE copy, the per-call re-read of
+    `ctx.root_capability`, still WIRED to refuse, and refusing BEFORE `_resolve()`/
+    `guard.check()` -- zero allow or outcome entries, tool body never reached. The detector is
+    stubbed because, as above, no legal capability list reaches this state."""
     sink: dict = {}
     guard_cap = dg_pai.DelegationGuard(policies=_QUERY_POLICIES)
     agent = _conflict_agent(sink, [guard_cap])
@@ -835,6 +834,24 @@ def test_a_wrapper_nested_inside_is_refused_per_call_before_any_ledger_write(mon
         _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
 
     assert [e for e in root.audit_log().entries if e["event"] in ("allow", "outcome")] == []
+    assert sink == {}, "the tool body must never have run"
+
+
+def test_for_agent_no_longer_refuses_a_nested_wrapper_at_construction(monkeypatch):
+    """The construction-time copy of the nesting check was removed in the release that added
+    `GuardedToolsetCapability`. With the detector reporting a nested execution wrapper for every
+    chain it is asked about, building the agent used to raise from `for_agent()`; it now builds,
+    and the refusal happens per call instead. `for_agent()` still refuses a second AUTHORIZER --
+    a different question, asserted separately above."""
+    sink: dict = {}
+    other = _OtherInnermostWrapper()
+    monkeypatch.setattr(dg_pai, "_find_execution_wrapper_nested_inside", lambda chain, mine: other)
+
+    agent = _conflict_agent(sink, [dg_pai.DelegationGuard(policies=_QUERY_POLICIES)])
+
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+    with pytest.raises(dg_pai.UserError, match="also wraps tool execution"):
+        _run(agent.run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
     assert sink == {}, "the tool body must never have run"
 
 
