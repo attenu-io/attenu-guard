@@ -868,9 +868,22 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
       * listed BEFORE this one, this guard is innermost and the guarantee holds.
 
     Both directions live-probed on 2.31.1. Until the flag below is released, LIST THIS
-    CAPABILITY LAST. The realistic collision is a durability capability such as
-    `TemporalDurability`, which also claims `position="innermost"`: listed after this one its
-    durable toolset sits inside the guard, and the call this guard records is that wrapper's.
+    CAPABILITY LAST.
+
+    BESIDE A DURABILITY CAPABILITY. `BaseDurabilityCapability` -- Temporal, DBOS, Prefect --
+    also declares `position="innermost"` (`pydantic_ai/durable_exec/_base.py:282-285` as of
+    2.31.1), but it is NOT the tier collision above, because it does not wrap the composed
+    toolset at all: `get_wrapper_toolset` calls `visit_and_replace` to swap the LEAF toolsets
+    for durable ones (`_base.py:268-280`), and `WrapperToolset.visit_and_replace` rebuilds a
+    wrapper AROUND its visited inner toolset rather than displacing it
+    (`pydantic_ai/toolsets/wrapper.py`). So whichever of the two is applied first, the durable
+    wrapper ends up INSIDE this guard: the pair composes, and this guard's record encloses the
+    durable dispatch of the tool. Where `exclusive_execution` exists that changes -- the
+    durability base sets it too, so pydantic-ai refuses the pair at construction, naming both.
+    That is the maintainer's point in #8007 that only one thing can hold the innermost slot, and
+    it is a real cost of setting the flag: once it ships, an agent runs a durable engine or this
+    capability, not both. This file adds no refusal of its own here; on a released pydantic-ai
+    the composition is sound and worth keeping.
 
     CLOSING THE CAVEAT. `CapabilityOrdering` gained an `exclusive_execution` flag on the branch
     of pydantic/pydantic-ai#8067 (probed at head 9f5863f, which reports itself as

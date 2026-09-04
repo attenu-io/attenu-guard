@@ -1285,3 +1285,41 @@ def test_the_shipped_example_denies_the_export_under_either_hook_point(guard):
     assert any(
         e["event"] == "deny" and e.get("tool") == "crm_export" for e in root.audit_log().entries
     )
+
+
+class _LeafSwappingCapability(AbstractCapability):
+    """A durability capability's shape, without the engine. `BaseDurabilityCapability` claims
+    `position="innermost"` but does not wrap the composed toolset: `get_wrapper_toolset` calls
+    `visit_and_replace` to swap LEAF toolsets for durable ones, and
+    `WrapperToolset.visit_and_replace` rebuilds a wrapper AROUND its visited inner toolset. This
+    reproduces exactly that, so the composition can be asserted without a Temporal worker."""
+
+    def get_ordering(self):
+        return CapabilityOrdering(position="innermost")
+
+    def get_wrapper_toolset(self, toolset):
+        def swap(ts):
+            return _MarkedToolset(ts, label="durable") if isinstance(ts, FunctionToolset) else ts
+
+        return toolset.visit_and_replace(swap)
+
+
+@pytest.mark.parametrize("order", ["guard-first", "guard-last"])
+def test_a_leaf_swapping_durability_capability_composes_inside_the_guard(order):
+    """Neither list order puts the durable wrapper outside the guard, because it never wraps the
+    composed toolset: applied first it swaps the raw leaves and the guard then wraps the result;
+    applied second it descends through the guard and rebuilds it around the swapped leaves. So
+    the guard's record encloses the durable dispatch either way, and the pair composes on every
+    released pydantic-ai. When `exclusive_execution` ships, both capabilities set it and
+    pydantic-ai refuses the pair instead."""
+    _TRACE.clear()
+    guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
+    durable = _LeafSwappingCapability()
+    capabilities = [guard_cap, durable] if order == "guard-first" else [durable, guard_cap]
+
+    root = _run_traced(_ordering_agent(capabilities))
+
+    assert _TRACE == [
+        "guard-ts:enter", "durable:enter", "raw-body", "durable:exit", "guard-ts:exit",
+    ]
+    _assert_outcome_is_the_raw_body(root)

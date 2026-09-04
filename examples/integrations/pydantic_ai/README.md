@@ -32,13 +32,18 @@ ToolSearchToolset          <- outside; serves `search_tools` itself, never deleg
 
 **Known limit.** `position="innermost"` is a *tier*, not a unique slot: among capabilities in
 it, list order is preserved and the one listed **last** becomes toolset-innermost. So if
-another capability also claims `innermost` and contributes a `call_tool`-overriding wrapper
-toolset — a durability capability such as `TemporalDurability` is the realistic case — **list
-`GuardedToolsetCapability` after it**. pydantic-ai's `CapabilityOrdering` gains an
-`exclusive_execution` flag on the branch of
+another capability also claims `innermost` and contributes a wrapper toolset that overrides
+`call_tool`, **list `GuardedToolsetCapability` after it**. pydantic-ai's `CapabilityOrdering`
+gains an `exclusive_execution` flag on the branch of
 [pydantic/pydantic-ai#8067](https://github.com/pydantic/pydantic-ai/pull/8067) that removes the
 caveat entirely; no released version has it (checked against 2.31.1, 2.37.0 and 2.39.0), and
 `get_ordering()` feature-detects it and sets it as soon as it ships.
+
+**Durable execution composes today.** Temporal, DBOS and Prefect claim `innermost` too, but
+they swap *leaf* toolsets for durable ones rather than wrapping the composed toolset, so the
+durable wrapper lands inside this guard whichever order the two are applied in. When
+`exclusive_execution` ships, both capabilities set it and pydantic-ai refuses the pair: from
+then on an agent runs a durable engine or this capability, not both.
 
 ## Run it
 
