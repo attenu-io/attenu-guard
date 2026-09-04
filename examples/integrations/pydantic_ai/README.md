@@ -15,11 +15,17 @@ Tested against **pydantic-ai-slim 2.31.1** (the pinned CI version), re-verified 
 
 All three share `authorize_tool_call(...)`, which never returns on a denial. Register exactly
 one of them per agent: each is a complete authorization path, and two means `guard.check()`
-runs twice for the same call. All the combinations are refused at agent construction. Two
-attenu-guard **capabilities** are refused by pydantic-ai itself, as `Circular ordering
-constraints among capabilities` — each declares `wrapped_by=[AbstractCapability]` to hold the
-innermost slot, so the sorter rejects the pair before the adapter can name them. If you see
-that error on an attenu-guard agent, you registered two authorizers.
+runs twice for the same call.
+
+What is refused at agent construction, and by whom:
+
+| Combination | Refused by |
+|---|---|
+| Two attenu-guard **capabilities** (`GuardedToolsetCapability` beside `DelegationGuard`, or two of either) | pydantic-ai's sorter, as `Circular ordering constraints among capabilities` — each declares `wrapped_by=[AbstractCapability]` to hold the innermost slot, so the pair cycles before the adapter can name them. **If you see that error on an attenu-guard agent, you registered two authorizers.** Where `exclusive_execution` exists, pydantic-ai names them instead |
+| An agent-wide capability plus a `GuardedToolset` you built and listed in `toolsets=[...]` | the adapter's `for_agent()`, naming both. The walk follows `.wrapped` chains and `.toolsets` branches, so one nested inside a `CombinedToolset` is caught too |
+
+**Not detected:** a `GuardedToolset` constructed inside a tool call and never listed in
+`toolsets=[...]`. Nothing at construction time can see it, so don't do that.
 
 ### Where the toolset guard sits
 

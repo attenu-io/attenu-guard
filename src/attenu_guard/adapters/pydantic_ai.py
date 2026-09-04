@@ -448,38 +448,31 @@ def _find_execution_wrapper_nested_inside(
     return None
 
 
-def _capability_leaves(agent: Any) -> list[AbstractCapability[Any]]:
-    """Every capability leaf bound to `agent`, outer-first.
+def _guarded_toolset_in(toolsets: Any) -> Optional["GuardedToolset"]:
+    """The first `GuardedToolset` anywhere under the agent's declared `toolsets`, or `None`.
 
-    `CombinedCapability.apply` is pydantic-ai's own public visitor; a lone capability is not
-    combined at all, so it is its own single leaf."""
-    root = getattr(agent, "root_capability", None)
-    if isinstance(root, CombinedCapability):
-        leaves: list[AbstractCapability[Any]] = []
-        root.apply(leaves.append)
-        return leaves
-    return [root] if isinstance(root, AbstractCapability) else []
-
-
-def _other_authorizer_capability(
-    agent: Any, mine: AbstractCapability[Any]
-) -> Optional[AbstractCapability[Any]]:
-    """Another attenu-guard authorizing CAPABILITY on the same agent, or `None`.
-
-    Both `DelegationGuard` and `GuardedToolsetCapability` authorize every tool call on the
-    agent, so two of them (of either kind) means `guard.check()` runs twice per call. A
-    capability-contributed `GuardedToolset` never appears in `agent.toolsets` -- it is built
-    during toolset composition, not registered -- so the capability chain is the only place
-    this pair would be visible. In practice it is not reached on current pydantic-ai: both
-    classes declare `wrapped_by=[AbstractCapability]`, so any pair of them cycles in
-    `sort_capabilities` before `for_agent` runs (probed on 2.31.1 for both combinations). This
-    is kept as belt-and-braces for an ordering primitive that stopped cycling, and it reads the
-    settled chain rather than re-deriving it."""
-    for leaf in _capability_leaves(agent):
-        if leaf is mine:
+    A toolset tree nests two ways and BOTH have to be followed: `WrapperToolset` chains through
+    `.wrapped`, and `CombinedToolset` branches through `.toolsets`. Following only `.wrapped`
+    let a `GuardedToolset` inside a `CombinedToolset` in `toolsets=[...]` reach an agent that
+    also carried an agent-wide authorizer, and every call was then authorized twice -- two
+    allow/outcome pairs on the ledger for one body. `AbstractToolset.apply` is not usable here:
+    `WrapperToolset.apply` forwards to `self.wrapped` without visiting the wrapper itself, so a
+    top-level `GuardedToolset` would be skipped. Identity-keyed, so a cyclic tree terminates."""
+    stack = list(toolsets or ())
+    seen: set[int] = set()
+    while stack:
+        toolset = stack.pop()
+        if toolset is None or id(toolset) in seen:
             continue
-        if isinstance(leaf, (DelegationGuard, GuardedToolsetCapability)):
-            return leaf
+        seen.add(id(toolset))
+        if isinstance(toolset, GuardedToolset):
+            return toolset
+        inner = getattr(toolset, "wrapped", None)
+        if inner is not None:
+            stack.append(inner)
+        branches = getattr(toolset, "toolsets", None)
+        if isinstance(branches, (list, tuple)):
+            stack.extend(branches)
     return None
 
 
@@ -652,7 +645,9 @@ class DelegationGuard(AbstractCapability[Any]):
     CONSTRUCTION time (not per-call): the `GuardedToolsetCapability` pair by the sorter, as
     "Circular ordering constraints among capabilities" (see "THE ONE CASE THE CHECKS CANNOT
     IMPROVE"), the hand-built `GuardedToolset` by `for_agent()` with a message of its own -- see
-    its docstring.
+    its docstring. What no construction-time check can see is a `GuardedToolset` built
+    dynamically inside a tool call and never listed in `toolsets=[...]` at all; this paragraph
+    is what covers that.
     """
 
     def __init__(
@@ -680,14 +675,13 @@ class DelegationGuard(AbstractCapability[Any]):
 
     def for_agent(self, agent: Any) -> "DelegationGuard":
         """Rejects a SECOND attenu-guard authorizer on the SAME agent at AGENT CONSTRUCTION
-        time -- in practice a `GuardedToolset` the caller built and passed in `toolsets=[...]`.
-        A `GuardedToolsetCapability` in `capabilities=[...]` is rejected too, but by the sorter:
-        it declares `wrapped_by=[AbstractCapability]` exactly as this class does, so the pair
-        cycles before any `for_agent` runs (see the class docstring's "THE ONE CASE THE CHECKS
-        CANNOT IMPROVE"). The capability-chain walk here is belt-and-braces for an ordering
-        primitive that stopped cycling; a capability-contributed `GuardedToolset` is built during
-        toolset composition and never appears in `agent.toolsets`, so the capability chain would
-        be the only place it shows. Called after the agent's toolsets are fully assembled
+        time: a `GuardedToolset` the caller built and passed in `toolsets=[...]`, found by
+        `_guarded_toolset_in`, which follows BOTH `.wrapped` chains and `.toolsets` branches so
+        one nested inside a `CombinedToolset` is caught too. A `GuardedToolsetCapability` in
+        `capabilities=[...]` is rejected as well, but by the sorter rather than here: it
+        declares `wrapped_by=[AbstractCapability]` exactly as this class does, so the pair cycles
+        before any `for_agent` runs (see the class docstring's "THE ONE CASE THE CHECKS CANNOT
+        IMPROVE"). Called after the agent's toolsets are fully assembled
         (`AbstractCapability.for_agent`'s own docstring: an `innermost` capability's `for_agent`
         runs in a second phase specifically so `agent.toolsets` is complete), so `agent.toolsets`
         is walked here, unwrapping `WrapperToolset` chains, for a `GuardedToolset` instance --
@@ -705,24 +699,12 @@ class DelegationGuard(AbstractCapability[Any]):
         that is where the one copy lives. A sibling that ALSO demands the last slot never
         reaches this method either: the sorter refuses it first, with its own cycle error.
         """
-        other = _other_authorizer_capability(agent, self)
-        if other is not None:
+        found = _guarded_toolset_in(getattr(agent, "toolsets", None))
+        if found is not None:
             raise UserError(_two_authorizers_message(
-                "DelegationGuard", type(other).__name__, "both in capabilities=[...]"
+                "DelegationGuard", "GuardedToolset",
+                f"the GuardedToolset wraps {found.wrapped!r} somewhere under toolsets=[...]",
             ))
-
-        for toolset in getattr(agent, "toolsets", None) or ():
-            seen = toolset
-            while seen is not None:
-                if isinstance(seen, GuardedToolset):
-                    raise UserError(
-                        "DelegationGuard and GuardedToolset are both registered on this agent "
-                        f"(GuardedToolset wraps {seen.wrapped!r}). Each is a complete, "
-                        "independent authorization path; using both means guard.check() runs "
-                        "TWICE for the same call. Use exactly one: DelegationGuard for the "
-                        "whole agent, or GuardedToolset for just this toolset (not both)."
-                    )
-                seen = getattr(seen, "wrapped", None)
         return self
 
     async def wrap_tool_execute(
@@ -925,8 +907,10 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     AUTHORIZERS. The sort runs inside `CombinedCapability.__post_init__`, which `Agent.__init__`
     calls BEFORE any capability's `for_agent`, so no adapter frame is on the stack to reword it.
     `for_agent()` still refuses the hand-built `GuardedToolset` case with a message of its own,
-    and keeps the capability-chain check as belt-and-braces for an ordering primitive that
-    stopped cycling.
+    following both `.wrapped` chains and `.toolsets` branches so one nested inside a
+    `CombinedToolset` is caught too. What no construction-time check can see is a
+    `GuardedToolset` built dynamically inside a tool call and never listed in `toolsets=[...]`
+    at all; this paragraph is what covers that.
     """
 
     def __init__(
@@ -959,10 +943,18 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
         return CapabilityOrdering(**kwargs)
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[Any]) -> AbstractToolset[Any]:
-        """One `GuardedToolset` around whatever the agent composed. Called once per agent build
-        with this capability's own configuration forwarded whole, so the capability and the
-        hand-built wrapper below behave identically -- there is one authorization path, not two
-        implementations of one."""
+        """One `GuardedToolset` around whatever the agent composed, with this capability's own
+        configuration forwarded whole -- the capability and a hand-built `GuardedToolset` are one
+        authorization path, not two implementations of one.
+
+        Called ONCE PER RUN, not at agent construction: pydantic-ai's own contract for this hook
+        is "Called per-run with the combined non-output toolset (after the `prepare_tools` hook
+        has already wrapped it)... called each run (after `for_run`)"
+        (`pydantic_ai/capabilities/abstract.py:415-433`). Two things follow. Output tools are
+        added separately and are not in the toolset handed here, so they are exempt from this
+        hook point exactly as they are from `wrap_tool_execute`. And `for_agent()` cannot see
+        what this returns, which is why the dual-instrumentation check reads `agent.toolsets`
+        rather than the composed chain."""
         return GuardedToolset(
             toolset,
             policies=self.policies,
@@ -972,29 +964,21 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
         )
 
     def for_agent(self, agent: Any) -> "GuardedToolsetCapability":
-        """Refuses a second attenu-guard authorizer at AGENT CONSTRUCTION time: in practice the
+        """Refuses a second attenu-guard authorizer at AGENT CONSTRUCTION time: the
         `GuardedToolset` the caller built and passed in `toolsets=[...]`, which this capability
-        would wrap -- two checks, one call. The CAPABILITY pairs (a `DelegationGuard` or another
-        `GuardedToolsetCapability` in `capabilities=[...]`) never reach this method: both classes
-        declare `wrapped_by=[AbstractCapability]`, so the sorter raises "Circular ordering
-        constraints among capabilities" first. The capability-chain walk is kept as
-        belt-and-braces for an ordering primitive that stopped cycling. What none of it can see
-        is a `GuardedToolset` constructed dynamically inside a tool and never listed; the class
-        docstring's "DO NOT install a second..." is what covers that."""
-        other = _other_authorizer_capability(agent, self)
-        if other is not None:
+        would wrap -- two checks, one call. `_guarded_toolset_in` follows BOTH `.wrapped` chains
+        and `.toolsets` branches, so one nested inside a `CombinedToolset` is caught too. The
+        CAPABILITY pairs (a `DelegationGuard` or another `GuardedToolsetCapability` in
+        `capabilities=[...]`) never reach this method: both classes declare
+        `wrapped_by=[AbstractCapability]`, so the sorter raises "Circular ordering constraints
+        among capabilities" first. What none of it can see is a `GuardedToolset` constructed
+        dynamically inside a tool and never listed; the class docstring's "DO NOT install a
+        second..." is what covers that."""
+        found = _guarded_toolset_in(getattr(agent, "toolsets", None))
+        if found is not None:
             raise UserError(_two_authorizers_message(
-                "GuardedToolsetCapability", type(other).__name__, "both in capabilities=[...]"
+                "GuardedToolsetCapability", "GuardedToolset",
+                f"this capability wraps the agent's toolsets, and {found.wrapped!r} is already "
+                "wrapped by a GuardedToolset somewhere under toolsets=[...]",
             ))
-
-        for toolset in getattr(agent, "toolsets", None) or ():
-            seen = toolset
-            while seen is not None:
-                if isinstance(seen, GuardedToolset):
-                    raise UserError(_two_authorizers_message(
-                        "GuardedToolsetCapability", "GuardedToolset",
-                        f"the capability wraps the agent's toolsets, and {seen.wrapped!r} is "
-                        "already wrapped by a GuardedToolset in toolsets=[...]",
-                    ))
-                seen = getattr(seen, "wrapped", None)
         return self

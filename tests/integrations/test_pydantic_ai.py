@@ -31,7 +31,7 @@ from pydantic_ai.capabilities.combined import CombinedCapability  # noqa: E402
 from pydantic_ai.exceptions import ModelRetry  # noqa: E402
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart  # noqa: E402
 from pydantic_ai.models.function import FunctionModel  # noqa: E402
-from pydantic_ai.toolsets import FunctionToolset, WrapperToolset  # noqa: E402
+from pydantic_ai.toolsets import CombinedToolset, FunctionToolset, WrapperToolset  # noqa: E402
 
 from attenu_guard import (  # noqa: E402
     Authority,
@@ -1219,9 +1219,17 @@ def test_toolset_capability_and_delegation_guard_together_are_refused(order):
 
 
 def test_two_toolset_capabilities_on_one_agent_are_refused():
-    """Same mechanism, same verdict: two of this capability each demand to be outside the other,
-    so the sorter refuses the pair before `for_agent` could name them."""
-    with pytest.raises(dg_pai.UserError, match="Circular ordering constraints"):
+    """Same verdict, and pydantic-ai's own diagnostic improves once `exclusive_execution` exists.
+    Without the field both capabilities are separated only by their `wrapped_by` edges, each
+    demanding to be outside the other, and the sorter reports the bare cycle. With it, both also
+    declare the flag and pydantic-ai names them and explains why only one can be innermost --
+    which is what makes the flag worth setting even though the edge already holds the slot."""
+    expected = (
+        "each require that nothing nests inside them"
+        if dg_pai._ordering_supports("exclusive_execution")
+        else "Circular ordering constraints"
+    )
+    with pytest.raises(dg_pai.UserError, match=expected):
         _plain_agent([
             dg_pai.GuardedToolsetCapability(policies={}),
             dg_pai.GuardedToolsetCapability(policies={}),
@@ -1234,6 +1242,39 @@ def test_toolset_capability_over_a_hand_built_guarded_toolset_is_refused():
 
     with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
         _plain_agent([dg_pai.GuardedToolsetCapability(policies={})], toolsets=[guarded])
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [dg_pai.GuardedToolsetCapability, dg_pai.DelegationGuard],
+    ids=["toolset-capability", "hook"],
+)
+def test_a_guarded_toolset_nested_in_a_combined_toolset_is_still_refused(guard):
+    """A toolset tree nests two ways. `WrapperToolset` chains through `.wrapped`, which both
+    `for_agent` walks followed; `CombinedToolset` BRANCHES through `.toolsets`, which they did
+    not. So a hand-built `GuardedToolset` one level inside a `CombinedToolset` in `toolsets=[...]`
+    slipped past both agent-wide authorizers and every call was authorized twice -- measured
+    before the fix as two allow entries and two outcome entries on the ledger for one tool body,
+    on both classes."""
+    inner = FunctionToolset()
+
+    @inner.tool_plain
+    def crm_query(rows: int) -> str:  # pragma: no cover - must never be reached
+        return f"{rows} rows"
+
+    nested = CombinedToolset([dg_pai.GuardedToolset(inner, policies=_QUERY_POLICIES)])
+
+    with pytest.raises(dg_pai.UserError, match="both registered on this agent"):
+        _plain_agent([guard(policies=_QUERY_POLICIES)], toolsets=[nested])
+
+
+def test_a_combined_toolset_with_no_guarded_toolset_does_not_trip_the_check():
+    """The negative case for the deeper walk: branching through `.toolsets` must not start
+    reporting ordinary nested toolsets."""
+    _plain_agent(
+        [dg_pai.GuardedToolsetCapability(policies={})],
+        toolsets=[CombinedToolset([FunctionToolset(), FunctionToolset()])],
+    )
 
 
 def test_the_toolset_capability_alone_constructs_and_runs():
