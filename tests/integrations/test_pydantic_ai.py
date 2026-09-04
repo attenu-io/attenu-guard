@@ -972,7 +972,8 @@ class _MarkedToolset(WrapperToolset[Any]):
 
 class _MarkedToolsetCapability(AbstractCapability):
     """A third-party-shaped capability that contributes `_MarkedToolset`, optionally claiming the
-    `innermost` tier -- the collision `GuardedToolsetCapability`'s "THE TIER CAVEAT" describes."""
+    `innermost` tier -- the collision `GuardedToolsetCapability`'s "THE TIER, AND THE EDGE THAT
+    CLOSES IT" describes."""
 
     def __init__(self, label: str, position: str | None = None):
         self.label = label
@@ -1275,6 +1276,40 @@ def test_a_combined_toolset_with_no_guarded_toolset_does_not_trip_the_check():
         [dg_pai.GuardedToolsetCapability(policies={})],
         toolsets=[CombinedToolset([FunctionToolset(), FunctionToolset()])],
     )
+
+
+@pytest.mark.parametrize("entry_point", ["capability", "hand-built"])
+def test_a_fail_closed_refusal_names_the_entry_point_the_user_actually_wrote(entry_point):
+    """`UnmappedToolError` and `MissingGuardError` used to say "GuardedToolset:" whatever put the
+    toolset there, so a refusal on a `GuardedToolsetCapability` agent pointed at an object the
+    user never wrote. `GuardedToolset.label` is a dataclass field -- so it survives the
+    `dataclasses.replace` rebuild `for_run` does -- and the capability sets its own class name."""
+    expected = "GuardedToolsetCapability" if entry_point == "capability" else "GuardedToolset"
+
+    def agent_for(policies):
+        toolset = FunctionToolset()
+
+        @toolset.tool_plain
+        def crm_query(rows: int) -> str:  # pragma: no cover - must never be reached
+            return f"{rows} rows"
+
+        if entry_point == "capability":
+            toolsets = [toolset]
+            capabilities = [dg_pai.GuardedToolsetCapability(policies=policies)]
+        else:
+            toolsets = [dg_pai.GuardedToolset(toolset, policies=policies)]
+            capabilities = []
+        return Agent(
+            FunctionModel(single_read_script), toolsets=toolsets, capabilities=capabilities
+        )
+
+    root = Guard.issue("orchestrator", demo.ORCHESTRATOR_AUTHORITY, task="root", schema_version=2)
+
+    with pytest.raises(dg_pai.UnmappedToolError, match=f"^{expected}: "):
+        _run(agent_for({}).run("go", deps=dg_pai.GuardedDeps(guard=root, app=None)))
+
+    with pytest.raises(dg_pai.MissingGuardError, match=f"^{expected}: "):
+        _run(agent_for(_QUERY_POLICIES).run("go", deps=object()))
 
 
 def test_the_toolset_capability_alone_constructs_and_runs():

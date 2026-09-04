@@ -92,9 +92,11 @@ def build_scenario(ops: Ops, *, summarizer_script, on_denial: str = "raise",
 
     `guard` selects the tool-invocation hook point. The default,
     `GuardedToolsetCapability`, authorizes from inside the toolset chain, closest to the
-    tool body. Pass `DelegationGuard` for the hook-layer capability, which also covers the
-    built-in `search_tools` discovery call but sits outside every wrapper toolset an
-    agent's other capabilities contribute. Both deny the export below, identically.
+    tool body. Pass `DelegationGuard` — import it yourself from
+    `attenu_guard.adapters.pydantic_ai`; this file does not — for the hook-layer capability,
+    which also covers the built-in `search_tools` discovery call but sits outside every
+    wrapper toolset an agent's other capabilities contribute. Both deny the export below,
+    identically.
     """
 
     # ---- the sub-agent, and its tools -----------------------------------

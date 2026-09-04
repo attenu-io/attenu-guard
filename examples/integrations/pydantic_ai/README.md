@@ -1,8 +1,9 @@
 # attenu-guard x Pydantic AI
 
 Enforced authority attenuation for Pydantic AI's **agent delegation** pattern.
-Tested against **pydantic-ai-slim 2.31.1** (the pinned CI version), re-verified against
-**2.37.0** and **2.39.0** (MIT, requires Python >= 3.10).
+Tested against **pydantic-ai-slim 2.31.1**, the version CI pins, and re-verified against
+**2.39.0**, the latest release (MIT, requires Python >= 3.10). Line citations in the adapter are
+as of 2.37.0; behaviour is stated against the version it was probed on.
 
 ## What it hooks
 
@@ -13,9 +14,12 @@ Tested against **pydantic-ai-slim 2.31.1** (the pinned CI version), re-verified 
 | Tool invocation (alt) | `DelegationGuard.wrap_tool_execute` — the hook-layer capability. Same coverage, plus the built-in `search_tools` discovery call, and a denial still stops the body cold. The limit: pydantic-ai runs the whole hook chain **above** the whole toolset chain, so a wrapper toolset another capability contributes sits between this hook and the tool, and the recorded outcome is that wrapper's rather than the body's. |
 | Tool invocation (one toolset) | `GuardedToolset`, a `WrapperToolset` that checks inside `call_tool`. Build one yourself to guard exactly one toolset (say a single MCP server) instead of the whole agent. |
 
-All three share `authorize_tool_call(...)`, which never returns on a denial. Register exactly
-one of them per agent: each is a complete authorization path, and two means `guard.check()`
-runs twice for the same call.
+All three run the same authorization core, and neither entry point returns on a denial. On a
+`schema_version=2` chain that is `_authorize_v2(...)`, which passes `capture`/`adapter`/
+`authorized_params` to `guard.check(...)` and binds the tool body's outcome to the decision; on
+a v1 chain it is `authorize_tool_call(...)`, which authorizes and records nothing further.
+Register exactly one entry point per agent: each is a complete authorization path, and two
+means `guard.check()` runs twice for the same call.
 
 What is refused at agent construction, and by whom:
 
@@ -80,7 +84,8 @@ log verifies and carries the deny with reason `scope_not_granted`.
 `on_denial="tool_failed"` hands the model a `ToolFailed` result it can adapt to —
 the body never runs either way. Unmapped tools and a missing `Guard` fail closed.
 
-`demo.py` runs on `GuardedToolsetCapability`; pass `guard=DelegationGuard` to
-`build_scenario(...)` to run the same story through the hook layer. The export is denied
+`demo.py` runs on `GuardedToolsetCapability`. To run the same story through the hook layer,
+import `DelegationGuard` from `attenu_guard.adapters.pydantic_ai` and pass it as
+`build_scenario(..., guard=DelegationGuard)` — the example itself does not import it. The export is denied
 before its body either way — the shapes differ in where the record is taken, not in what is
 decided.
