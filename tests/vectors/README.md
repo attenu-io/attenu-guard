@@ -26,6 +26,14 @@ a specific, declared reason. They exist so an **independent implementation**
 offline verifier against a fixed, known-good/known-bad set of tokens without
 needing this repository's Python or any of its code.
 
+**Scope of the reference verifier, and of any run of these files.** `wire.load()` implements
+steps 1 to 5 of the draft's verification procedure (draft-asor-wimse-agent-delegation-chain-01 §6)
+with one signer for the whole chain, the simplifying trust model its module docstring states. Step 6,
+the `cnf`/DPoP holder-binding proof, and step 7, the Token Status List check, are documented as not
+checked. An independent run of these twenty files therefore scores steps 1 to 5. No independent run
+of this corpus has been pinned yet; the Independent runs section below lists the bundle and envelope
+corpora only.
+
 ### Getting them without cloning this repository
 
 They ship inside the installed package, so scoring your own verifier needs
