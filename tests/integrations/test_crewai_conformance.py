@@ -158,8 +158,15 @@ DECLARED_PATHS: tuple[ExecutionPath, ...] = (
         ),
         status="not_covered",
         note=(
-            "Empirically unreachable through CrewAI's own orchestration "
-            "surface in 1.15.16: Crew.kickoff(), Crew.kickoff_async(), and "
+            "Reachable, but only through the DEPRECATED executor: CrewAgentExecutor.ainvoke -> _ainvoke_loop -> "
+            "_ainvoke_loop_react -> aexecute_tool_and_check_finality fires PRE_TOOL_CALL at this line and the tool "
+            "body then runs (frame-traced on 1.15.20). Every entry on the DEFAULT experimental AgentExecutor resolves "
+            "to the SYNC site (tool_utils.py:286) instead: AgentExecutor.ainvoke is an alias for invoke_async, and "
+            "Crew.kickoff_async() and Task(async_execution=True) were each traced to :286. The earlier note here said "
+            "driving :123 would require calling AgentExecutor.ainvoke() directly; that named the wrong executor. "
+            "Left NOT_COVERED because the executor that reaches it is one crewai has announced it will remove "
+            "(same reason as legacy_deprecated_native_tool_call), not because the path is unreachable."
+        ), Crew.kickoff_async(), and "
             "Task(async_execution=True) were each traced (recording the "
             "caller frame of run_before_tool_call_hooks) on both the default "
             "and the legacy executor, and every one resolved to the SYNC hook "
