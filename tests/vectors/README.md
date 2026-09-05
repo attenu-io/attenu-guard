@@ -30,9 +30,9 @@ needing this repository's Python or any of its code.
 steps 1 to 5 of the draft's verification procedure (draft-asor-wimse-agent-delegation-chain-01 §6)
 with one signer for the whole chain, the simplifying trust model its module docstring states. Step 6,
 the `cnf`/DPoP holder-binding proof, and step 7, the Token Status List check, are documented as not
-checked. An independent run of these twenty files therefore scores steps 1 to 5. No independent run
-of this corpus has been pinned yet; the Independent runs section below lists the bundle and envelope
-corpora only.
+checked. An independent run of these twenty files therefore scores steps 1 to 5. One public
+third-party run exists, from another delegation protocol's own conformance harness (see Independent
+runs below); no run from a general-purpose verifier has been pinned yet.
 
 ### Getting them without cloning this repository
 
@@ -568,6 +568,13 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   (verifier, report, CI workflow). Checked from this side: the pinned sha256 matches our file. His
   stated boundary: interoperability evidence for one frozen corpus, not certification, a completeness
   theorem, a production security audit, or proof that every conforming implementation is safe.
+- **Kieran Sweeney (Cred), 2026-09-03** — the Cred protocol's public conformance harness
+  (`cred-ninja/protocol`, branch `asor-20-vector-conformance`, commit `a4fc76e`) vendored the
+  twenty **Delegation Token vectors** at attenu-guard `v0.9.0` (byte-identical to the files on
+  main: no vector file changed between `v0.9.0` and `v0.14.1`) and scores 17 of 20: 0 FAIL, 3
+  declared GAP, by his commit message. The verifier is Cred's own implementation, so this is a
+  run by a second delegation protocol, not by a general-purpose verifier. Stated by its author
+  as a conformance score with three gaps declared, nothing wider.
 
 ## Observer envelope vectors
 
