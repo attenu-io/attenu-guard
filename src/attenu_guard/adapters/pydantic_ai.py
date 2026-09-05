@@ -104,7 +104,6 @@ nothing to bind an outcome to.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import inspect
 import time
 from dataclasses import dataclass, field
@@ -818,24 +817,6 @@ class GuardedToolset(WrapperToolset[Any]):
 # agent's whole composed toolset, innermost, no execution hook at all.
 # ==========================================================================
 
-def _ordering_supports(field_name: str) -> bool:
-    """Does the INSTALLED `CapabilityOrdering` accept `field_name`?
-
-    Read at call time, not import time, so this tracks whatever pydantic-ai is actually in the
-    environment. `dataclasses.fields` is the direct question for the dataclass it is today; the
-    signature fallback covers it becoming something else. Anything unexpected answers `False`:
-    an unknown keyword would be a `TypeError` at agent construction, and refusing to guard is
-    never the right failure here -- the ordering it names is a sharpening, not the check."""
-    try:
-        return any(f.name == field_name for f in dataclasses.fields(CapabilityOrdering))
-    except TypeError:
-        pass
-    try:
-        return field_name in inspect.signature(CapabilityOrdering).parameters
-    except (TypeError, ValueError):
-        return False
-
-
 class GuardedToolsetCapability(AbstractCapability[Any]):
     """Authorize every tool call this agent makes, from INSIDE the toolset chain.
 
@@ -879,37 +860,39 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     `DelegationGuard` uses: a TYPE ref is resolved with `issubclass` over every other
     capability's leaves with the self-edge skipped, so it names EVERY sibling at once without
     knowing any in advance, and the sorter settles this capability last however the caller lists
-    it. Live-probed on 2.31.1, which has no `exclusive_execution` at all: with a sibling
-    innermost wrapper toolset in BOTH list orders, and with one injected per-run through
+    it. Live-probed on 2.31.1: with a sibling innermost wrapper toolset in BOTH list orders, and
+    with one injected per-run through
     `agent.run(..., capabilities=[...])` with and without an ordering of its own, the trace is
     `B:enter, guard:enter, TOOL BODY` every time. There is no "list it last" rule to remember.
 
     BESIDE A DURABILITY CAPABILITY. `BaseDurabilityCapability` -- Temporal, DBOS, Prefect --
     also declares `position="innermost"` (`pydantic_ai/durable_exec/_base.py:1480-1483`), but it
-    is NOT the tier collision above, because it does not wrap the composed
-    toolset at all: `get_wrapper_toolset` calls `visit_and_replace` to swap the LEAF toolsets
-    for durable ones (`_base.py:1466-1478`), and `WrapperToolset.visit_and_replace` rebuilds a
-    wrapper AROUND its visited inner toolset rather than displacing it
-    (`pydantic_ai/toolsets/wrapper.py`). So whichever of the two is applied first, the durable
-    wrapper ends up INSIDE this guard: the pair composes, and this guard's record encloses the
-    durable dispatch of the tool. Where `exclusive_execution` exists that changes -- the
-    durability base sets it too, so pydantic-ai refuses the pair at construction, naming both.
-    That is the maintainer's point in #8007 that only one thing can hold the innermost slot, and
-    it is a real cost of setting the flag: once it ships, an agent runs a durable engine or this
-    capability, not both. This file adds no refusal of its own here; on a released pydantic-ai
-    the composition is sound and worth keeping.
+    is not the tier collision above and the edge does not help: it never wraps the composed
+    toolset. `get_wrapper_toolset` calls `visit_and_replace` to swap the LEAF toolsets for
+    durable ones (`_base.py:1466-1478`), and `WrapperToolset.visit_and_replace` recurses into
+    `self.wrapped` and rebuilds itself around the result, so the swap descends THROUGH every
+    capability-contributed wrapper and replaces the leaf beneath it. Both orders produce the
+    same tree, `Guard(Durable(FunctionToolset))`, which is measured in the tests and is
+    pydantic-ai's maintainer's own statement of it: "capability chain order does not move a
+    wrapper toolset across the durable boundary, in any configuration" (DouweM,
+    pydantic/pydantic-ai#8127, comment 5547131287).
 
-    `exclusive_execution`, WHERE IT EXISTS. `CapabilityOrdering` gained that flag on the branch
-    of pydantic/pydantic-ai#8067 (probed at head 9f5863f, which reports itself as 2.38.1.dev36).
-    No RELEASED version has it: checked against 2.31.1, 2.37.0 and 2.39.0, the latest release.
-    `get_ordering()` feature-detects the field and sets it when present, so the ordering stays
-    constructible on every released build. It is a sharpening rather than the fix -- the
-    `wrapped_by` edge above already holds the slot on released pydantic-ai -- and what it adds is
-    a better diagnostic: two capabilities that both declare it are refused at construction with a
-    message naming both and explaining why only one can be innermost, instead of the bare cycle
-    error the edge produces. It needs `position="innermost"` alongside it (setting it alone is a
-    cycle error), and all three declarations compose: probed together at the PR head, this
-    capability still takes the innermost slot in every list order.
+    THE LIMIT THAT FOLLOWS, PLAINLY. Beside a durability engine the guarantee this class exists
+    for does not hold. The durable toolset sits between this guard and the tool body, so the
+    outcome recorded here encloses the durable dispatch rather than the body -- the same drift
+    the hook layer has, one layer lower -- and the policy lookup, `guard.check()` and the ledger
+    write all run OUTSIDE the durable unit, so they are not part of what the engine journals or
+    replays. No ordering changes that; there is no ordering that puts a wrapper toolset inside
+    the durable boundary. Reaching inside would mean participating in the registered leaf, which
+    is a different primitive from anything `CapabilityOrdering` offers (#8127). If your agent
+    runs a durable engine, use the guard knowing this, or guard the registered leaf toolsets
+    yourself with `GuardedToolset` before the engine is given them.
+
+    This file does NOT refuse the pair. It cannot detect one honestly: a durability capability is
+    only recognisable by its module (`type(cap).__module__.startswith("pydantic_ai.durable_exec")`),
+    which is cheap and import-free but names the three first-party engines and silently misses any
+    other leaf-rewriting capability -- a check that is right sometimes reads as a guarantee and is
+    not one. The limit is stated here instead.
 
     DO NOT install a second attenu-guard authorizer on the same agent -- a `DelegationGuard`, a
     second `GuardedToolsetCapability`, or a `GuardedToolset` you built and passed in
@@ -944,18 +927,11 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
         self.id = id
 
     def get_ordering(self) -> CapabilityOrdering:
-        """`position="innermost", wrapped_by=[AbstractCapability]` always -- the tier plus the
-        per-sibling edge that makes it exact in every list order; `exclusive_execution=True` too
-        where the installed `CapabilityOrdering` has that field. See the class docstring's "THE
-        TIER, AND THE EDGE THAT CLOSES IT" and "`exclusive_execution`, WHERE IT EXISTS". The flag
-        is passed only when it exists, so this stays constructible on every released
-        pydantic-ai, none of which has it."""
-        kwargs: dict[str, Any] = {
-            "position": "innermost", "wrapped_by": [AbstractCapability],
-        }
-        if _ordering_supports("exclusive_execution"):
-            kwargs["exclusive_execution"] = True
-        return CapabilityOrdering(**kwargs)
+        """`position="innermost", wrapped_by=[AbstractCapability]` -- the tier, plus the
+        per-sibling edge that makes it exact in every list order. See the class docstring's "THE
+        TIER, AND THE EDGE THAT CLOSES IT". Nothing here is conditional on the installed
+        pydantic-ai: both fields have been present since well below the `>=2.31` extra floor."""
+        return CapabilityOrdering(position="innermost", wrapped_by=[AbstractCapability])
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[Any]) -> AbstractToolset[Any]:
         """One `GuardedToolset` around whatever the agent composed, with this capability's own

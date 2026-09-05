@@ -14,7 +14,6 @@ The test drives the SHIPPED example (`examples/integrations/pydantic_ai/demo.py`
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import importlib.util
 import sys
 from dataclasses import dataclass
@@ -1119,7 +1118,7 @@ def test_the_tier_is_not_decided_by_list_position(order):
     toolset used to take the innermost slot whenever it was listed after this capability -- and
     then sat between the guard and the tool body. `wrapped_by=[AbstractCapability]` adds an edge
     to every sibling at once, so the sorter settles this capability LAST in both directions and
-    the sibling wrapper runs outside it. Probed on 2.31.1, which has no `exclusive_execution`."""
+    the sibling wrapper runs outside it. Probed on 2.31.1, in both directions."""
     _TRACE.clear()
     guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
     other = _MarkedToolsetCapability("B", position="innermost")
@@ -1220,17 +1219,10 @@ def test_toolset_capability_and_delegation_guard_together_are_refused(order):
 
 
 def test_two_toolset_capabilities_on_one_agent_are_refused():
-    """Same verdict, and pydantic-ai's own diagnostic improves once `exclusive_execution` exists.
-    Without the field both capabilities are separated only by their `wrapped_by` edges, each
-    demanding to be outside the other, and the sorter reports the bare cycle. With it, both also
-    declare the flag and pydantic-ai names them and explains why only one can be innermost --
-    which is what makes the flag worth setting even though the edge already holds the slot."""
-    expected = (
-        "each require that nothing nests inside them"
-        if dg_pai._ordering_supports("exclusive_execution")
-        else "Circular ordering constraints"
-    )
-    with pytest.raises(dg_pai.UserError, match=expected):
+    """Same mechanism, same verdict: two of this capability each demand to be outside the other
+    through their `wrapped_by` edges, so the sorter reports the cycle before `for_agent` could
+    name them."""
+    with pytest.raises(dg_pai.UserError, match="Circular ordering constraints"):
         _plain_agent([
             dg_pai.GuardedToolsetCapability(policies={}),
             dg_pai.GuardedToolsetCapability(policies={}),
@@ -1337,60 +1329,21 @@ def test_the_toolset_capability_alone_constructs_and_runs():
 
 
 # --------------------------------------------------------------------------
-# (f) `exclusive_execution` is feature-detected, not assumed.
+# (f) The ordering this capability declares, against whatever is installed.
 # --------------------------------------------------------------------------
 
-@dataclasses.dataclass
-class _OrderingWithoutFlag:
-    """`CapabilityOrdering` as every RELEASED pydantic-ai has it -- checked against 2.31.1,
-    2.37.0 and 2.39.0. Passing `exclusive_execution` to this is a TypeError."""
-
-    position: Any = None
-    wraps: Any = ()
-    wrapped_by: Any = ()
-    requires: Any = ()
-
-
-@dataclasses.dataclass
-class _OrderingWithFlag(_OrderingWithoutFlag):
-    """`CapabilityOrdering` as pydantic/pydantic-ai#8067 has it (probed at head 9f5863f)."""
-
-    exclusive_execution: bool = False
-
-
-def test_get_ordering_omits_exclusive_execution_when_the_field_does_not_exist(monkeypatch):
-    monkeypatch.setattr(dg_pai, "CapabilityOrdering", _OrderingWithoutFlag)
-
-    ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
-
-    assert isinstance(ordering, _OrderingWithoutFlag)
-    assert ordering.position == "innermost"
-    assert list(ordering.wrapped_by) == [AbstractCapability]
-    assert not hasattr(ordering, "exclusive_execution")
-
-
-def test_get_ordering_sets_exclusive_execution_when_the_field_exists(monkeypatch):
-    monkeypatch.setattr(dg_pai, "CapabilityOrdering", _OrderingWithFlag)
-
-    ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
-
-    assert isinstance(ordering, _OrderingWithFlag)
-    assert ordering.position == "innermost"
-    assert list(ordering.wrapped_by) == [AbstractCapability]
-    assert ordering.exclusive_execution is True
-
-
-def test_get_ordering_against_the_installed_pydantic_ai_is_constructible():
-    """Whatever is installed, `position` is "innermost" and the object builds -- the detection
-    must never hand `CapabilityOrdering` a keyword it does not have."""
+def test_get_ordering_declares_the_tier_and_the_edge():
+    """Two fields, unconditionally. Both have been on `CapabilityOrdering` since well below the
+    `pydantic-ai-slim >= 2.31` extra floor, so there is nothing to feature-detect: an earlier
+    revision of this adapter also set `exclusive_execution` where the field existed, and that was
+    removed when pydantic-ai's maintainer reworked pydantic/pydantic-ai#8067 rather than merging
+    it -- "`exclusive_execution` promises something the tool layer cannot deliver" (DouweM,
+    pydantic/pydantic-ai#8127, comment 5547131287)."""
     ordering = dg_pai.GuardedToolsetCapability(policies={}).get_ordering()
 
     assert isinstance(ordering, CapabilityOrdering)
     assert ordering.position == "innermost"
     assert list(ordering.wrapped_by) == [AbstractCapability]
-    assert getattr(ordering, "exclusive_execution", False) is dg_pai._ordering_supports(
-        "exclusive_execution"
-    )
 
 
 @pytest.mark.parametrize(
@@ -1432,13 +1385,14 @@ class _LeafSwappingCapability(AbstractCapability):
 
 
 @pytest.mark.parametrize("order", ["guard-first", "guard-last"])
-def test_a_leaf_swapping_durability_capability_composes_inside_the_guard(order):
-    """Neither list order puts the durable wrapper outside the guard, because it never wraps the
-    composed toolset: applied first it swaps the raw leaves and the guard then wraps the result;
-    applied second it descends through the guard and rebuilds it around the swapped leaves. So
-    the guard's record encloses the durable dispatch either way, and the pair composes on every
-    released pydantic-ai. When `exclusive_execution` ships, both capabilities set it and
-    pydantic-ai refuses the pair instead."""
+def test_a_leaf_swapping_durability_capability_sits_between_the_guard_and_the_body(order):
+    """The stated limit, measured. A leaf rewriter never wraps the composed toolset: applied
+    first it swaps the raw leaves and the guard then wraps the result; applied second it descends
+    THROUGH the guard and rebuilds it around the swapped leaves. Both orders give the same tree,
+    `Guard(Durable(FunctionToolset))`, so the durable wrapper is between this guard and the tool
+    body and the recorded outcome encloses the durable dispatch rather than the body. No ordering
+    changes it -- "capability chain order does not move a wrapper toolset across the durable
+    boundary, in any configuration" (DouweM, pydantic/pydantic-ai#8127, comment 5547131287)."""
     _TRACE.clear()
     guard_cap = _TracingGuardedToolsetCapability(policies=_QUERY_POLICIES)
     durable = _LeafSwappingCapability()

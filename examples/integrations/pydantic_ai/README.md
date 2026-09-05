@@ -25,7 +25,7 @@ What is refused at agent construction, and by whom:
 
 | Combination | Refused by |
 |---|---|
-| Two attenu-guard **capabilities** (`GuardedToolsetCapability` beside `DelegationGuard`, or two of either) | pydantic-ai's sorter, as `Circular ordering constraints among capabilities` — each declares `wrapped_by=[AbstractCapability]` to hold the innermost slot, so the pair cycles before the adapter can name them. **If you see that error on an attenu-guard agent, you registered two authorizers.** Where `exclusive_execution` exists, pydantic-ai names them instead |
+| Two attenu-guard **capabilities** (`GuardedToolsetCapability` beside `DelegationGuard`, or two of either) | pydantic-ai's sorter, as `Circular ordering constraints among capabilities` — each declares `wrapped_by=[AbstractCapability]` to hold the innermost slot, so the pair cycles before the adapter can name them. **If you see that error on an attenu-guard agent, you registered two authorizers.** |
 | An agent-wide capability plus a `GuardedToolset` you built and listed in `toolsets=[...]` | the adapter's `for_agent()`, naming both. The walk follows `.wrapped` chains and `.toolsets` branches, so one nested inside a `CombinedToolset` is caught too |
 
 **Not detected:** a `GuardedToolset` constructed inside a tool call and never listed in
@@ -52,17 +52,22 @@ skipped), so the sorter settles it last however you list it. Probed on 2.31.1 ag
 `innermost` wrapper toolset in both orders, and against one injected per-run — the guard is
 innermost every time. There is no "list it last" rule to remember.
 
-pydantic-ai's `CapabilityOrdering` gains an `exclusive_execution` flag on the branch of
-[pydantic/pydantic-ai#8067](https://github.com/pydantic/pydantic-ai/pull/8067); no released
-version has it (checked against 2.31.1, 2.37.0 and 2.39.0). `get_ordering()` feature-detects it
-and sets it as soon as it ships. It is a better diagnostic rather than a fix: the edge already
-holds the slot today.
+**Known limit: durable execution.** Temporal, DBOS and Prefect claim `innermost` too, but they
+never wrap the composed toolset — they swap the *leaf* toolsets for durable ones, and a
+`WrapperToolset` rebuilds itself around the visited result, so the swap descends **through**
+this guard. Both orders give the same tree, `Guard(Durable(FunctionToolset))`. Beside a durable
+engine the guarantee this capability exists for does not hold: the durable toolset sits between
+the guard and the tool body, the recorded outcome encloses the durable dispatch rather than the
+body, and the policy lookup, `guard.check()` and the ledger write all run outside the durable
+unit, so the engine neither journals nor replays them.
 
-**Durable execution composes today.** Temporal, DBOS and Prefect claim `innermost` too, but
-they swap *leaf* toolsets for durable ones rather than wrapping the composed toolset, so the
-durable wrapper lands inside this guard whichever order the two are applied in. When
-`exclusive_execution` ships, both capabilities set it and pydantic-ai refuses the pair: from
-then on an agent runs a durable engine or this capability, not both.
+No ordering changes that, and reaching inside the durable boundary is not something
+`CapabilityOrdering` offers —
+[pydantic/pydantic-ai#8127](https://github.com/pydantic/pydantic-ai/issues/8127). The adapter
+does not refuse the pair, because it cannot detect one honestly: a durability capability is
+recognisable only by its module, which would name the three first-party engines and silently
+miss any other leaf rewriter. If your agent runs a durable engine, either accept this or guard
+the registered leaf toolsets yourself with `GuardedToolset` before handing them to the engine.
 
 ## Run it
 
