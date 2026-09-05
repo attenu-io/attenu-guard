@@ -45,14 +45,21 @@ denied: scope_not_granted requested=crm.export: scope 'crm.export' not covered b
 
 `check()` returns a `Decision` with machine-readable reason codes for your audit trail,
 `enforce()` is the hard-stop gate that raises, and `would_allow()` is a dry-run that writes
-nothing. The export is refused whatever the agent was talked into trying: the sub-agent never
-held that permission, so an injected instruction has nothing to widen.
+nothing. The export is refused because the sub-agent never held that permission, so an injected
+instruction has nothing to widen.
 
 Adapters for 18 frameworks and protocols, each integrated **unmodified**, each with an offline
 demo and tests ([matrix](docs/INTEGRATIONS.md)); install one with
-`pip install 'attenu-guard[<extra>]'`. Enforced live on real applications with
-[Google ADK](https://github.com/attenu-io/attenu-derive/blob/main/docs/LIVE-ENFORCE.md) and with
-[CrewAI and LangGraph](https://github.com/attenu-io/attenu-derive/blob/main/docs/A3-FRAMEWORKS.md).
+`pip install 'attenu-guard[<extra>]'`. MCP is a recipe rather than an adapter: a server that
+verifies the delegation chain before it runs a tool
+([server verifier](examples/integrations/mcp/server_verifier/README.md)).
+
+Enforced live on Google's published `adk-samples` customer-service and financial-advisor apps,
+denying a real model mid-run
+([evidence](https://github.com/attenu-io/attenu-derive/blob/main/docs/LIVE-ENFORCE.md)). The same
+adapters run on CrewAI and LangGraph, on crews and graphs configured for a travel-booking domain
+rather than third-party apps, a bound
+[A3](https://github.com/attenu-io/attenu-derive/blob/main/docs/A3-FRAMEWORKS.md) states itself.
 
 > **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` checks integrity,
 > child ⊆ parent and containment from the file alone, no account, no network. The
@@ -65,9 +72,7 @@ demo and tests ([matrix](docs/INTEGRATIONS.md)); install one with
 
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
-An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08
-(cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
-delegated authority stays inside the parent's limits, and every decision the guard makes remains verifiable offline.
+An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08 (cascading failures)](https://genai.owasp.org/download/52117/): delegated authority stays inside the parent's limits, and every decision the guard makes remains verifiable offline.
 
 ## What happens at a handoff today
 
@@ -79,13 +84,13 @@ pinned by tests that fail the day the behaviour changes:
 
 | System | What it does at a handoff (verified against the released code — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)) |
 |---|---|
-| OpenAI Agents SDK 0.21 | passes the **entire** conversation to the sub-agent (`Handoff.input_filter=None` by default: *"the new agent sees the entire conversation history"*); no parent/child relation exists, so nothing checks child ⊆ parent |
+| OpenAI Agents SDK 0.22 | passes the **entire** conversation to the sub-agent (`Handoff.input_filter=None` by default: *"the new agent sees the entire conversation history"*); no parent/child relation exists, so nothing checks child ⊆ parent |
 | LangChain `deepagents` 0.7 | a sub-agent's `permissions` **replace** the parent's rules entirely (`graph.py`) — a child can be granted what its parent is denied |
 | Google ADK 2.7.1 | `disallow_transfer_to_peers` is enforced on the legacy `llm_flows` path since 2.7.1 ([#3850](https://github.com/google/adk-python/issues/3850), fix `fa18d26a`) — but the 2.x default workflow path (`workflow/utils/_transfer_utils.py`, sibling case) still carries no check: on 2.7.1 the peer transfer goes through (pinned by `tests/integrations/test_google_adk.py`, which fails the day it stops). Either way ADK checks *who may transfer*; it does not check *what authority passes*, and no record exists to verify afterwards |
 | CrewAI 1.15 | a delegated coworker runs with its **own full tool list**; the tool-hook dispatcher swallows exceptions and runs the tool (**fail-open**) unless you raise its one blessed exception |
 | AutoGen 0.7 | `Handoff` carries target/description/message only; the receiver offers the model its own full tool list |
 | Microsoft Entra | child agent **inherits** the parent's scopes |
-| MCP | scope flow is **accumulation**-biased (step-up unions) |
+| MCP | scope flow is **accumulation**-biased (step-up unions); the request carries no agent authority at all: `CallToolRequestParams` has `name`, `arguments`, `meta`, `task` and nothing that says which agent is calling with how much of it. Shipped here as a recipe rather than an adapter, a server that verifies the chain before it runs a tool ([`server_verifier`](examples/integrations/mcp/server_verifier/README.md)) |
 | A2A | authenticates the hop, carries **no** delegated authority |
 
 attenu-guard makes child ⊆ parent a computed, enforced, offline-verifiable

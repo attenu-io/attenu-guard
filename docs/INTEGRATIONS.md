@@ -26,8 +26,8 @@ Versions and file:line references are as of **August 2026**; they will drift.
 |---|---|---|---|---|---|---|
 | **LangGraph** 1.2 + LangChain `create_agent` | none in LangGraph itself (a sub-agent is another graph you call) | construction site / the `task` tool call (deepagents) | `ToolNode(wrap_tool_call=…)` / `AgentMiddleware.wrap_tool_call` (`langgraph/prebuilt/tool_node.py`, `langchain/agents/middleware/types.py`); the shipped `guard_node`/`DelegatedToolNode` for hand-written nodes | scripted `BaseChatModel` (`bind_tools` passthrough) | nothing; `create_agent` has no notion of parent/child | 5 |
 | **deepagents** 0.7 (LangChain's multi-agent app) | `task(description, subagent_type)` tool → `subagent.invoke(...)` (`deepagents/middleware/subagents.py`) | the same `wrap_tool_call`, filtered on `task` | `wrap_tool_call` in the sub-agent | same | `SubAgent["tools"]` (leaky: every sub-agent also inherits the filesystem suite); `permissions` on a sub-agent **replace** the parent's rules entirely (`graph.py`, verified: a child wrote `/secrets/…` where its parent was denied) | 5 |
-| **OpenAI Agents SDK** 0.21 | `handoffs=[…]`, `Agent.as_tool(...)` | `RunHooks.on_handoff` (`agents/lifecycle.py`; fires at `turn_resolution.py`) or `handoff(..., on_handoff=…)` | `FunctionTool.tool_input_guardrails` (`agents/tool.py`), executed *before* `on_tool_start` and the body (`tool_execution.py`) | `agents.testing.ScriptedModel` (shipped) | nothing relative to a parent — tool lists are independent per agent; handoff forwards the **entire** conversation by default; `RunHooks.on_tool_start` cannot deny; a handoff cannot be vetoed | 5 |
-| **Google ADK** 2.7 | `sub_agents=[…]` + `transfer_to_agent`, `AgentTool`, `mode='task'` sub-agents | `BasePlugin.before_agent_callback` (covers all three primitives; `mode='task'` never fires a tool callback) | `BasePlugin.before_tool_callback` (`google/adk/plugins/base_plugin.py`; runs at `flows/llm_flows/functions.py` before the tool, a returned dict short-circuits) | custom `BaseLlm` scripted per agent | `disallow_transfer_to_*` shape the prompt + tool-schema enum only; the 2.x transfer path (`workflow/utils/_transfer_utils.py`) checks tree shape, not the flags; `tool_filter` is per-agent visibility, not parent-relative | 5 |
+| **OpenAI Agents SDK** 0.22 | `handoffs=[…]`, `Agent.as_tool(...)` | `RunHooks.on_handoff` (`agents/lifecycle.py`; fires at `turn_resolution.py`) or `handoff(..., on_handoff=…)` | `FunctionTool.tool_input_guardrails` (`agents/tool.py`), executed *before* `on_tool_start` and the body (`tool_execution.py`) | `agents.testing.ScriptedModel` (shipped) | nothing relative to a parent — tool lists are independent per agent; handoff forwards the **entire** conversation by default; `RunHooks.on_tool_start` cannot deny; a handoff cannot be vetoed | 5 |
+| **Google ADK** 2.7.1 | `sub_agents=[…]` + `transfer_to_agent`, `AgentTool`, `mode='task'` sub-agents | `BasePlugin.before_agent_callback` (covers all three primitives; `mode='task'` never fires a tool callback) | `BasePlugin.before_tool_callback` (`google/adk/plugins/base_plugin.py`; runs at `flows/llm_flows/functions.py` before the tool, a returned dict short-circuits) | custom `BaseLlm` scripted per agent | `disallow_transfer_to_*` shape the prompt + tool-schema enum only; the 2.x transfer path (`workflow/utils/_transfer_utils.py`) checks tree shape, not the flags; `tool_filter` is per-agent visibility, not parent-relative | 5 |
 | **Pydantic AI** 2.31 | documented "agent delegation" (a tool calling `child.run(..., usage=ctx.usage)`) — no framework primitive | construction site: `ctx.deps.delegate(...)` inside the delegating tool | `GuardedToolsetCapability` — an `AbstractCapability` contributing one `WrapperToolset` (`pydantic_ai/toolsets/wrapper.py`) ordered `position="innermost"`, so its `call_tool` is the innermost check in the toolset chain; or `AbstractCapability.wrap_tool_execute` (`pydantic_ai/capabilities/abstract.py`; the only path to `toolset.call_tool` — `tool_manager.py`), which stops the body on a denial but sits above every wrapper toolset | `FunctionModel` with scripted `ToolCallPart`s | nothing delegation-aware; `UsageLimits` count/cost only; `FilteredToolset`/`prepare` = visibility | 5 |
 | **CrewAI** 1.15 | `allow_delegation=True` → `Delegate work to coworker` tool; hierarchical manager | the delegate tool call, inside the same before-tool hook | `crewai.hooks.register_before_tool_call_hook` on both dispatch paths (`utilities/tool_utils.py`, `agents/crew_agent_executor.py`) — must abort with `HookAborted`: **any other exception is swallowed and the tool runs** (`hooks/dispatch.py`) | `BaseLLM` subclass replaying ReAct / native tool-call text | nothing: the coworker runs with its **own full tool list** (`tools/agent_tools/base_agent_tools.py`), selected by fuzzy role-name match on model output; `guardrail=` validates task *output*; events/callbacks are post-hoc | 5 |
 | **AutoGen** (`autogen-agentchat`) 0.7 | `Swarm` + `Handoff`, `AgentTool`/`TeamTool` | `Handoff.handoff_tool` override (`GuardedHandoff`) — handoffs bypass the workbench (`_assistant_agent.py`) | `StaticStreamWorkbench.call_tool` **and** `call_tool_stream` (the agent loop takes the stream branch) | `ReplayChatCompletionClient` with `FunctionCall`s (needs `ModelInfo(function_calling=True)`) | nothing: `Handoff` has target/description/name/message; receiver offers its own full tool list; intervention handlers cannot see tool calls | 4 |
@@ -45,12 +45,14 @@ Versions and file:line references are as of **August 2026**; they will drift.
 
 *Fit = how well the framework's official hooks carry an authorization decision (1–5). Eighteen entries (LangGraph through A2A); `tests/integrations/` holds 30 offline suites covering them and the two recipes below. The Claude Agent SDK integration was additionally verified live against a real session, and the A2A one over a real HTTP hop.*
 
-Beyond the matrix, two recipes rather than adapters, each with its own section below: a
-**Langflow** custom component (`examples/integrations/langflow/`, 25 offline tests) — Langflow is a
-visual builder, so the unit there is a component in the editor rather than an adapter module — and
-**commerce-agents** (`examples/integrations/commerce-agents/`, 46 offline tests), which is an
-application rather than a framework and whose packages are on no index, so its test skips unless the
-repo is installed from a clone and CI does not carry it.
+Beyond the matrix, three recipes rather than adapters: a **Langflow** custom component
+(`examples/integrations/langflow/`, 25 offline tests) — Langflow is a visual builder, so the unit
+there is a component in the editor rather than an adapter module — **commerce-agents**
+(`examples/integrations/commerce-agents/`, 46 offline tests), which is an application rather than a
+framework and whose packages are on no index, so its test skips unless the repo is installed from a
+clone and CI does not carry it, and **MCP** (`examples/integrations/mcp/server_verifier/`, 11 offline
+tests), a server that verifies the delegation chain before it runs a tool body. The first two have
+their own sections below; the MCP recipe keeps its evidence manifest in its own README.
 
 ## Why these eighteen
 
@@ -70,8 +72,8 @@ package is `ag2`, not `autogen`); AutoGen itself has been in maintenance since 2
 live successors beside it. Added after those: **A2A** — a protocol rather than a framework, but its hop IS a delegation, and
 spec §7.6.4 states outright that the protocol defines no scope or revocation semantics for an in-task
 authorization decision, so the adapter supplies them through A2A's own extension mechanism (§4.6). MCP
-remains a *recipe* rather than an adapter (below), because there the server is the resource, not a
-delegate. Deliberately not (yet): MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak offline story), Letta
+remains a *recipe* rather than an adapter (`examples/integrations/mcp/server_verifier/`), because
+there the server is the resource, not a delegate. Deliberately not (yet): MetaGPT/ChatDev/AutoGPT (research/app-shaped, weak offline story), Letta
 (no delegation primitive), Dify/Flowise/n8n (not Python-embeddable), and every non-Python stack (see "Other languages").
 
 **Also added (August 2026):** a Langflow custom component (below — Langflow is a visual builder, so the unit is a
