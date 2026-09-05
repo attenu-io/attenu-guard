@@ -880,19 +880,28 @@ class GuardedToolsetCapability(AbstractCapability[Any]):
     THE LIMIT THAT FOLLOWS, PLAINLY. Beside a durability engine the guarantee this class exists
     for does not hold. The durable toolset sits between this guard and the tool body, so the
     outcome recorded here encloses the durable dispatch rather than the body -- the same drift
-    the hook layer has, one layer lower -- and the policy lookup, `guard.check()` and the ledger
-    write all run OUTSIDE the durable unit, so they are not part of what the engine journals or
-    replays. No ordering changes that; there is no ordering that puts a wrapper toolset inside
-    the durable boundary. Reaching inside would mean participating in the registered leaf, which
-    is a different primitive from anything `CapabilityOrdering` offers (#8127). If your agent
-    runs a durable engine, use the guard knowing this, or guard the registered leaf toolsets
-    yourself with `GuardedToolset` before the engine is given them.
+    the hook layer has, one layer lower. The policy lookup, `guard.check()` and the ledger write
+    run OUTSIDE that durable toolset boundary, in the same context as the rest of the capability
+    chain; what a given engine then does with that context was NOT measured here -- no worker of
+    any engine was run for this work, and the tests use a leaf-rewriting proxy, so this file
+    makes no claim about journalling or replay. No ordering changes the shape: there is no
+    ordering that puts a wrapper toolset inside the durable boundary, and no configuration in
+    this release places this guard inside the durable unit. Reaching inside would mean
+    participating in the registered leaf, which is a different primitive from anything
+    `CapabilityOrdering` offers (#8127) -- and handing the engine a `GuardedToolset` of your own
+    does not do it either, since the swap descends through that wrapper exactly as it descends
+    through this one and rebuilds the same tree.
 
-    This file does NOT refuse the pair. It cannot detect one honestly: a durability capability is
-    only recognisable by its module (`type(cap).__module__.startswith("pydantic_ai.durable_exec")`),
-    which is cheap and import-free but names the three first-party engines and silently misses any
-    other leaf-rewriting capability -- a check that is right sometimes reads as a guarantee and is
-    not one. The limit is stated here instead.
+    THE PAIR IS NOT REFUSED HERE, AND THE MAINTAINER WOULD ACCEPT ONE. The same comment says both
+    halves: the guard is outside the durable unit in every configuration, AND, because this
+    capability's stated requirement is that nothing sits between it and the tool body while
+    beside a durability engine something always does, refusing the pair is "arguably correct"
+    (DouweM, #8127, comment 5547131287). This release still adds no refusal, because it cannot
+    detect one honestly: a durability capability is recognisable only by its module
+    (`type(cap).__module__.startswith("pydantic_ai.durable_exec")`), which is cheap and
+    import-free but names the three first-party engines and silently misses any other
+    leaf-rewriting capability -- and a check that is right sometimes reads as a guarantee. The
+    limit is stated here instead.
 
     DO NOT install a second attenu-guard authorizer on the same agent -- a `DelegationGuard`, a
     second `GuardedToolsetCapability`, or a `GuardedToolset` you built and passed in

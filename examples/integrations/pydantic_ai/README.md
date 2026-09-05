@@ -57,17 +57,24 @@ never wrap the composed toolset — they swap the *leaf* toolsets for durable on
 `WrapperToolset` rebuilds itself around the visited result, so the swap descends **through**
 this guard. Both orders give the same tree, `Guard(Durable(FunctionToolset))`. Beside a durable
 engine the guarantee this capability exists for does not hold: the durable toolset sits between
-the guard and the tool body, the recorded outcome encloses the durable dispatch rather than the
-body, and the policy lookup, `guard.check()` and the ledger write all run outside the durable
-unit, so the engine neither journals nor replays them.
+the guard and the tool body, and the recorded outcome encloses the durable dispatch rather than
+the body. The policy lookup, `guard.check()` and the ledger write run outside that durable
+toolset boundary, in the same context as the rest of the capability chain. What a given engine
+does with that context was **not measured** — no worker was run for this work, and the tests use
+a leaf-rewriting proxy — so nothing here claims anything about journalling or replay.
 
-No ordering changes that, and reaching inside the durable boundary is not something
-`CapabilityOrdering` offers —
-[pydantic/pydantic-ai#8127](https://github.com/pydantic/pydantic-ai/issues/8127). The adapter
-does not refuse the pair, because it cannot detect one honestly: a durability capability is
-recognisable only by its module, which would name the three first-party engines and silently
-miss any other leaf rewriter. If your agent runs a durable engine, either accept this or guard
-the registered leaf toolsets yourself with `GuardedToolset` before handing them to the engine.
+**There is no configuration in this release that places the guard inside the durable unit.** No
+ordering does it, and neither does handing the engine a `GuardedToolset` of your own: the swap
+descends through that wrapper the same way. Reaching inside would mean participating in the
+registered leaf, a different primitive from anything `CapabilityOrdering` offers —
+[pydantic/pydantic-ai#8127](https://github.com/pydantic/pydantic-ai/issues/8127).
+
+pydantic-ai's maintainer says both halves in that comment: the guard is outside the durable unit
+in every configuration, and refusing the pair outright is "arguably correct", since this
+capability requires that nothing sit between it and the tool body and beside a durable engine
+something always does. This release adds no refusal anyway, because it cannot detect one
+honestly: a durability capability is recognisable only by its module, which would name the three
+first-party engines and silently miss any other leaf rewriter.
 
 ## Run it
 
