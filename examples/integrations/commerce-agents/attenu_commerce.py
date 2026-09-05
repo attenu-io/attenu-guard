@@ -52,10 +52,12 @@ deployment's ``executor_class``, so the seam the repo documents on every path st
 delegate's own reads. ``install()`` covers that, at the cost of patching a class the
 application does not own.
 
-The upstream change that would remove the need for ``install()`` is to carry
-``executor_class`` into the analysis delegate the way every other path already carries it.
-``README.md`` "The upstream hook" states it as a diff. That wiring does NOT exist upstream
-today -- this module works against the repo as it is.
+The change that would remove the need for ``install()`` is to carry ``executor_class``
+into the analysis delegate the way every other path already carries it. ``README.md``
+"Where the seam stops" states it as a verified diff, for a reader who vendors or forks the
+packages: commerce-agents is a reference implementation that does not accept contributions
+(its ``README.md:193``), so that diff is not a proposal to anyone. The wiring does NOT
+exist upstream today -- this module works against the repo as it is.
 
 What a delegate holds
 ---------------------
@@ -436,7 +438,21 @@ def _guarded_dispatch(inner, executor, policy, grants, on_unmapped):
 
         return await call_inner(name, tool_input)
 
+    # The mark every "is this already authorized?" check reads. It rides on the function
+    # object, so it is visible through a class attribute, a bound method and an instance
+    # attribute alike -- which is what makes the check work in every direction.
+    dispatch._attenu_guarded = True
     return dispatch
+
+
+def _already_guarded(dispatch: Any) -> bool:
+    """Whether a ``dispatch`` (class attribute, bound method or instance attribute) is
+    already an authorization path.
+
+    :param dispatch: The dispatch to inspect.
+    :returns: True when a second authorizer would double-authorize every call.
+    """
+    return bool(getattr(dispatch, "_attenu_guarded", False))
 
 
 def guarded_executor_class(
@@ -472,10 +488,18 @@ def guarded_executor_class(
         ``policy``.
     :param name: The subclass's ``__name__``; defaults to ``Guarded<base>``.
     :returns: The subclass.
-    :raises ValueError: When ``on_unmapped`` is not one of the two values.
+    :raises ValueError: When ``on_unmapped`` is not one of the two values, or ``base``
+        already authorizes -- either because it is itself a guarded class, or because
+        :func:`install` has patched the ``dispatch`` this subclass would call inward to.
     """
     if on_unmapped not in ("deny", "allow"):
         raise ValueError(f"on_unmapped must be 'deny' or 'allow', not {on_unmapped!r}")
+    if _already_guarded(base.dispatch):
+        raise ValueError(
+            f"{base.__name__}.dispatch already authorizes; a guarded subclass over it "
+            "would run check() twice for every tool call. Subclass the unguarded "
+            "executor, or uninstall() first if an installation is active."
+        )
     hook = _guarded_dispatch(base.dispatch, None, policy, dict(grants or {}), on_unmapped)
     return type(name or f"Guarded{base.__name__}", (base,), {
         "dispatch": hook,
@@ -506,14 +530,20 @@ def guard_executor(
     :param on_unmapped: ``"deny"`` (default) or ``"allow"`` for a tool absent from
         ``policy``.
     :returns: The same executor, guarded.
-    :raises ValueError: When ``on_unmapped`` is not one of the two values, or the
-        executor is already guarded.
+    :raises ValueError: When ``on_unmapped`` is not one of the two values, or this
+        executor already authorizes -- whether from an earlier :func:`guard_executor`
+        call or because it is an instance of a :func:`guarded_executor_class`.
     """
     if on_unmapped not in ("deny", "allow"):
         raise ValueError(f"on_unmapped must be 'deny' or 'allow', not {on_unmapped!r}")
-    if getattr(executor, _GUARD_ATTR, None) is not None:
+    # Read the dispatch this instance actually resolves, not a bookkeeping attribute: an
+    # instance of a guarded CLASS carries no attribute of ours, and wrapping it again
+    # would run check() twice for every call.
+    if _already_guarded(executor.dispatch):
         raise ValueError(
-            "this executor is already guarded; two guards mean two check() calls per tool"
+            f"{type(executor).__name__}.dispatch already authorizes; a second guard means "
+            "two check() calls per tool. Use bind(executor, guard) to give an instance of "
+            "a guarded_executor_class its node."
         )
     setattr(executor, _GUARD_ATTR, guard)
     executor.dispatch = _guarded_dispatch(
@@ -562,12 +592,16 @@ def install(
     This patches ``dispatch`` on the executor class. It is the only way, against the repo
     as it stands, to guard an executor a third-party delegate constructs inside its own
     runner -- ``AnalysisRunner._read`` names ``MerchantToolExecutor`` directly, and no
-    reference to that instance leaves the method. Prefer :func:`guard_executor` for every
-    executor you construct yourself, and read "The upstream hook" in ``README.md`` for
-    the one-parameter change that would make this unnecessary.
+    reference to that instance leaves the method. Prefer :func:`guarded_executor_class`
+    for every executor a deployment's own runtime builds, and read "Where the seam stops"
+    in ``README.md`` for the change that would make this unnecessary.
 
     Because the patch is on the class, it is process-wide and lasts until
     ``uninstall()``. Use the returned handle as a context manager in a test.
+
+    A :func:`guarded_executor_class` built BEFORE this call is unaffected: it holds a
+    direct reference to the dispatch it captured, so its instances authorize once, not
+    twice. Building one WHILE an installation is active is refused there.
 
     :param policy: Tool-to-:class:`ToolPolicy` map.
     :param grants: Delegate-name-to-:class:`DelegateGrant` map.
@@ -579,7 +613,8 @@ def install(
     :param on_unmapped: ``"deny"`` (default) or ``"allow"`` for a tool absent from
         ``policy``.
     :returns: A handle with ``uninstall()``, usable as a context manager.
-    :raises ValueError: When ``on_unmapped`` is invalid or an installation is active.
+    :raises ValueError: When ``on_unmapped`` is invalid, an installation is active, or
+        the class already authorizes.
     """
     if on_unmapped not in ("deny", "allow"):
         raise ValueError(f"on_unmapped must be 'deny' or 'allow', not {on_unmapped!r}")
@@ -592,6 +627,12 @@ def install(
         executor_cls = BaseToolExecutor
 
     original = executor_cls.dispatch
+    if _already_guarded(original):
+        raise ValueError(
+            f"{executor_cls.__name__}.dispatch already authorizes; patching it again "
+            "means two check() calls per tool. Pass the unguarded class, or the base a "
+            "guarded_executor_class was built from."
+        )
     executor_cls.dispatch = _guarded_dispatch(
         original, None, policy, dict(grants or {}), on_unmapped
     )

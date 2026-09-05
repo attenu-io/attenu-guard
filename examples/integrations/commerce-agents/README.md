@@ -60,8 +60,14 @@ things that are not the dispatch point.
 puts only `ANALYSIS_READ_TOOLS` plus submit, progress and query on the delegate's surface, so its
 model is never offered a write.
 
-**A name test in the runner.** `AnalysisRunner._execute` (`analysis.py:361`) routes a call onward only
-`if name in ANALYSIS_READ_TOOLS`; anything else comes back as `Unknown tool in the analysis context`.
+**A name test in the runner.** `AnalysisRunner._execute` (`analysis.py:348-375`) is a four-branch
+ladder, in this order: the progress tool returns "Noted — continue the analysis." (`:355-360`); a
+name in `ANALYSIS_READ_TOOLS` goes to `_read`, and therefore to an executor (`:361-362`); anything
+that is not the SQL tool, or is the SQL tool where the backend does not support queries, comes back
+as `Unknown tool in the analysis context` (`:363-364`); and what is left — the SQL tool on a backend
+that supports it — goes to `_run_query`, and therefore straight to the backend, never through an
+executor (`:365-375`). The third test is what keeps a write out, and it is a name check inside one
+delegate's runner.
 
 Both live inside the one delegate the repo ships. The executor that delegate builds does not share
 them. `AnalysisRunner._read` (`analysis.py:332-339`) constructs an ordinary `MerchantToolExecutor`
@@ -83,8 +89,13 @@ Act 3 of the demo runs exactly that delegate with nothing installed. All three b
       side effects: staged=['chg-0002']  presented=['chg-0001']  peer_delegate_ran=True
 ```
 
-`side effects` is the oracle: what the store and the delegate registry actually recorded, whatever
-any tool result said.
+`side effects` is the oracle, read from three places that are none of them the tool result.
+`staged` is store-side: the difference in `ChangeLedger.pending()` across the call. `peer_delegate_ran`
+is body-side: a flag the peer delegate's own `run` sets as its first statement. `presented` is
+body-side too — `observing_presentation` swaps the component's `enrich` hook for one that records and
+then calls the repo's own `enrich_change_preview`, and `run_presentation` awaits that hook
+(`commerce_common/presentation.py:136`), so the id lands there only when the presentation body was
+entered. The swap is restored afterwards and changes nothing else about the component.
 
 ## What this hook adds
 
@@ -99,10 +110,12 @@ any tool result said.
 ## The hook
 
 `BaseToolExecutor.dispatch` (`commerce-common/commerce_common/execution.py:225-243`) is the one place
-every tool call arrives. Two docstrings say so between them: the module's, that "the Messages API
-runtime, the Agent SDK toolset, and the MCP server all call `execute`" (`execution.py:4-8`), and
-`MerchantToolExecutor`'s, that those three "and the analysis delegate's reads all execute through
-this class" (`merchant-agent/core/merchant_agent/executor.py:4-8`). `execute` (`execution.py:214-223`)
+every tool call arrives. Two module docstrings say so between them: the executor frame's, that "the
+Messages API runtime, the Agent SDK toolset, and the MCP server all call `execute`"
+(`execution.py:4-8`), and the merchant executor module's, that those three "and the analysis
+delegate's reads all execute through this class"
+(`merchant-agent/core/merchant_agent/executor.py:4-8`; the class itself, at `:91`, carries no
+docstring). `execute` (`execution.py:214-223`)
 calls `self.dispatch`, and inside `dispatch` the presentation components, the presentation
 extensions, the delegates and the handlers are each routed by name (`execution.py:236-243`) — so
 replacing one instance attribute covers the whole surface on both entry points.
@@ -111,7 +124,7 @@ replacing one instance attribute covers the whole surface on both entry points.
 |---|---|
 | **The deployment's executor — start here** | `guarded_executor_class(MerchantToolExecutor, policy, grants)` returns a subclass that authorizes in `dispatch`, and the repo already takes it: `executor_class` is documented as "the seam for a deployment's own `MerchantToolExecutor` subclass" (`merchant-agent/runtime-messages-api/merchant_agent_runtime/orchestrator.py:86-87`) and every consumption path accepts it. Nothing is patched. |
 | One executor instance | `guard_executor(executor, guard, policy, grants)` replaces that instance's bound `dispatch`, for a call site that builds the executor directly. |
-| Every executor, including ones out of reach | `install(policy, grants, root=...)` patches `BaseToolExecutor.dispatch`. This is a monkeypatch; see "The upstream hook". |
+| Every executor, including ones out of reach | `install(policy, grants, root=...)` patches `BaseToolExecutor.dispatch`. This is a monkeypatch; see "Where the seam stops". |
 | The delegation site | All three mint the child with `Guard.delegate` when a delegate name is dispatched, and bind it to a `contextvars` variable for the body's duration. |
 
 The seam is not a convenience the repo happens to expose. Its own
@@ -132,9 +145,15 @@ with authorize_as(root):
 Only `dispatch` is overridden, so a deployment's own subclass — its `domain_error` mapping, its
 wording — can be the base and keeps everything it defines.
 
-Register exactly one per executor: each is a complete authorization path, and two means `check()`
-runs twice for the same call. `guard_executor` refuses a second call on an executor it already
-guards, and `install` refuses a second installation.
+Register exactly one authorizer per executor: each is a complete authorization path, and two means
+`check()` runs twice for the same call. Every guarded `dispatch` carries a mark, and each entry point
+reads the dispatch a call would actually resolve before adding its own, so all four pairings are
+refused with a message naming the class: `guard_executor` over an already-guarded instance **or over
+an instance of a guarded class**; `guarded_executor_class` over a base that already authorizes,
+including one whose `dispatch` is currently the installed hook; and `install` over a class that
+already authorizes. A guarded class built *before* an `install()` is the one benign order and stays
+allowed — it holds a direct reference to the dispatch it captured, so the later class patch is not in
+its path; a test asserts one `allow` entry per call for it.
 
 ### Which guard authorizes a call
 
@@ -253,75 +272,107 @@ re-signing it, which is what an insider holding the key could produce:
         integrity=True  monotonicity=False  anchor=verified  ok=False
         monotonicity: commerce-demo:n1 not ⊆ parent commerce-demo:n0 (child scopes ['billing.refund', ...] not held by parent)
 ```
+## Where the seam stops
 
-## The upstream hook
+**commerce-agents does not take contributions.** Its README says so in the licence section
+(`README.md:193`): *"This is a reference implementation; it is not maintained and does not accept
+contributions."* Nothing below is a pull request or a proposal to anyone. It is the precise statement
+of where the deployment's own seam ends, for a reader who vendors the packages, forks them, or is
+building the same shape themselves.
 
-`install()` exists for one reason, and it is a gap in an existing convention rather than a missing
-one. `executor_class` is the deployment's seam on every consumption path — the orchestrator
+`executor_class` is that seam, and it holds on every consumption path: the Messages API orchestrator
 (`orchestrator.py:101`, used at `:165`), the Agent SDK toolset
 (`merchant-agent/runtime-agent-sdk/merchant_agent_sdk/merchant_tools.py:77`, used at `:81`) and the
 MCP server (`merchant-agent/managed-agents/merchant-mcp-server/merchant_mcp_server.py:96`, used at
-`:129`) — and upstream's own `test_every_path_takes_a_deployments_own_executor_class` holds all
-three to it. The analysis delegate is the one path that does not carry it: `AnalysisRunner._read`
-names `MerchantToolExecutor` inside the method (`analysis.py:333-339`) and keeps no reference
-outside it, so the deployment's executor stops at the delegate's own reads.
+`:129`). Upstream's own `test_every_path_takes_a_deployments_own_executor_class` holds all three to
+it.
 
-Threading the same parameter one level further closes it.
+One path does not carry it. `AnalysisRunner._read` names `MerchantToolExecutor` inside the method
+(`analysis.py:333-339`) and keeps no reference outside it, so the deployment's executor stops at the
+delegate's own reads. That is the whole reason `install()` exists in this recipe: a monkeypatch is
+the only thing that reaches an instance nobody hands out.
 
-**This wiring does not exist upstream. It is a proposal, written here as a diff so it is not
-mistaken for API that is there.** Everything else in this recipe works against the repo as it stands.
+Carrying the same parameter one level further closes it. The patch below is verified, not sketched:
+it applies to the clone at `fd4d592` with `git apply`, their own `test_analysis.py` stays at 31
+passing with it applied, and with it applied `guarded_executor_class` alone enforces the shipped
+delegate's reads — the child's `query_metrics` allowed and its `get_campaign_performance` denied,
+with no `install()` anywhere.
 
 ```diff
 --- a/merchant-agent/runtime-messages-api/merchant_agent_runtime/analysis.py
 +++ b/merchant-agent/runtime-messages-api/merchant_agent_runtime/analysis.py
-@@ def build_analysis_delegate(
--def build_analysis_delegate(
+@@ -83,10 +83,15 @@ def present_analysis(result: BaseModel, context: DelegationContext) -> tuple[Any
+ 
+ 
+ def build_analysis_delegate(
 -    client: AsyncAnthropic, backend: MerchantBackend, config: MerchantAgentConfig
--) -> DelegateExtension:
-+def build_analysis_delegate(
 +    client: AsyncAnthropic,
 +    backend: MerchantBackend,
 +    config: MerchantAgentConfig,
 +    executor_class: type[MerchantToolExecutor] = MerchantToolExecutor,
-+) -> DelegateExtension:
+ ) -> DelegateExtension:
      definition = build_analysis_tool_definition()
 -    runner = AnalysisRunner(client=client, backend=backend, config=config)
-+    runner = AnalysisRunner(client=client, backend=backend, config=config,
-+                            executor_class=executor_class)
-
-@@ async def _read(self, context, name, tool_input, series_names):
++    runner = AnalysisRunner(
++        client=client, backend=backend, config=config, executor_class=executor_class
++    )
+     return DelegateExtension(
+         name=ANALYSIS_TOOL,
+         description=definition["description"],
+@@ -105,11 +110,17 @@ class AnalysisRunner:
+     """Builds the delegate's tool surface once per deployment and runs one loop per call."""
+ 
+     def __init__(
+-        self, *, client: AsyncAnthropic, backend: MerchantBackend, config: MerchantAgentConfig
++        self,
++        *,
++        client: AsyncAnthropic,
++        backend: MerchantBackend,
++        config: MerchantAgentConfig,
++        executor_class: type[MerchantToolExecutor] = MerchantToolExecutor,
+     ) -> None:
+         self._client = client
+         self._backend = backend
+         self._config = config
++        self._executor_class = executor_class
+         self._system = build_analysis_system_prompt(config)
+         self._sql_supported = backend_supports_analysis_query(backend)
+         self._tools = self._build_tools()
+@@ -330,7 +341,7 @@ class AnalysisRunner:
+     ) -> tuple[str, bool]:
+         # A scratch state keeps listing and campaign ids out of the session's gates.
          scratch = MerchantSessionState()
 -        reads = MerchantToolExecutor(
 +        reads = self._executor_class(
              backend=self._backend,
              config=self._config,
              skills=SkillRegistry([]),
-             session=context.session,
-             state=scratch,
-         )
-
 --- a/merchant-agent/runtime-messages-api/merchant_agent_runtime/orchestrator.py
 +++ b/merchant-agent/runtime-messages-api/merchant_agent_runtime/orchestrator.py
-@@ class MerchantAgent.__init__
+@@ -111,7 +111,11 @@ class MerchantAgent:
+         self.extra_presentation_tools = tuple(extra_presentation_tools)
+         self.extra_delegates = tuple(extra_delegates)
          built_in = (
 -            [build_analysis_delegate(self.client, self.backend, self.config)]
-+            [build_analysis_delegate(self.client, self.backend, self.config,
-+                                     self.executor_class)]
++            [
++                build_analysis_delegate(
++                    self.client, self.backend, self.config, self.executor_class
++                )
++            ]
              if self.config.enable_analysis
              else []
          )
 ```
 
-That is the repo's own rule applied one level down — "each mechanism is defined once […] and shared
-by all three paths" — and it makes the delegate's reads go through the same executor as everything
-else, which is what a deployment already believes when it passes `executor_class`. It is also not
-only about authorization: metering, tracing and a deployment's error wording all stop at the same
-line today.
+The `AnalysisRunner.__init__` hunk is not optional: upstream's signature is keyword-only
+`client`/`backend`/`config` (`analysis.py:107-109`) and it never sets `self._executor_class`, so the
+`_read` change alone raises `TypeError` at construction and `AttributeError` at the read.
 
-With it in place, `guarded_executor_class` is the whole integration and no class is patched. Until
-then, `install()` is the only way to guard an executor a delegate constructs internally, and the
-tests cover both paths.
+Nothing here is only about authorization. Metering, tracing and a deployment's own error wording all
+stop at the same line, because they all arrive through the same subclass.
 
+Until a reader applies it, `install()` is the only way to guard an executor a delegate constructs
+internally, and the tests cover both paths.
 ## What is not covered
 
 - **The shopping agent has no delegates.** `shopping_agent`'s executor
@@ -354,28 +405,3 @@ tests cover both paths.
 | `attenu_commerce.py` | The paste-in adapter. Imports nothing from commerce-agents at module load. |
 | `demo.py` | Five acts, offline. Also carries the demo store, a `MerchantBackend` over the repo's own `ChangeLedger`. |
 | `../../../tests/integrations/test_commerce_agents.py` | The gate: compatibility, the pinned upstream facts, the side-effect oracle, the fail-closed edges. |
-
-## Contributing this upstream
-
-commerce-agents has no `CONTRIBUTING.md`. Its `CLAUDE.md` is what a contribution is held to, and the
-parts that bear on this recipe are:
-
-> **Verify**
-> ```bash
-> ruff check . && ruff format --check . && pytest && python scripts/check.py
-> python scripts/verify_all.py          # adds deploy dry runs and web builds
-> ```
-
-> **Conventions** — Python 3.11+, `ruff` (root `ruff.toml`), `pytest` (root `pytest.ini`), type
-> hints, `pydantic` schemas […] A new module updates this file and its README.
-
-> **Prose:** plain declarative sentences; one term per thing; each fact once, naming its module; each
-> role in its own terms; a README says what a thing is, how to run it, and where its interfaces are;
-> no history, dates, or process narrative; cut before restyling.
-
-> **Design rules** — […] Each mechanism is defined once, in `commerce_common` or a role core, and
-> shared by all three paths.
-
-That last rule is the one that decides the shape of any upstream contribution: the `executor_factory`
-parameter belongs in `commerce_common`, once, and everything else follows from it. A vendor-specific
-guard does not belong in their tree at all — which is why this recipe lives here.

@@ -129,8 +129,11 @@ Messages API orchestrator, the Agent SDK toolset and the MCP server all accept �
 One path does not carry that seam: `AnalysisRunner._read` names `MerchantToolExecutor` inside the
 method (`analysis.py:332-339`) rather than the deployment's class, so the delegate's own reads fall
 outside it. The child guard rides a `contextvars` binding, and a process-wide `install()` is what
-reaches that instance today; the example README states the upstream change that would remove the
-need — threading `executor_class` one level further — as a diff, and does not claim it exists.
+reaches that instance today. **commerce-agents is a reference implementation that does not accept
+contributions** (its `README.md:193`), so the "Status of the framework findings" intent above does
+not apply here and nothing is filed upstream: the example README states the change that would close
+the gap — threading `executor_class` one level further — as a diff verified to apply and pass their
+own analysis tests, for a reader who vendors or forks the packages.
 
 What the repo enforces about a delegate's authority: the contract is stated in prose
 (`commerce-common/commerce_common/delegation.py:4-6` — a delegate "cannot write, present, or invoke

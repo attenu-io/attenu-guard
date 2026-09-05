@@ -13,6 +13,7 @@ clone-and-editable-install lines.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import inspect
 import json
@@ -200,6 +201,32 @@ def test_semantic_the_sdk_toolset_takes_it_too():
     assert "self.executor_class(" in source
 
 
+def test_semantic_analysis_runner_takes_no_executor_class_today():
+    """Why the README's diff needs its `AnalysisRunner.__init__` hunk: the constructor is
+    keyword-only client/backend/config and never sets `self._executor_class`, so the
+    `_read` change alone would raise TypeError then AttributeError."""
+    from merchant_agent_runtime.analysis import AnalysisRunner, build_analysis_delegate
+
+    parameters = inspect.signature(AnalysisRunner.__init__).parameters
+    assert set(parameters) == {"self", "client", "backend", "config"}
+    assert all(parameters[p].kind is inspect.Parameter.KEYWORD_ONLY
+               for p in ("client", "backend", "config"))
+    assert "_executor_class" not in inspect.getsource(AnalysisRunner.__init__)
+    assert "executor_class" not in inspect.signature(build_analysis_delegate).parameters
+
+
+def test_semantic_upstream_does_not_accept_contributions():
+    """Pinned because the README says it: nothing in this recipe is offered upstream."""
+    repo = Path(inspect.getfile(
+        importlib.import_module("commerce_common"))).resolve().parents[2]
+    readme = (repo / "README.md").read_text() if (repo / "README.md").exists() else ""
+    if not readme:
+        pytest.skip("installed from a wheel; the repo README is not on disk")
+    assert ("it is not maintained and does not accept contributions" in readme), (
+        "upstream changed its contribution stance; re-read README.md and revisit "
+        "'Where the seam stops'")
+
+
 def test_semantic_the_delegate_is_the_one_path_that_ignores_executor_class():
     """The gap this recipe's ``install()`` covers, stated as a test: every other path
     routes through the deployment's ``executor_class``; the analysis delegate names the
@@ -293,6 +320,30 @@ def test_semantic_campaign_budget_is_a_deployment_number():
 
 # ---- tier 3: behaviour ------------------------------------------------------------------
 
+def test_the_oracle_reads_side_effects_not_tool_results():
+    """The three signals are store-side or body-side, none of them the tool result.
+
+    `staged` is a `ChangeLedger.pending()` diff; `peer_ran` is set inside the peer
+    delegate's own `run`; `presented` is set inside the component's `enrich` hook, which
+    `run_presentation` awaits — so it records only when the presentation body was entered.
+    """
+    from merchant_agent.enrichment import PRESENTATION_COMPONENTS
+    from merchant_agent.tools.presentation import PREVIEW_TOOL
+
+    original = PRESENTATION_COMPONENTS[PREVIEW_TOOL]
+    effects = demo.Effects()
+    with demo.observing_presentation(effects):
+        swapped = PRESENTATION_COMPONENTS[PREVIEW_TOOL]
+        assert swapped is not original
+        assert swapped.enrich is not original.enrich
+        # everything else about the component is the repo's own
+        assert (swapped.name, swapped.component, swapped.payload_model) == (
+            original.name, original.component, original.payload_model)
+        assert swapped.enrich_partial is original.enrich_partial
+    assert PRESENTATION_COMPONENTS[PREVIEW_TOOL] is original, "the swap must be restored"
+    assert effects.presented == [], "nothing was presented, so nothing is recorded"
+
+
 def test_the_unguarded_delegate_writes_presents_and_calls_a_delegate():
     """The oracle for everything below: with nothing installed, all three bodies run."""
     config, session = demo.new_config(), demo.new_session()
@@ -302,9 +353,10 @@ def test_the_unguarded_delegate_writes_presents_and_calls_a_delegate():
     _seed(backend, session)
     tools = _executor(backend, config, session, delegates=(delegate, peer))
 
-    asyncio.run(tools.execute("draft_report", {"topic": "slow movers"}))
+    with demo.observing_presentation(effects):
+        asyncio.run(tools.execute("draft_report", {"topic": "slow movers"}))
     assert effects.staged, "the write did not reach the store"
-    assert effects.presented, "the presentation did not render"
+    assert effects.presented, "the presentation body did not run"
     assert effects.peer_ran, "the nested delegate did not run"
 
 
@@ -318,7 +370,8 @@ def test_guarded_the_three_forbidden_calls_are_held_before_the_body():
     grant = adapter.DelegateGrant("report", frozenset({"listing.read", "change.read"}), ttl=900)
     tools = _executor(backend, config, session, delegates=(delegate, peer))
 
-    with adapter.install(demo.POLICY, {"draft_report": grant}, root=root):
+    with demo.observing_presentation(effects), adapter.install(
+            demo.POLICY, {"draft_report": grant}, root=root):
         asyncio.run(tools.execute("draft_report", {"topic": "slow movers"}))
 
     assert effects.staged == [], "a write reached the store"
@@ -488,13 +541,87 @@ def test_an_executor_with_no_guard_is_held_not_allowed():
     assert "no authority is bound" in held.result_text
 
 
+def _allow_count(root) -> int:
+    """How many ``allow`` entries the chain holds.
+
+    :param root: The chain's root node.
+    :returns: The count.
+    """
+    return len([e for e in root.audit_log().entries if e["event"] == "allow"])
+
+
 def test_guarding_one_executor_twice_is_refused():
     config, session = demo.new_config(), demo.new_session()
     root = _root()
     tools = adapter.guard_executor(
         _executor(demo.DemoBackend(config), config, session), root, demo.POLICY)
-    with pytest.raises(ValueError, match="already guarded"):
+    with pytest.raises(ValueError, match="already authorizes"):
         adapter.guard_executor(tools, root, demo.POLICY)
+
+
+def test_guard_executor_over_a_guarded_class_instance_is_refused():
+    """RED before the fix: this combination was accepted and wrote two `allow` entries
+    for every tool call, because the instance carries no bookkeeping attribute of ours."""
+    from merchant_agent.executor import MerchantToolExecutor
+
+    config, session = demo.new_config(), demo.new_session()
+    root = _root()
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    tools = _executor(demo.DemoBackend(config), config, session)
+    tools.__class__ = guarded_cls
+
+    with pytest.raises(ValueError, match="already authorizes"):
+        adapter.guard_executor(tools, root, demo.POLICY)
+
+    # One authorizer, one entry per call.
+    adapter.bind(tools, root)
+    asyncio.run(tools.execute("get_business_snapshot", {}))
+    assert _allow_count(root) == 1
+
+
+def test_a_guarded_class_over_a_guarded_class_is_refused():
+    """The other direction: the base already authorizes, so the subclass would double it."""
+    from merchant_agent.executor import MerchantToolExecutor
+
+    once = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    with pytest.raises(ValueError, match="already authorizes"):
+        adapter.guarded_executor_class(once, demo.POLICY)
+
+
+def test_a_guarded_class_built_while_an_installation_is_active_is_refused():
+    """`install()` patches the base, so a subclass built after it would call inward to
+    the installed hook and authorize twice."""
+    from merchant_agent.executor import MerchantToolExecutor
+
+    with adapter.install(demo.POLICY, {}, root=_root()):
+        with pytest.raises(ValueError, match="already authorizes"):
+            adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+
+
+def test_installing_over_a_class_that_already_authorizes_is_refused():
+    from merchant_agent.executor import MerchantToolExecutor
+
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    with pytest.raises(ValueError, match="already authorizes"):
+        adapter.install(demo.POLICY, {}, root=_root(), executor_cls=guarded_cls)
+
+
+def test_a_guarded_class_built_before_install_still_authorizes_once():
+    """The benign order, asserted so it is not "fixed" into a refusal: the subclass holds
+    a direct reference to the dispatch it captured, so the later class patch is not in
+    its path."""
+    from merchant_agent.executor import MerchantToolExecutor
+
+    config, session = demo.new_config(), demo.new_session()
+    root = _root()
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    tools = _executor(demo.DemoBackend(config), config, session)
+    tools.__class__ = guarded_cls
+    adapter.bind(tools, root)
+
+    with adapter.install(demo.POLICY, {}, root=root):
+        asyncio.run(tools.execute("get_business_snapshot", {}))
+    assert _allow_count(root) == 1
 
 
 def test_the_child_binding_is_dropped_when_the_delegate_returns():

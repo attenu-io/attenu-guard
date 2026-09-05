@@ -27,6 +27,8 @@ Five acts:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import dataclasses
 import json
 import os
 import sys
@@ -80,7 +82,9 @@ from merchant_agent import (  # noqa: E402
 )
 from merchant_agent.analysis import ANALYSIS_READ_TOOLS, ANALYSIS_TOOL  # noqa: E402
 from merchant_agent.changes import ChangeItem, ChangeKind  # noqa: E402
+from merchant_agent.enrichment import PRESENTATION_COMPONENTS  # noqa: E402
 from merchant_agent.executor import MerchantToolExecutor  # noqa: E402
+from merchant_agent.tools.presentation import PREVIEW_TOOL  # noqa: E402
 from merchant_agent.types import ActorKind  # noqa: E402
 from merchant_agent_runtime.analysis import build_analysis_delegate  # noqa: E402
 
@@ -319,7 +323,16 @@ class NoteResult(BaseModel):
 
 
 class Effects:
-    """The side-effect oracle: what actually happened, whatever any tool result said."""
+    """The side-effect oracle: what actually happened, read from three places that are
+    not the tool result.
+
+    ``staged`` is store-side — the difference in ``ChangeLedger.pending()`` across the
+    call. ``peer_ran`` is body-side — a flag the peer delegate's own ``run`` sets.
+    ``presented`` is body-side too: :func:`observing_presentation` swaps the component's
+    ``enrich`` hook for one that records and then calls the repo's own
+    ``enrich_change_preview``, so the id lands here only when the presentation body was
+    actually entered.
+    """
 
     def __init__(self) -> None:
         self.staged: list[str] = []
@@ -329,6 +342,33 @@ class Effects:
     def __str__(self) -> str:
         return (f"staged={self.staged or 'none'}  presented={self.presented or 'none'}  "
                 f"peer_delegate_ran={self.peer_ran}")
+
+
+@contextlib.contextmanager
+def observing_presentation(effects: Effects):
+    """Record every entry into the change-preview presentation body, then restore.
+
+    ``MerchantToolExecutor.components`` IS ``PRESENTATION_COMPONENTS`` (``executor.py:93``),
+    the same dict object on every instance, and ``run_presentation`` awaits
+    ``spec.enrich(payload, context)`` (``commerce_common/presentation.py:136``). Swapping
+    one entry for a ``dataclasses.replace`` of itself therefore instruments the body that
+    every executor reaches, including the one the delegate's runner builds where no caller
+    holds a reference. The wrapper calls the repo's own hook; it does not replace it.
+
+    :param effects: The oracle to mark.
+    :yields: ``None``.
+    """
+    original = PRESENTATION_COMPONENTS[PREVIEW_TOOL]
+
+    async def observed(payload: Any, context: Any) -> Any:
+        effects.presented.append(str(getattr(payload, "change_id", "?")))
+        return await original.enrich(payload, context)
+
+    PRESENTATION_COMPONENTS[PREVIEW_TOOL] = dataclasses.replace(original, enrich=observed)
+    try:
+        yield
+    finally:
+        PRESENTATION_COMPONENTS[PREVIEW_TOOL] = original
 
 
 def peer_delegate(effects: Effects) -> DelegateExtension:
@@ -384,8 +424,6 @@ def report_delegate(backend: DemoBackend, effects: Effects, peer: DelegateExtens
         target = sorted(before)[0]
         shown = await tools.execute("present_change_preview", {"change_id": target})
         _report("present present_change_preview", shown)
-        if not shown.refused:
-            effects.presented.append(target)
 
         nested = await tools.execute("note_finding", {"text": "planter is slow"})
         _report("nested  note_finding", nested)
@@ -559,11 +597,12 @@ async def act3(root: Guard, config: MerchantAgentConfig, session: MerchantSessio
                                      session=session, state=MerchantSessionState(),
                                      delegates=(delegate, peer))
         print(f"\n    -- {'attenu-guard installed' if guarded else 'nothing installed'} --")
-        if guarded:
-            with install(POLICY, {"draft_report": grant}, root=root):
+        with observing_presentation(effects):
+            if guarded:
+                with install(POLICY, {"draft_report": grant}, root=root):
+                    await tools.execute("draft_report", {"topic": "slow movers"})
+            else:
                 await tools.execute("draft_report", {"topic": "slow movers"})
-        else:
-            await tools.execute("draft_report", {"topic": "slow movers"})
         print(f"      side effects: {effects}")
 
 
