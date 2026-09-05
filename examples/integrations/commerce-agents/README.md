@@ -83,7 +83,7 @@ Act 3 of the demo runs exactly that delegate with nothing installed. All three b
 
 ```
     -- nothing installed --
-      read    get_pending_changes        -> ran                [{"change_id": "chg-0001", ...
+      read    get_pending_changes        -> ran                [{"change_id": "chg-0001", "kind": "listing_update", "status": "staged", "summary": "R
       write   stage_price_update         -> ran                (fenced payload)
       present present_change_preview     -> ran                Displayed to the operator.
       nested  note_finding               -> ran                (fenced payload)
@@ -208,7 +208,8 @@ Act 2 runs the real `AnalysisRunner` against the repo's own `FakeCreateClient`:
 ```
       ANALYSIS_READ_TOOLS declares : ['get_business_snapshot', 'query_metrics', 'get_campaign_performance', 'search_listings']
       the operator grants          : ['listing.read', 'metrics.read']
-      node commerce-demo:n0 merchant-turn scopes=['campaign.*', 'change.*', 'delegate.*', ...]
+      delegate run_analysis              -> ran                (fenced payload)
+      node commerce-demo:n0 merchant-turn scopes=['campaign.*', 'change.*', 'delegate.*', 'inventory.*', 'listing.*', 'memory.*', 'metrics.*', 'order.*', 'present.*', 'pricing.*']
         node commerce-demo:n1 analysis   scopes=['listing.read', 'metrics.read']
       DENY  node=commerce-demo:n1 scope=campaign.read tool=get_campaign_performance reason=scope_not_granted disposition=out_of_authority
 ```
@@ -225,10 +226,10 @@ Act 3, the same delegate, this time with `install()` active:
 
 ```
     -- attenu-guard installed --
-      read    get_pending_changes        -> ran                [{"change_id": "chg-0001", ...
-      write   stage_price_update         -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=pricing.stage
-      present present_change_preview     -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=present.change_preview
-      nested  note_finding               -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=delegate.note
+      read    get_pending_changes        -> ran                [{"change_id": "chg-0001", "kind": "listing_update", "status": "staged", "summary": "R
+      write   stage_price_update         -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=prici
+      present present_change_preview     -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=prese
+      nested  note_finding               -> HELD[authority]    That call is outside this agent's authority: denied: scope_not_granted requested=deleg
       side effects: staged=none  presented=none  peer_delegate_ran=False
 ```
 
@@ -248,10 +249,10 @@ number for the deployment, and a delegate holds the same config object, so a del
 Put it on the root node as a `SpendCap` and it becomes per-node. Act 4:
 
 ```
-      config.max_campaign_budget = 10,000
+      config.max_campaign_budget = 10,000  (merchant_agent/config.py, checked at stage and again at apply)
       the draft asks for         = 5,000
-      operator stage_campaign            -> ran
-      drafter  stage_campaign            -> HELD[authority]    denied: ceiling_exceeded constraint=max_spend
+      operator stage_campaign            -> ran                (fenced payload)
+      drafter  stage_campaign            -> HELD[authority]    That call is outside this agent's authority: denied: ceiling_exceeded constraint=max_s
 ```
 
 The store's own guardrail passes 5,000 for both. The chain holds it for a child capped at 2,000. A
@@ -260,11 +261,11 @@ child that asks for `SpendCap(50_000)` gets the parent's 10,000, because the mee
 ### The record
 
 ```
-      entries: 17
-      verify_bundle -> ok=True  checks={'integrity': True, 'monotonicity': True, 'containment': True, 'anchor': 'verified', ...}
+      entries: 17   bundle: attenu-commerce-bundle.json
+      verify_bundle -> ok=True  checks={'integrity': True, 'monotonicity': True, 'containment': True, 'anchor': 'verified', 'version': True, 'chain_id': True, 'root': True, 'expected_anchor': 'not checked', 'envelopes': 'not present'}
 
       the chain, read back from the file alone:
-        commerce-demo:n0   merchant-turn     allows=5   denies=0
+        commerce-demo:n0   merchant-turn     allows=5   denies=0  
         commerce-demo:n1   analysis          allows=1   denies=1    under commerce-demo:n0
         commerce-demo:n2   report            allows=2   denies=3    under commerce-demo:n0
         commerce-demo:n3   campaign-drafter  allows=0   denies=1    under commerce-demo:n0
@@ -278,7 +279,7 @@ re-signing it, which is what an insider holding the key could produce:
 
 ```
         integrity=True  monotonicity=False  anchor=verified  ok=False
-        monotonicity: commerce-demo:n1 not ⊆ parent commerce-demo:n0 (child scopes ['billing.refund', ...] not held by parent)
+        monotonicity: commerce-demo:n1 not ⊆ parent commerce-demo:n0 (child scopes ['billing.refund', 'listing.read', 'metrics.read'] not held by parent)
 ```
 ## Where the seam stops
 
