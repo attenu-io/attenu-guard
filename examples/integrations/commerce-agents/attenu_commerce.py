@@ -352,7 +352,8 @@ def _guarded_dispatch(inner, executor, policy, grants, on_unmapped):
             return ToolOutcome.held(
                 AUTHORITY_GATE,
                 f"{name} was not dispatched: no authority is bound to this executor. "
-                "Bind one with guard_executor() or install().",
+                "Open a turn with authorize_as(guard), or bind one with bind() / "
+                "guard_executor() / install(root=...).",
             )
 
         # `dispatch` splits the status line off before any argument is validated

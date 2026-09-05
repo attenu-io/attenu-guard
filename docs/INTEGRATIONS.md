@@ -116,15 +116,21 @@ are not on any index (its own CI asserts that), so the test skips unless the rep
 a clone, and the `integrations` CI matrix, which installs every framework from PyPI, does not carry
 it.
 
-Both hooks land on one method. `BaseToolExecutor.dispatch`
-(`commerce-common/commerce_common/execution.py:225-243`) routes presentation, delegates and handlers
-by name for every path the repo ships, and a delegate's own reads go through the same class — so
-hook (2) is one wrapper on that method, and hook (1) is the same wrapper recognising a delegate name
-and calling `parent.delegate(...)` there. The child rides down a `contextvars` binding, which is
-what reaches the executor `AnalysisRunner._read` builds internally
-(`merchant-agent/runtime-messages-api/merchant_agent_runtime/analysis.py:332-339`) where no caller
-holds a reference; the example README states the one-parameter upstream change that would make that
-unnecessary, as a diff, and does not claim it exists.
+Both hooks land on one method, over a seam the repo already documents.
+`BaseToolExecutor.dispatch` (`commerce-common/commerce_common/execution.py:225-243`) routes
+presentation, delegates and handlers by name for every path the repo ships — so hook (2) is one
+override of that method, and hook (1) is the same override recognising a delegate name and calling
+`parent.delegate(...)` there. The override arrives as a subclass through `executor_class`, "the seam
+for a deployment's own `MerchantToolExecutor` subclass"
+(`merchant-agent/runtime-messages-api/merchant_agent_runtime/orchestrator.py:86-87`), which the
+Messages API orchestrator, the Agent SDK toolset and the MCP server all accept — upstream's own
+`test_every_path_takes_a_deployments_own_executor_class` holds them to it. Nothing is patched.
+
+One path does not carry that seam: `AnalysisRunner._read` names `MerchantToolExecutor` inside the
+method (`analysis.py:332-339`) rather than the deployment's class, so the delegate's own reads fall
+outside it. The child guard rides a `contextvars` binding, and a process-wide `install()` is what
+reaches that instance today; the example README states the upstream change that would remove the
+need — threading `executor_class` one level further — as a diff, and does not claim it exists.
 
 What the repo enforces about a delegate's authority: the contract is stated in prose
 (`commerce-common/commerce_common/delegation.py:4-6` — a delegate "cannot write, present, or invoke
