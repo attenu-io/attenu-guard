@@ -550,6 +550,16 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   the one worth having; it is why the reason-vocabulary table above exists. Stated boundary,
   his words: "independent reproduction of the released corpus at that pinned boundary. Not
   verifier completeness, not runtime correctness, not certification." Source: crewAIInc/crewAI#5888.
+- **@safal207, 2026-09-04** — a standalone Python verifier with no `attenu_guard` import scored
+  the released **observer-envelope corpus** `envelope_vectors_v1.json` (revision
+  `envelope_vectors_v1.1`, eighteen cases, sha256 `6a57d75ebec881d39d5a1805793a20f9a6d7bff021b70782dcb57c43b276df64`):
+  18 of 18 agree, five accepting and thirteen rejecting, all seven envelope failure names covered.
+  Bound to attenu-guard `f34a351`, the `attenu-guard==0.13.0` wheel and attenu-guard-ts `51eebfc`,
+  with byte identity among the three copies required before scoring. Proof tree
+  `safal207/ContractGraph-QA` at commit `776a43c`, `proofs/attenu-envelope-v1.1-independent`
+  (verifier, report, CI workflow). Checked from this side: the pinned sha256 matches our file. His
+  stated boundary: interoperability evidence for one frozen corpus, not certification, a completeness
+  theorem, a production security audit, or proof that every conforming implementation is safe.
 
 ## Observer envelope vectors
 
