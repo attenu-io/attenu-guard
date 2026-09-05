@@ -15,3 +15,4 @@ venv/
 .vscode/
 .venv-*/
 attenu-omnigent-bundle.json
+attenu-commerce-bundle.json
