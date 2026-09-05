@@ -122,11 +122,19 @@ jobs:
         run: |
           pip install .
           python - <<'PY'
-          from attenu_guard import Authority, Guard, RowLimit, EgressRank
-          o = Guard.issue("o", Authority({"crm.*","mail.send"}, [RowLimit(100000), EgressRank("any")], 3600))
-          s = o.delegate("s", Authority({"crm.read"}, [RowLimit(5000), EgressRank("none")], 900), task="summarize")
-          assert s.check("crm.read", context={"rows":4200})
-          assert not s.check("crm.export", context={"egress":"any"})
+          from attenu_guard import Authority, Guard, RowLimit, AuthorityDenied
+          parent = Guard.issue("orchestrator", Authority(
+              scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600))
+          child = parent.delegate("summarizer", Authority(
+              scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900), task="summarize Q3")
+          decision = child.check("crm.read", context={"rows": 4_200})
+          assert decision, decision
+          try:
+              child.enforce("crm.export")
+          except AuthorityDenied as denied:
+              assert "scope_not_granted" in str(denied), str(denied)
+          else:
+              raise AssertionError("crm.export was not denied")
           print("quickstart OK")
           PY
       - name: The interop vectors ship inside the installed package
