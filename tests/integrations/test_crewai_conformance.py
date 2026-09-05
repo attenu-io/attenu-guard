@@ -166,15 +166,6 @@ DECLARED_PATHS: tuple[ExecutionPath, ...] = (
             "driving :123 would require calling AgentExecutor.ainvoke() directly; that named the wrong executor. "
             "Left NOT_COVERED because the executor that reaches it is one crewai has announced it will remove "
             "(same reason as legacy_deprecated_native_tool_call), not because the path is unreachable."
-        ), Crew.kickoff_async(), and "
-            "Task(async_execution=True) were each traced (recording the "
-            "caller frame of run_before_tool_call_hooks) on both the default "
-            "and the legacy executor, and every one resolved to the SYNC hook "
-            "site (tool_utils.py:286), never the async one. Driving :123 "
-            "would require calling AgentExecutor.ainvoke() / "
-            "Agent._aexecute_without_timeout() directly, off the Crew/Task "
-            "surface every other test in this package (and this file) tests "
-            "against -- marked NOT_COVERED honestly rather than faked."
         ),
     ),
     ExecutionPath(
