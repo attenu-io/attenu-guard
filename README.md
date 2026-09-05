@@ -50,8 +50,9 @@ held that permission, so an injected instruction has nothing to widen.
 
 Adapters for 18 frameworks and protocols, each integrated **unmodified**, each with an offline
 demo and tests ([matrix](docs/INTEGRATIONS.md)); install one with
-`pip install 'attenu-guard[<extra>]'`. Enforced live on real applications with Google ADK,
-CrewAI and LangGraph.
+`pip install 'attenu-guard[<extra>]'`. Enforced live on real applications with
+[Google ADK](https://github.com/attenu-io/attenu-derive/blob/main/docs/LIVE-ENFORCE.md) and with
+[CrewAI and LangGraph](https://github.com/attenu-io/attenu-derive/blob/main/docs/A3-FRAMEWORKS.md).
 
 > **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` checks integrity,
 > child ⊆ parent and containment from the file alone, no account, no network. The
