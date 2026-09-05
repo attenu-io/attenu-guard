@@ -1,63 +1,72 @@
 # attenu-guard
 
+When one AI agent hands work to another, the second one normally keeps everything the first
+could do. attenu-guard gives it only the permissions its task needs and refuses the rest,
+inside your process, with no network call in the deny path. Every decision lands on a
+hash-chained log you can verify offline.
+
+It is for people building agents that hand work to other agents.
+
+Apache-2.0 · Python 3.9+ · zero runtime dependencies · TypeScript port:
+[attenu-guard-ts](https://github.com/attenu-io/attenu-guard-ts), on npm as `attenu-guard`
+
 [attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) · [Changelog](CHANGELOG.md)
 
-**Works with** LangGraph · LangChain `create_agent` / deepagents · OpenAI Agents SDK · Google ADK · Pydantic AI · CrewAI · AutoGen · Claude Agent SDK · smolagents · AWS Strands · LlamaIndex · Semantic Kernel · Agno · Haystack · CAMEL-AI · Microsoft Agent Framework · AG2 — each integrated **unmodified**, each with an offline demo and tests ([matrix](docs/INTEGRATIONS.md)). Enforced live on real applications with Google ADK, CrewAI and LangGraph.
+```bash
+pip install attenu-guard
+```
 
-**Attenu Guard checks what an AI agent may do — and keeps it narrowing at every
-handoff.** When one agent hands work to another, the child gets only the
-permissions its task needs, never the parent's full set. Chains have hard
-ceilings. Any subtree can be revoked in one call. Every decision lands on a
-tamper-evident log you can verify offline. The alternative most teams live with
-is handing an agent a person's credentials and reading the logs afterwards.
+```python
+from attenu_guard import Authority, Guard, RowLimit, AuthorityDenied
+
+# The orchestrator holds broad authority.
+parent = Guard.issue("orchestrator", Authority(
+    scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600))
+
+# It delegates a narrow task. The child gets the meet of what the parent held
+# and what the task needs, computed and enforced, not suggested.
+child = parent.delegate("summarizer", Authority(
+    scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900), task="summarize Q3")
+
+print(child.check("crm.read", context={"rows": 4_200}))
+
+try:
+    child.enforce("crm.export")
+except AuthorityDenied as denied:
+    print(denied)
+```
+
+Prints:
+
+```
+Decision(allowed=True, reasons=(), determining_node='chain:n1', call_id=None)
+denied: scope_not_granted requested=crm.export: scope 'crm.export' not covered by held scopes ['crm.read']
+```
+
+`check()` returns a `Decision` with machine-readable reason codes for your audit trail,
+`enforce()` is the hard-stop gate that raises, and `would_allow()` is a dry-run that writes
+nothing. The export is refused whatever the agent was talked into trying: the sub-agent never
+held that permission, so an injected instruction has nothing to widen.
+
+Adapters for 18 frameworks and protocols, each integrated **unmodified**, each with an offline
+demo and tests ([matrix](docs/INTEGRATIONS.md)); install one with
+`pip install 'attenu-guard[<extra>]'`. Enforced live on real applications with Google ADK,
+CrewAI and LangGraph.
+
+> **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` checks integrity,
+> child ⊆ parent and containment from the file alone, no account, no network. The
+> [auditor's walkthrough](examples/verify/README.md) has three sample bundles (clean, tampered,
+> widened) and takes a minute.
+
+> **Just want to see it run?** From the repo root, no install needed, the examples bootstrap the
+> `src/` path themselves: `python examples/poisoned_summarizer.py`, and
+> `python tests/run_properties.py` for the invariants.
+
+![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
 An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08
 (cascading failures)](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/):
 delegated authority stays inside the parent's limits, and every decision the guard makes remains verifiable offline.
-
-![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
-
-```bash
-pip install attenu-guard                 # zero runtime deps; gives you the `attenu-guard` command too
-pip install 'attenu-guard[langgraph]'    # or crewai, google-adk, openai-agents, … — one extra per framework
-```
-
-> **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` — integrity, child ⊆ parent and
-> containment from the file alone, no account, no network; the [auditor's walkthrough](examples/verify/README.md)
-> has three sample bundles (clean, tampered, widened) and takes a minute.
-
-> **Just want to see it run?** From the repo root, no install needed:
-> `python examples/poisoned_summarizer.py` — the examples bootstrap the
-> `src/` path themselves. `python tests/run_properties.py` proves the
-> invariants the same way.
-
-```python
-from attenu_guard import Authority, Guard, RowLimit, EgressRank
-
-# The orchestrator holds broad authority.
-orchestrator = Guard.issue("orchestrator", Authority(
-    scopes={"crm.*", "mail.send"},
-    ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600))
-
-# It delegates a narrow task. The child gets the *meet* of what the parent
-# held and what the task needs — computed and enforced, not suggested.
-summarizer = orchestrator.delegate("summarizer", Authority(
-    scopes={"crm.read"},
-    ceilings=[RowLimit(5_000), EgressRank("none")], ttl=900),
-    task="summarize Q3 pipeline")
-
-decision = summarizer.check("crm.read", context={"rows": 4_200})   # Decision(allowed=True)
-if not decision:
-    print(decision.explain())
-
-summarizer.enforce("crm.export", context={"egress": "any"})        # raises AuthorityDenied
-```
-
-`check()` returns a rich **`Decision`** (with machine-readable reason codes for
-your audit trail); `enforce()` is the hard-stop gate that raises; `would_allow()`
-is a dry-run that writes nothing. The `crm.export` call is refused whatever the agent was talked into trying —
-the sub-agent never held that permission, so an injected instruction has
-nothing to widen. That is the default once permissions narrow at the handoff.
 
 ## What happens at a handoff today
 
