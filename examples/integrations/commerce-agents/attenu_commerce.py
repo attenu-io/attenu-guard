@@ -247,6 +247,15 @@ _GUARD_ATTR = "_attenu_guard"
 #: The process-wide fallback :func:`install` sets. Only ever read last.
 _INSTALLED_ROOT: list[Any] = []
 
+#: True while one guarded ``dispatch`` is running its authorization and inner call. A
+#: second authorizer stacked on the SAME call sees it and passes straight through, so a
+#: stacking that slipped past the construction-time refusals costs one ``check()``, not
+#: two. The delegate branch clears it before running the delegate body, because the calls
+#: a delegate makes are new calls that must be authorized against the child -- clearing it
+#: there is what keeps this a same-call guard rather than a "nested dispatch" one.
+_IN_DISPATCH: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "attenu_commerce_in_dispatch", default=False)
+
 
 def current_guard() -> Any:
     """The node a dispatch would authorize against right now, or ``None``.
@@ -349,6 +358,12 @@ def _guarded_dispatch(inner, executor, policy, grants, on_unmapped):
             this, name, tool_input = executor, self_or_name, rest[0]
             call_inner = inner
 
+        # A second authorizer stacked on this same call: authorize once, not twice. The
+        # construction-time refusals below make this unreachable through the public API;
+        # it is the runtime backstop for a stacking they did not see.
+        if _IN_DISPATCH.get():
+            return await call_inner(name, tool_input)
+
         guard = _resolve(this)
         if guard is None:
             return ToolOutcome.held(
@@ -430,13 +445,20 @@ def _guarded_dispatch(inner, executor, policy, grants, on_unmapped):
                     AUTHORITY_GATE,
                     f"{name} was not started: {failed}. Nothing ran.",
                 )
+            # `_IN_DISPATCH` is deliberately NOT set here. The delegate body's own tool
+            # calls are new calls that must be authorized against the child, so entering
+            # a delegate opens a fresh authorization scope exactly as it rebinds the node.
             token = _CURRENT.set(child)
             try:
                 return await call_inner(name, tool_input)
             finally:
                 _CURRENT.reset(token)
 
-        return await call_inner(name, tool_input)
+        reentry = _IN_DISPATCH.set(True)
+        try:
+            return await call_inner(name, tool_input)
+        finally:
+            _IN_DISPATCH.reset(reentry)
 
     # The mark every "is this already authorized?" check reads. It rides on the function
     # object, so it is visible through a class attribute, a bound method and an instance
@@ -494,7 +516,7 @@ def guarded_executor_class(
     """
     if on_unmapped not in ("deny", "allow"):
         raise ValueError(f"on_unmapped must be 'deny' or 'allow', not {on_unmapped!r}")
-    if _already_guarded(base.dispatch):
+    if _already_guarded(base.dispatch) or getattr(base, "_attenu_guarded", False):
         raise ValueError(
             f"{base.__name__}.dispatch already authorizes; a guarded subclass over it "
             "would run check() twice for every tool call. Subclass the unguarded "
@@ -503,6 +525,10 @@ def guarded_executor_class(
     hook = _guarded_dispatch(base.dispatch, None, policy, dict(grants or {}), on_unmapped)
     return type(name or f"Guarded{base.__name__}", (base,), {
         "dispatch": hook,
+        # Marked on the class as well as on the function: the function mark is what every
+        # check reads, and this one makes the fact visible to `isinstance`-style
+        # introspection and to a reader of `vars(cls)`.
+        "_attenu_guarded": True,
         "__doc__": f"{base.__name__} with attenu-guard on its dispatch point.",
     })
 
@@ -539,7 +565,7 @@ def guard_executor(
     # Read the dispatch this instance actually resolves, not a bookkeeping attribute: an
     # instance of a guarded CLASS carries no attribute of ours, and wrapping it again
     # would run check() twice for every call.
-    if _already_guarded(executor.dispatch):
+    if _already_guarded(executor.dispatch) or getattr(type(executor), "_attenu_guarded", False):
         raise ValueError(
             f"{type(executor).__name__}.dispatch already authorizes; a second guard means "
             "two check() calls per tool. Use bind(executor, guard) to give an instance of "

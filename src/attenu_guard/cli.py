@@ -101,7 +101,10 @@ def _verify(args: list):
         elif path is None: path = a
     if not path:
         print(__doc__); return 1
-    text = open(path, encoding="utf-8").read()
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError as e:                                   # a wrong path is a usage error, not a traceback
+        print(f"cannot read {path}: {e.strerror or e}"); return 1
     bundle = None
     try:
         parsed = json.loads(text)                       # a bundle is ONE JSON object; a ledger is JSON Lines

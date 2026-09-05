@@ -227,15 +227,111 @@ def test_semantic_upstream_does_not_accept_contributions():
         "'Where the seam stops'")
 
 
-def test_semantic_the_delegate_is_the_one_path_that_ignores_executor_class():
-    """The gap this recipe's ``install()`` covers, stated as a test: every other path
-    routes through the deployment's ``executor_class``; the analysis delegate names the
-    concrete class instead."""
+def test_semantic_the_delegate_is_the_one_consumption_path_ignoring_executor_class():
+    """The gap this recipe's ``install()`` covers, stated as a test: every other
+    consumption path routes through the deployment's ``executor_class``; the analysis
+    delegate names the concrete class instead. The repo's demo web host
+    (``examples/demo_common/merchant.py:248``) also constructs one directly, but that is
+    an example site rather than a path the library offers."""
     from merchant_agent_runtime.analysis import AnalysisRunner
 
     body = inspect.getsource(AnalysisRunner._read)
     assert "MerchantToolExecutor(" in body
     assert "executor_class" not in body
+
+
+def _agent(backend, config, script, guarded_cls):
+    """A real ``MerchantAgent`` on the repo's scripted stream client.
+
+    :param backend: The store.
+    :param config: The deployment config.
+    :param script: Scripted final messages for ``FakeClient``.
+    :param guarded_cls: What to pass as ``executor_class``.
+    :returns: The agent.
+    """
+    from commerce_common.skills import SkillRegistry
+    from commerce_common.testing import FakeClient
+    from merchant_agent_runtime.orchestrator import MerchantAgent
+
+    return MerchantAgent(backend=backend, skills=SkillRegistry([]), config=config,
+                         client=FakeClient(script), executor_class=guarded_cls)
+
+
+def _turn(agent, session, root, text="drop L-202 to 25"):
+    """Run one turn under ``root`` and collect its events.
+
+    :param agent: The agent.
+    :param session: The session context.
+    :param root: The node the turn authorizes against.
+    :param text: The operator's message.
+    :returns: The turn's events.
+    """
+    from merchant_agent import MerchantSessionState
+
+    async def run():
+        events = []
+        with adapter.authorize_as(root):
+            async for event in agent.stream_turn(
+                    [{"role": "user", "content": text}], session, MerchantSessionState()):
+                events.append(event)
+        return events
+
+    return asyncio.run(run())
+
+
+def test_the_real_orchestrator_takes_the_guarded_class():
+    """The recommended path, end to end: `MerchantAgent(..., executor_class=Guarded)` on
+    the repo's own scripted stream client, with the chain opened per turn."""
+    from merchant_agent.executor import MerchantToolExecutor
+    from commerce_common.testing import text_message, tool_use_message
+
+    config, session = demo.new_config(), demo.new_session()
+    backend = demo.DemoBackend(config)
+    root = _root()
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    script = [
+        tool_use_message("search_listings", {"query": "planter"}),
+        tool_use_message("stage_price_update",
+                         {"items": [{"listing_id": "L-202", "new_price": 25.0}]}),
+        text_message("Staged."),
+    ]
+    events = _turn(_agent(backend, config, script, guarded_cls), session, root)
+
+    results = [e.data for e in events if e.type == "tool_result"]
+    assert [r["tool"] for r in results] == ["search_listings", "stage_price_update"]
+    assert all(r.get("status") == "ok" for r in results), results
+    assert [c.change_id for c in backend.ledger.pending()] == ["chg-0001"]
+    allowed = [e["tool"] for e in root.audit_log().entries if e["event"] == "allow"]
+    assert allowed == ["search_listings", "stage_price_update"]
+
+
+def test_an_allow_means_authorized_not_executed():
+    """The repo's own gates run AFTER this hook, so an `allow` on the ledger can sit
+    beside a call the deployment then held. Measured, not asserted from the docs: the same
+    turn with no prior search is allowed by us and blocked by their provenance gate."""
+    from merchant_agent.executor import MerchantToolExecutor
+    from commerce_common.testing import text_message, tool_use_message
+
+    config, session = demo.new_config(), demo.new_session()
+    backend = demo.DemoBackend(config)
+    root = _root()
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    script = [
+        tool_use_message("stage_price_update",
+                         {"items": [{"listing_id": "L-202", "new_price": 25.0}]}),
+        text_message("I could not stage that."),
+    ]
+    events = _turn(_agent(backend, config, script, guarded_cls), session, root)
+
+    (result,) = [e.data for e in events if e.type == "tool_result"]
+    assert result["tool"] == "stage_price_update"
+    assert result["status"] == "blocked"
+    assert result["reason"] == "provenance"      # theirs, not ours
+    assert backend.ledger.pending() == [], "nothing was written"
+
+    entries = root.audit_log().entries
+    assert [(e["event"], e.get("tool")) for e in entries if e["event"] in ("allow", "deny")] == [
+        ("allow", "stage_price_update")]
 
 
 def test_the_class_seam_guards_and_holds_when_no_node_is_bound():
@@ -275,7 +371,11 @@ def test_the_class_seam_keeps_a_deployments_own_subclass_intact():
     guarded_cls = adapter.guarded_executor_class(Wording, demo.POLICY)
     assert guarded_cls.unavailable_text == "{name} is switched off for maintenance."
     assert guarded_cls.__name__ == "GuardedWording"
-    assert set(guarded_cls.__dict__) - {"__doc__", "__module__", "__qualname__"} == {"dispatch"}
+    # Only the dispatch override and the mark that makes it visible to a reader.
+    assert set(guarded_cls.__dict__) - {"__doc__", "__module__", "__qualname__"} == {
+        "dispatch", "_attenu_guarded"}
+    assert guarded_cls._attenu_guarded is True
+    assert not getattr(Wording, "_attenu_guarded", False), "the base must stay unmarked"
 
 
 def test_semantic_the_shipped_runner_builds_its_own_executor():
@@ -604,6 +704,51 @@ def test_installing_over_a_class_that_already_authorizes_is_refused():
     guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
     with pytest.raises(ValueError, match="already authorizes"):
         adapter.install(demo.POLICY, {}, root=_root(), executor_cls=guarded_cls)
+
+
+def test_the_reentrancy_backstop_costs_one_check_not_two():
+    """Force the stacking the construction-time refusals prevent, and the runtime backstop
+    still authorizes once: the inner authorizer sees the outer's flag and passes through."""
+    from merchant_agent.executor import MerchantToolExecutor
+
+    config, session = demo.new_config(), demo.new_session()
+    root = _root()
+    guarded_cls = adapter.guarded_executor_class(MerchantToolExecutor, demo.POLICY)
+    tools = _executor(demo.DemoBackend(config), config, session)
+    tools.__class__ = guarded_cls
+    adapter.bind(tools, root)
+    # Stack a second authorizer by hand, past the refusal.
+    tools.dispatch = adapter._guarded_dispatch(
+        tools.dispatch, tools, demo.POLICY, {}, "deny")
+
+    assert not asyncio.run(tools.execute("get_business_snapshot", {})).refused
+    assert _allow_count(root) == 1
+
+
+def test_the_backstop_does_not_suppress_a_delegates_own_authorization():
+    """The flag must not survive into a delegate body: the calls a delegate makes are new
+    calls, and clearing it there is what keeps the child's reads authorized."""
+    from merchant_agent.analysis import ANALYSIS_TOOL
+    from merchant_agent_runtime.analysis import build_analysis_delegate
+
+    config, session = demo.new_config(), demo.new_session()
+    backend = demo.DemoBackend(config)
+    root = _root()
+    grant = adapter.DelegateGrant.from_tools(
+        "analysis", ["get_business_snapshot", "query_metrics", "search_listings"],
+        demo.POLICY, ttl=900)
+    delegate = build_analysis_delegate(demo.analysis_script(), backend, config)
+    tools = _executor(backend, config, session, delegates=(delegate,))
+
+    with adapter.install(demo.POLICY, {ANALYSIS_TOOL: grant}, root=root):
+        asyncio.run(tools.execute(ANALYSIS_TOOL, {"question": "what moved sales?"}))
+
+    entries = root.audit_log().entries
+    child = [e for e in entries if e["event"] == "spawn"][0]["node"]
+    assert [e["tool"] for e in entries if e["event"] == "allow" and e["node"] == child] == [
+        "query_metrics"], "the delegate's own read stopped being authorized"
+    assert [e["tool"] for e in entries if e["event"] == "deny" and e["node"] == child] == [
+        "get_campaign_performance"]
 
 
 def test_a_guarded_class_built_before_install_still_authorizes_once():

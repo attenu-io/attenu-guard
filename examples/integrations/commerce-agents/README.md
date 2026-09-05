@@ -25,10 +25,11 @@ pip install -q -e ./commerce-agents/commerce-common \
                -e ./commerce-agents/merchant-agent/runtime-messages-api \
                -e ./attenu-guard
 python attenu-guard/examples/integrations/commerce-agents/demo.py
-attenu-guard verify attenu-commerce-bundle.json --hs256-key 64656d6f2d6b6579
+attenu-guard verify ./attenu-commerce-bundle.json --hs256-key 64656d6f2d6b6579
 ```
 
-The last line is act 5 again, from the file alone, with nothing else installed.
+The demo writes the bundle to the working directory, so run the last line from the same place (or
+give it the path it printed). It is act 5 again, from the file alone, with nothing else installed.
 
 ```
 integrity=True monotonicity=True containment=True anchor=verified nodes=4 actions_checked=8
@@ -145,6 +146,11 @@ with authorize_as(root):
 Only `dispatch` is overridden, so a deployment's own subclass — its `domain_error` mapping, its
 wording — can be the base and keeps everything it defines.
 
+That exact path is exercised, not just described: `test_the_real_orchestrator_takes_the_guarded_class`
+runs a real `MerchantAgent` with `executor_class=Guarded` on the repo's own `FakeClient`, scripting a
+search and then a price stage, and asserts both `ok` to the host, one change in the store and two
+`allow` entries on the chain.
+
 Register exactly one authorizer per executor: each is a complete authorization path, and two means
 `check()` runs twice for the same call. Every guarded `dispatch` carries a mark, and each entry point
 reads the dispatch a call would actually resolve before adding its own, so all four pairings are
@@ -160,7 +166,9 @@ its path; a test asserts one `allow` entry per call for it.
 In order: the delegate body currently running, then the guard bound to the executor (`bind`, or
 `guard_executor`), then the installed root. A dispatch that resolves to none of the three is held,
 never allowed — an executor with no node is never a permissive one, which act 1 shows before it
-opens the turn's scope. `authorize_as(root)` is how a per-request chain gets to the head of that
+opens the turn's scope. That first refusal is the one the demo prints but the bundle does not carry:
+with no node bound there is nothing to record it on, so the screen shows six refusals and the ledger
+five. The demo says so where it happens. `authorize_as(root)` is how a per-request chain gets to the head of that
 order when the executor class was fixed at deployment time.
 
 The first position is why `install()` reaches the shipped analysis delegate at all. The child guard
@@ -287,10 +295,15 @@ MCP server (`merchant-agent/managed-agents/merchant-mcp-server/merchant_mcp_serv
 `:129`). Upstream's own `test_every_path_takes_a_deployments_own_executor_class` holds all three to
 it.
 
-One path does not carry it. `AnalysisRunner._read` names `MerchantToolExecutor` inside the method
-(`analysis.py:333-339`) and keeps no reference outside it, so the deployment's executor stops at the
-delegate's own reads. That is the whole reason `install()` exists in this recipe: a monkeypatch is
-the only thing that reaches an instance nobody hands out.
+One consumption path does not carry it. `AnalysisRunner._read` names `MerchantToolExecutor` inside
+the method (`analysis.py:333-339`) and keeps no reference outside it, so the deployment's executor
+stops at the delegate's own reads. That is the whole reason `install()` exists in this recipe: a
+monkeypatch is the only thing that reaches an instance nobody hands out.
+
+It is one of exactly two non-test constructions of that class in the repo. The other is the demo web
+host at `examples/demo_common/merchant.py:248`, which builds an executor for the portal's approval
+buttons; that is an example site rather than a path the library offers, and a deployment that copies
+it passes its own class the same way every other path does.
 
 Carrying the same parameter one level further closes it. The patch below is verified, not sketched:
 it applies to the clone at `fd4d592` with `git apply`, their own `test_analysis.py` stays at 31
@@ -389,10 +402,13 @@ internally, and the tests cover both paths.
   this hook. Guarding that path means guarding the backend, which is a different recipe.
 - **Execution binding.** This recipe runs a `schema_version=1` chain: every allow and deny is on the
   ledger, but no `call_id`, params commitment or `record_outcome`. So an `allow` means the call was
-  authorized, not that the body ran — the repo's own `absent_tools` check
-  (`execution.py:232-233`) and its provenance and guardrail gates all run *after* this hook, and any
-  of them can hold a call the ledger already recorded as allowed. attenu-guard's shipped adapters
-  (`attenu_guard.adapters.*`) carry the v2 wiring that closes that gap.
+  authorized, not that the body ran — the repo's own `absent_tools` check (`execution.py:232-233`)
+  and its provenance and guardrail gates all run *after* this hook. Measured, not inferred:
+  `test_an_allow_means_authorized_not_executed` stages a price without a prior search through the
+  real orchestrator, and the same turn produces one `allow` for `pricing.stage` on the chain and a
+  `tool_result` carrying `status: "blocked"`, `reason: "provenance"` to the host, with nothing
+  written to the store. attenu-guard's shipped adapters (`attenu_guard.adapters.*`) carry the v2
+  wiring that closes that gap.
 - **A role that overrides `dispatch`.** `install()` patches the base class. No executor in the repo
   overrides `dispatch` today (only `handlers`, `memory_subject` and `domain_error` are role hooks),
   but one that did would shadow the patch. `guarded_executor_class` over that subclass, or

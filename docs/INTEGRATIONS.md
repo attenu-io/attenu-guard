@@ -45,9 +45,12 @@ Versions and file:line references are as of **August 2026**; they will drift.
 
 *Fit = how well the framework's official hooks carry an authorization decision (1–5). Seventeen entries, seventeen offline test suites; the Claude Agent SDK integration was additionally verified live against a real session, and the A2A one over a real HTTP hop.*
 
-Beyond the matrix: a **Langflow** custom component (`examples/integrations/langflow/`, 25 offline
-tests) — Langflow is a visual builder, so the unit there is a component in the editor rather
-than an adapter module. See the section below.
+Beyond the matrix, two recipes rather than adapters, each with its own section below: a
+**Langflow** custom component (`examples/integrations/langflow/`, 25 offline tests) — Langflow is a
+visual builder, so the unit there is a component in the editor rather than an adapter module — and
+**commerce-agents** (`examples/integrations/commerce-agents/`, 46 offline tests), which is an
+application rather than a framework and whose packages are on no index, so its test skips unless the
+repo is installed from a clone and CI does not carry it.
 
 ## Why these seventeen
 
@@ -126,9 +129,11 @@ for a deployment's own `MerchantToolExecutor` subclass"
 Messages API orchestrator, the Agent SDK toolset and the MCP server all accept — upstream's own
 `test_every_path_takes_a_deployments_own_executor_class` holds them to it. Nothing is patched.
 
-One path does not carry that seam: `AnalysisRunner._read` names `MerchantToolExecutor` inside the
-method (`analysis.py:332-339`) rather than the deployment's class, so the delegate's own reads fall
-outside it. The child guard rides a `contextvars` binding, and a process-wide `install()` is what
+One consumption path does not carry that seam: `AnalysisRunner._read` names
+`MerchantToolExecutor` inside the method (`analysis.py:332-339`) rather than the deployment's class,
+so the delegate's own reads fall outside it. (The repo's demo web host builds one directly too, at
+`examples/demo_common/merchant.py:248`, but that is an example site rather than a path the library
+offers.) The child guard rides a `contextvars` binding, and a process-wide `install()` is what
 reaches that instance today. **commerce-agents is a reference implementation that does not accept
 contributions** (its `README.md:193`), so the "Status of the framework findings" intent above does
 not apply here and nothing is filed upstream: the example README states the change that would close

@@ -6,6 +6,12 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- `examples/integrations/commerce-agents/` — a recipe for `anthropics/commerce-agents`, whose delegate contract ("a delegate cannot write, present, or invoke other delegates") is stated in prose and held by each delegate author rather than at the shared dispatch point. `guarded_executor_class` arrives through `executor_class`, the seam the repo documents and every consumption path already takes; `install()` covers the one construction that ignores it, `AnalysisRunner._read`. Offline on the repo's own `FakeClient`/`FakeCreateClient`, so the real `MerchantAgent` and the real `AnalysisRunner` both run with no API key. Not in the `integrations` CI matrix: the packages are unregistered on every index by upstream's own design, so the test skips unless the repo is installed from a clone
+
+### Fixed
+- `attenu-guard verify <missing path>` printed a raw `FileNotFoundError` traceback; it now prints `cannot read <path>: <reason>` and exits 1, like every other usage error
+
 ## [0.14.0] - 2026-09-05
 
 ### Added

@@ -182,7 +182,6 @@ class DemoBackend(MerchantBackend):
 
     def __init__(self, config: MerchantAgentConfig) -> None:
         self.ledger = ChangeLedger(config)
-        self.presented: list[str] = []
 
     # -- reads -----------------------------------------------------------------------
     async def get_business_snapshot(self, session, period=None) -> BusinessSnapshot:
@@ -391,7 +390,7 @@ def report_delegate(backend: DemoBackend, effects: Effects, peer: DelegateExtens
 
     Nothing here is attenu-guard-aware. ``DelegationContext`` carries the backend, the
     config, the session and the state (``commerce_common/commerce_common/delegation.py``
-    lines 20-31), which is everything ``MerchantToolExecutor.__init__`` asks for — so a
+    lines 21-31), which is everything ``MerchantToolExecutor.__init__`` asks for — so a
     delegate can construct the executor its own reads go through, which is what the
     shipped analysis delegate does. This one does not stop at reads.
 
@@ -520,6 +519,9 @@ async def act1(root: Guard, backend: DemoBackend, config: MerchantAgentConfig,
     # node bound is never a permissive one.
     unbound = await tools.execute("get_business_snapshot", {})
     _report("before authorize_as", unbound)
+    print("      ^ held with no node bound, so there is nothing to record it on: this "
+          "refusal is\n        on screen and NOT in the bundle. Every later refusal is "
+          "on both.")
 
     with authorize_as(root):
         await tools.execute("search_listings", {"query": "planter"})
@@ -701,16 +703,20 @@ async def main() -> None:
     state = MerchantSessionState()
     backend = DemoBackend(config)
 
-    audit_dir = Path(tempfile.mkdtemp(prefix="attenu-commerce-"))
-    root = Guard.issue("merchant-turn", OPERATOR_AUTHORITY, task="run the back office",
-                       chain_id="commerce-demo", audit_path=str(audit_dir / "ledger.jsonl"))
+    # The append-only ledger the chain writes as it runs. The bundle act 5 exports is what
+    # outlives the run, so this directory is temporary and removed on the way out.
+    with tempfile.TemporaryDirectory(prefix="attenu-commerce-") as audit_dir:
+        root = Guard.issue("merchant-turn", OPERATOR_AUTHORITY, task="run the back office",
+                           chain_id="commerce-demo",
+                           audit_path=str(Path(audit_dir) / "ledger.jsonl"))
 
-    print(__doc__.split("\n\nFive acts:")[0].strip())
-    await act1(root, backend, config, session, state)
-    await act2(root, backend, config, session, state)
-    await act3(root, config, session)
-    await act4(root, config, session)
-    report = act5(root, Path(os.environ.get("ATTENU_BUNDLE", "attenu-commerce-bundle.json")))
+        print(__doc__.split("\n\nFive acts:")[0].strip())
+        await act1(root, backend, config, session, state)
+        await act2(root, backend, config, session, state)
+        await act3(root, config, session)
+        await act4(root, config, session)
+        report = act5(root, Path(os.environ.get("ATTENU_BUNDLE",
+                                                "attenu-commerce-bundle.json")))
 
     rule("Summary")
     print("  The delegate was never told not to write, present, or call another delegate.")
