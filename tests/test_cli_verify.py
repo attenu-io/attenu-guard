@@ -118,6 +118,24 @@ class TestVerifyCli(unittest.TestCase):
             rc, out = run("verify", str(bundle_path), "--witness-keys", str(whole))
             self.assertEqual(rc, 0, out)
 
+    def test_a_missing_path_is_a_usage_error_not_a_traceback(self):
+        """`verify` on a path that is not there names the path and the reason and exits 1.
+        It used to let the open() raise, so a mistyped path (or running the README's line
+        from another directory) printed a FileNotFoundError traceback."""
+        missing = SAMPLES / "no-such-bundle.json"
+        self.assertFalse(missing.exists())
+        rc, out = run("verify", str(missing), "--hs256-key", KEY)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"cannot read {missing}", out)
+        self.assertIn("No such file or directory", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_an_unreadable_path_is_a_usage_error_too(self):
+        """A directory, or anything else open() refuses, takes the same path."""
+        rc, out = run("verify", str(SAMPLES), "--hs256-key", KEY)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"cannot read {SAMPLES}", out)
+
     def test_ledger_jsonl_still_verifies(self):
         import tempfile
         from attenu_guard import Authority, Guard
