@@ -6,6 +6,11 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-09-05
+
+### Changed
+- README: the first screen now opens with the definition, who it is for, the licence line (Apache-2.0, Python 3.9+, zero runtime dependencies, TypeScript port) and one snippet that prints on success; the live-enforcement sentence is narrowed to what `attenu-derive` docs/LIVE-ENFORCE.md and docs/A3-FRAMEWORKS.md show; framework and version labels agree with the matrix (18 entries, MCP as a recipe); package summary says 18
+
 ### Added
 - `examples/integrations/commerce-agents/` — a recipe for `anthropics/commerce-agents`, whose delegate contract ("a delegate cannot write, present, or invoke other delegates") is stated in prose and held by each delegate author rather than at the shared dispatch point. `guarded_executor_class` arrives through `executor_class`, the seam the repo documents and every consumption path already takes; `install()` covers the one construction that ignores it, `AnalysisRunner._read`. Offline on the repo's own `FakeClient`/`FakeCreateClient`, so the real `MerchantAgent` and the real `AnalysisRunner` both run with no API key. Not in the `integrations` CI matrix: the packages are unregistered on every index by upstream's own design, so the test skips unless the repo is installed from a clone
 
