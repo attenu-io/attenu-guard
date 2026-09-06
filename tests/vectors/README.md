@@ -802,8 +802,7 @@ rejecting case declares `expect_failures`: the **minimal set** of
   the compatibility contract and stays `envelope_vectors_v1` while `revision`
   moves with each addition. Iterate `cases`; do not assume a length.
 - Unless a row says otherwise, the envelope is **re-signed by the witness after
-  the change**, so `envelope_bad_signature` is not what fails.
-  `reject_bad_signature` is the only row where it is. Two rows say otherwise:
+  the change**, so `envelope_bad_signature` is not what fails. Two rows say otherwise:
   `reject_bad_signature`, where the broken signature is the required failure,
   and `reject_duplicate_subject_defective_second`, where it is a permitted extra
   that an earlier rule pre-empts.

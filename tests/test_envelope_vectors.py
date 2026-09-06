@@ -309,8 +309,7 @@ class TestEnvelopeVectors(unittest.TestCase):
         # Still lowercase hex of the same length, so the member set and the canonical bytes are
         # untouched: only the signature is wrong.
         self.assertEqual(b["sig"], b["sig"].lower())
-        bytes.fromhex(b["sig"])
-
+        self.assertEqual(len(bytes.fromhex(b["sig"])), len(bytes.fromhex(a["sig"])))
     def test_the_defective_second_rows_signature_really_does_not_verify(self):
         # Non-vacuity, half two: on its OWN — with no earlier envelope to be a duplicate of —
         # that second envelope fails on the signature. Without this the row would prove nothing
