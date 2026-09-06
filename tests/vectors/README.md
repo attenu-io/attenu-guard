@@ -575,6 +575,19 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   declared GAP, by his commit message. The verifier is Cred's own implementation, so this is a
   run by a second delegation protocol, not by a general-purpose verifier. Stated by its author
   as a conformance score with three gaps declared, nothing wider.
+- **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-06** — the same Rust verifier, extended to the
+  **observer-envelope corpus** `envelope_vectors_v1.json` (revision `envelope_vectors_v1.1`, eighteen
+  cases, sha256 `6a57d75ebec881d39d5a1805793a20f9a6d7bff021b70782dcb57c43b276df64`, checked by a test
+  before scoring): 18 of 18 on the first run, five accepting and thirteen rejecting, every entry state
+  matching `expect_states`; two permitted extras where the scoring rules allow them
+  (`envelope_bad_signature` beside `envelope_non_canonical` on `reject_non_canonical`; a second
+  `envelope_subject_mismatch` at seq 2 on `reject_rehashed_chain_anchored`). Written from this README
+  and the per-case prose, by the author's account without reading either reference implementation.
+  Pinned at `XuebinMa/agent-guard` merge commit `e7eaba2c14a87cc7d0fb672f7a997e303df18d8c`
+  (`crates/guard-verify/src/attenu/envelope.rs`); checked from this side: the vendored fixture's
+  sha256 matches ours and the repository's Rust checks are green on that commit. His stated boundary:
+  independent reproduction of the released corpus at that pin; not verifier completeness, runtime
+  correctness or certification.
 
 ## Observer envelope vectors
 
