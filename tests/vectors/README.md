@@ -575,6 +575,20 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   declared GAP, by his commit message. The verifier is Cred's own implementation, so this is a
   run by a second delegation protocol, not by a general-purpose verifier. Stated by its author
   as a conformance score with three gaps declared, nothing wider.
+- **@safal207, 2026-09-06** — a standalone Node.js verifier that imports no attenu-guard
+  runtime scored the twenty **Delegation Token vectors** (`tests/vectors/`: `valid_chain` and the
+  six `valid_jcs_*` canonicalisation variants that must verify, thirteen `reject_*` chains a
+  verifier must refuse) at attenu-guard `419f6584` (byte-identical to the files on main): 20 of 20,
+  seven accepting and thirteen rejecting, verdicts and declared reasons both matching. This is the
+  first general-purpose verifier to score the full set; the Cred run above is that protocol's own
+  harness. His scope, as he states it: `draft-asor-wimse-agent-delegation-chain-01` steps 1 to 5
+  under the corpus's single-signer, public-test-key HS256 profile; step 6 DPoP, step 7 Token Status
+  List and actual-action authorization are NOT_RUN, and production Ed25519 and audience policy are
+  out of scope. Proof tree `safal207/ContractGraph-QA` at commit `6893d0fd`,
+  `proofs/attenu-delegation-20-independent` (verifier, report, hashes, reproduction; PR #160), CI
+  run 34011403757 with byte-for-byte report regeneration. His stated boundary: corpus-conformance
+  evidence for the released fixtures, not general draft-conformance, verifier completeness, runtime
+  correctness, or a production-security claim.
 - **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-06** — the same Rust verifier, extended to the
   **observer-envelope corpus** `envelope_vectors_v1.json` (revision `envelope_vectors_v1.1`, eighteen
   cases, sha256 `6a57d75ebec881d39d5a1805793a20f9a6d7bff021b70782dcb57c43b276df64`, checked by a test
