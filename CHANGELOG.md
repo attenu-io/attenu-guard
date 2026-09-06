@@ -6,6 +6,9 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- Observer-envelope corpus revision `envelope_vectors_v1.2`, nineteen cases: `reject_duplicate_subject_defective_second` is `reject_duplicate_subject` with one hex nibble of the SECOND envelope's signature flipped. It is the only row that separates a verifier which claims the entry as soon as `subject.seq` finds it from one which judges the envelope first. Row 17 cannot — both envelopes are sound there, so both verifiers reach the duplicate rule and both reject. Break the second signature and they part: claiming first reports `envelope_duplicate_subject` and seq 1 falls back to `process-asserted`; judging first stops at the signature, never reaches the duplicate rule, counts no claim, and leaves seq 1 reporting `witness-signed` on the first envelope alone, telling a consumer the entry is witness-signed while two witnesses contradicted each other. Required set unchanged from row 17 (`envelope_duplicate_subject` at seq 1, seq 1 `process-asserted`); `envelope_bad_signature` at that seq is a permitted extra, as on `reject_non_canonical`, and reporting it INSTEAD is fewer than the minimal set. No new reason name. Rows 1 to 18 are byte-identical and `version` stays `envelope_vectors_v1`. Proposed by Xuebin Ma (@XuebinMa, agent-guard) on a2aproject/A2A#1575 after scoring revision v1.1 18 of 18. Both implementations already claim first, so this pins existing behaviour rather than changing it
+
 ## [0.14.1] - 2026-09-05
 
 ### Changed

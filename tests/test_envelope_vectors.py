@@ -64,6 +64,10 @@ CASE_NAMES = [
     # Appended at revision v1.1: the duplicate-subject rule, and the algorithm check.
     "reject_duplicate_subject",
     "reject_unknown_alg",
+    # Appended at revision v1.2, at @XuebinMa's proposal: the duplicate rule again, with the
+    # second envelope ALSO defective, which is what separates a verifier that claims the entry
+    # at `subject.seq` from one that judges the envelope first. Row 17 cannot: both reject it.
+    "reject_duplicate_subject_defective_second",
 ]
 
 # The failures a chain mutation, the envelope's own contents, or the array they sit in can
@@ -83,6 +87,7 @@ REQUIRED_BY_ROW = {
     "reject_locator_mismatch": "envelope_subject_mismatch",
     "reject_duplicate_subject": "envelope_duplicate_subject",
     "reject_unknown_alg": "envelope_unknown_witness",
+    "reject_duplicate_subject_defective_second": "envelope_duplicate_subject",
 }
 
 
@@ -124,7 +129,7 @@ class TestEnvelopeVectors(unittest.TestCase):
         # `version` is the compatibility contract and does not move when cases are appended;
         # `revision` is the additive counter that does.
         self.assertEqual(self.document["version"], "envelope_vectors_v1")
-        self.assertEqual(self.document["revision"], "envelope_vectors_v1.1")
+        self.assertEqual(self.document["revision"], "envelope_vectors_v1.2")
         self.assertEqual([c["name"] for c in self.document["cases"]], CASE_NAMES)
 
     def test_every_case_carries_the_two_envelope_specific_fields(self):
@@ -287,6 +292,57 @@ class TestEnvelopeVectors(unittest.TestCase):
         self.assertNotIn("envelope_non_canonical",
                          [d["reason"] for d in blind["failure_details"]])
 
+    def test_the_defective_second_row_differs_from_row_17_by_one_nibble_of_one_signature(self):
+        # Non-vacuity, half one: the row really is row 17 plus a broken signature and nothing
+        # else. Same ledger, same first envelope, same second subject and witness — one hex
+        # nibble of the second `sig`. Anything more would let some earlier check stop the
+        # envelope, and the row would no longer isolate the ordering question it asks.
+        row17 = self.by_name["reject_duplicate_subject"]["bundle"]
+        row19 = self.by_name["reject_duplicate_subject_defective_second"]["bundle"]
+        self.assertEqual(row17["entries"], row19["entries"])
+        self.assertEqual(row17["envelopes"][0], row19["envelopes"][0])
+        a, b = row17["envelopes"][1], row19["envelopes"][1]
+        self.assertEqual({k: v for k, v in a.items() if k != "sig"},
+                         {k: v for k, v in b.items() if k != "sig"})
+        self.assertEqual(len(a["sig"]), len(b["sig"]))
+        self.assertEqual(sum(x != y for x, y in zip(a["sig"], b["sig"])), 1)
+        # Still lowercase hex of the same length, so the member set and the canonical bytes are
+        # untouched: only the signature is wrong.
+        self.assertEqual(b["sig"], b["sig"].lower())
+        self.assertEqual(len(bytes.fromhex(b["sig"])), len(bytes.fromhex(a["sig"])))
+    def test_the_defective_second_rows_signature_really_does_not_verify(self):
+        # Non-vacuity, half two: on its OWN — with no earlier envelope to be a duplicate of —
+        # that second envelope fails on the signature. Without this the row would prove nothing
+        # about ordering, because there would be nothing for the duplicate rule to pre-empt.
+        case = self.by_name["reject_duplicate_subject_defective_second"]
+        alone = copy.deepcopy(case["bundle"])
+        alone["envelopes"] = [alone["envelopes"][1]]
+        report = evidence.verify_bundle(alone, _signer_for(case),
+                                        witness_keys=case["witness_keys"])
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_bad_signature"])
+        self.assertEqual(report["envelopes"]["states"][generate_envelopes.SPAWN_SEQ],
+                         evidence.PROCESS_ASSERTED)
+
+    def test_the_defective_second_row_pins_claim_first_over_judge_first(self):
+        # What the row is FOR. This build claims the entry as soon as `subject.seq` finds it,
+        # so the duplicate rule fires and the signature is never reached: `envelope_bad_signature`
+        # is a permitted extra that this verifier does not report. A verifier that judged the
+        # envelope first would report that reason INSTEAD, count no claim, and leave seq 1
+        # reporting `witness-signed` on the first envelope alone — fewer than the minimal set,
+        # and the wrong state. Both halves are asserted here.
+        case = self.by_name["reject_duplicate_subject_defective_second"]
+        report = _verify(case)
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_duplicate_subject"])
+        self.assertEqual(report["envelopes"]["states"][generate_envelopes.SPAWN_SEQ],
+                         evidence.PROCESS_ASSERTED)
+        self.assertEqual(report["envelopes"]["witness_signed"], [])
+        # The first witness's word still stands as what IT said; the ENTRY is what stops being
+        # witness-signed. Same contract as row 17, and the broken second envelope does not
+        # change it.
+        self.assertEqual(report["envelopes"]["results"][generate_envelopes.SPAWN_SEQ], "matched")
+
     def test_the_absent_row_carries_no_envelopes_member_at_all(self):
         case = self.by_name["absent_envelope"]
         self.assertNotIn("envelopes", case["bundle"])
@@ -350,7 +406,7 @@ class TestEnvelopeVectors(unittest.TestCase):
         self.assertEqual(vectors.read_envelope_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_envelope_vectors()
         self.assertEqual(loaded["version"], "envelope_vectors_v1")
-        self.assertEqual(loaded["revision"], "envelope_vectors_v1.1")
+        self.assertEqual(loaded["revision"], "envelope_vectors_v1.2")
         self.assertEqual([c["name"] for c in loaded["cases"]], CASE_NAMES)
 
     def test_every_packaged_case_scores_as_it_declares(self):
