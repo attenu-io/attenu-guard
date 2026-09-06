@@ -583,6 +583,9 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   (`envelope_bad_signature` beside `envelope_non_canonical` on `reject_non_canonical`; a second
   `envelope_subject_mismatch` at seq 2 on `reject_rehashed_chain_anchored`). Written from this README
   and the per-case prose, by the author's account without reading either reference implementation.
+  His own caveat on the number, carried here as he put it: a clean first run is not the verifier
+  being sharper; his bundle run scored 9 of 17 first with every check right and every reason name
+  wrong, and the names were published this time, so the vectors-first order is what produced 18 of 18.
   Pinned at `XuebinMa/agent-guard` merge commit `e7eaba2c14a87cc7d0fb672f7a997e303df18d8c`
   (`crates/guard-verify/src/attenu/envelope.rs`); checked from this side: the vendored fixture's
   sha256 matches ours and the repository's Rust checks are green on that commit. His stated boundary:
