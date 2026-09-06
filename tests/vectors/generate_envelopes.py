@@ -69,7 +69,7 @@ VECTORS_FILENAME = "envelope_vectors_v1.json"
 # tell which corpus they ran without diffing case lists. Same discipline as the bundle file,
 # which grew its `revision` only at its first addition; this one carries it from the start.
 VECTORS_VERSION = "envelope_vectors_v1"
-VECTORS_REVISION = "envelope_vectors_v1.1"
+VECTORS_REVISION = "envelope_vectors_v1.2"
 
 VECTORS_DIR = Path(__file__).resolve().parent / ENVELOPES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -158,6 +158,22 @@ def _resign(envelope: dict, kid: str = WITNESS_KID) -> dict:
     sign, _verify, _public = evidence._ed25519_backend()
     envelope = {k: v for k, v in envelope.items() if k != "sig"}
     envelope["sig"] = sign(SEEDS[kid], evidence.envelope_signing_input(envelope)).hex()
+    return envelope
+
+
+def _flip_sig_nibble(envelope: dict) -> dict:
+    """The deliberate exception to `_resign`'s convention: ONE hex nibble of the signature
+    flipped and nothing else.
+
+    Same length, still lowercase hex, every member untouched, so the member set and the
+    canonical bytes are exactly what they were and the ONLY thing wrong with this envelope is
+    that its signature does not verify. That matters for the row this builds: the envelope has
+    to be sound everywhere a verifier looks BEFORE the signature, or it would be stopped by
+    some earlier check and the row would no longer isolate the ordering question it exists to
+    ask."""
+    envelope = copy.deepcopy(envelope)
+    sig = envelope["sig"]
+    envelope["sig"] = format(int(sig[0], 16) ^ 0x1, "x") + sig[1:]
     return envelope
 
 
@@ -496,6 +512,41 @@ def gen_cases() -> list:
         with_envelopes(base, [_resign(unknown_alg)]),
         expect="reject",
         expect_failures=[_fail("envelope_unknown_witness", SPAWN_SEQ, n1)]))
+
+    # ---- appended at revision v1.2: claim the entry, THEN judge the envelope ----
+    cases.append(_case(
+        "reject_duplicate_subject_defective_second",
+        f"reject_duplicate_subject with one further change: the second envelope's `sig` has a "
+        "single hex nibble flipped, so it does not verify. This is the one row besides "
+        "reject_bad_signature where the witness does NOT re-sign after the change, and the row "
+        "says so because the file's convention is that it does.\n\n"
+        "Row 17 cannot separate two verifiers that both reject it. One CLAIMS the entry the "
+        "moment `subject.seq` finds it and judges the rest of the envelope afterwards; the "
+        "other judges the envelope first and only counts a claim for one that survived. On row "
+        "17 both envelopes are sound, so both verifiers reach the duplicate rule and both "
+        "report it. Here they part: claiming first reports `envelope_duplicate_subject` at seq "
+        f"{SPAWN_SEQ} and seq {SPAWN_SEQ} falls back to `process-asserted`; judging first stops "
+        "at the broken signature, never reaches the duplicate rule, counts no claim, and leaves "
+        f"seq {SPAWN_SEQ} reporting `witness-signed` on the strength of the FIRST envelope "
+        "alone. A consumer reading states is then told the entry is witness-signed while two "
+        "witnesses contradicted each other — which is the harm the duplicate rule exists to "
+        "prevent, reappearing because the second envelope was defective in a second way as "
+        "well.\n\n"
+        f"Required: `envelope_duplicate_subject` at the covered entry ({n1} at seq "
+        f"{SPAWN_SEQ}), and seq {SPAWN_SEQ} MUST report `process-asserted`. "
+        f"`envelope_bad_signature` at that same seq is a permitted EXTRA and not a required "
+        "failure: a verifier that counts the claim and then keeps checking the envelope reports "
+        "both and is conformant, exactly as reject_non_canonical permits an extra "
+        "`envelope_bad_signature`. Reporting it INSTEAD is not conformant — that is fewer than "
+        "the minimal set. Proposed by Xuebin Ma (@XuebinMa, agent-guard) on a2aproject/A2A#1575 "
+        "after scoring revision envelope_vectors_v1.1 18 of 18; appended after row 18, so "
+        "nothing above it moved.",
+        with_envelopes(base, [spawn_envelope,
+                              _flip_sig_nibble(
+                                  _envelope(entries, SPAWN_SEQ, kid=WITNESS_KID_B,
+                                            result="not_matched"))]),
+        expect="reject",
+        expect_failures=[_fail("envelope_duplicate_subject", SPAWN_SEQ, n1)]))
 
     return cases
 

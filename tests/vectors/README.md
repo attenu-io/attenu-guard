@@ -658,6 +658,18 @@ sparse case, not a duplicate. An entry is claimed as soon as `subject.seq` finds
 it, before the rest of the envelope is judged, so a second envelope cannot
 escape the rule by being defective in some other way as well.
 
+That last sentence is what `reject_duplicate_subject_defective_second` exists to
+score, and it is the only row that can. `reject_duplicate_subject` carries two
+sound envelopes, so a verifier that claims the entry at `subject.seq` and one
+that judges the envelope first both reach the duplicate rule and both reject it;
+the row cannot tell them apart. Break the second envelope's signature and they
+part. Claiming first reports `envelope_duplicate_subject` and the entry falls
+back to `process-asserted`. Judging first stops at the signature, never reaches
+the duplicate rule, counts no claim, and leaves the entry reporting
+`witness-signed` on the strength of the first envelope alone — a consumer
+reading states is told the entry is witness-signed while two witnesses
+contradicted each other.
+
 Why the file exists before any implementation of it: the third independent run of the bundle
 corpus scored 9 of 17 with every check right and every reason name wrong, and its author drew
 the conclusion for us. "An implementation working from prose will get the checks right and the
@@ -675,7 +687,7 @@ two fields on every case that the bundle file does not have:
 ```jsonc
 {
   "version": "envelope_vectors_v1",        // compatibility contract; does not move
-  "revision": "envelope_vectors_v1.1",     // additive counter; moves when a case is appended
+  "revision": "envelope_vectors_v1.2",     // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -791,7 +803,10 @@ rejecting case declares `expect_failures`: the **minimal set** of
   moves with each addition. Iterate `cases`; do not assume a length.
 - Unless a row says otherwise, the envelope is **re-signed by the witness after
   the change**, so `envelope_bad_signature` is not what fails.
-  `reject_bad_signature` is the only row where it is.
+  `reject_bad_signature` is the only row where it is. Two rows say otherwise:
+  `reject_bad_signature`, where the broken signature is the required failure,
+  and `reject_duplicate_subject_defective_second`, where it is a permitted extra
+  that an earlier rule pre-empts.
 
 Two rules from envelope v0.1 say where the permitted extras may **not** land.
 Both bind scoring:
@@ -922,6 +937,23 @@ at seq 1 (`vectors:n1`) and the `allow`s at seq 2 (`vectors:n0`) and seq 4
   say `"none"`, and one that ignores `alg` and reports
   `envelope_bad_signature` — the right verdict for the wrong reason.
   (Appended at revision `envelope_vectors_v1.1`, after row 17.)
+- `reject_duplicate_subject_defective_second` — `reject_duplicate_subject` with
+  one further change: a single hex nibble of the **second** envelope's `sig`
+  flipped, so it does not verify. Same ledger, same first envelope, same second
+  subject and witness; the signature is the only difference, and it is still
+  lowercase hex of the same length, so the member set and the canonical bytes
+  are untouched. Required: `envelope_duplicate_subject` at the covered entry,
+  and seq 1 MUST report `process-asserted`. `envelope_bad_signature` at that
+  same seq is a permitted **extra**, not a required failure: a verifier that
+  counts the claim and then keeps checking the envelope reports both and is
+  conformant, the same way `reject_non_canonical` permits it. Reporting it
+  **instead** is not conformant — that is fewer than the minimal set, and it
+  leaves seq 1 reporting `witness-signed`. The row is the only one that
+  separates claiming the entry from judging the envelope; see "One entry, at
+  most one envelope" above for why row 17 cannot. (Proposed by Xuebin Ma
+  (@XuebinMa, agent-guard) on a2aproject/A2A#1575 after scoring revision
+  `envelope_vectors_v1.1` 18 of 18. Appended at revision
+  `envelope_vectors_v1.2`, after row 18, so nothing above it moved.)
 
 ### Known limits of envelope v1, stated rather than fixed
 
