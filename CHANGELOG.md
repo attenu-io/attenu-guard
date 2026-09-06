@@ -6,6 +6,9 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- README first sentence and the repository description say what the contract is: the caller declares the child's grant, the library bounds it by the parent's (the meet), so a child never holds more than its parent; "only what its task needs" and "strict subset" overstated it (equal authority is permitted, and task text does not narrow a grant)
+
 ## [0.15.0] - 2026-09-06
 
 ### Added

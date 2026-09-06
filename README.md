@@ -1,7 +1,8 @@
 # attenu-guard
 
 When one AI agent hands work to another, the second one normally keeps everything the first
-could do. attenu-guard gives it only the permissions its task needs and refuses the rest,
+could do. attenu-guard gives it the permissions you declare for its task, never more than the
+parent holds, and refuses the rest,
 inside your process, with no network call in the deny path. Every decision lands on a
 hash-chained log you can verify offline.
 
