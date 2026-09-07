@@ -124,6 +124,131 @@ class RecordPassthrough(unittest.TestCase):
         self.assertEqual(report["ungated"], 1)
 
 
+class CamelGateRunsWithoutTheFramework(unittest.TestCase):
+    """`GuardedFunctionTool._authorize` is exercised here with no `camel-ai` installed.
+
+    `adapters/camel.py` passed `tool=self.tool_name` to the shared context helper. That
+    attribute exists on neither `GuardedFunctionTool` nor CAMEL's `FunctionTool` — every other
+    site in the file calls `get_function_name()` — so the gate raised `AttributeError` on every
+    guarded call. It shipped because CAMEL is not installed in the stdlib job and the sweep that
+    introduced the line is a source-text test, which cannot see that a name is wrong.
+
+    So the gate is driven here against a STRICT stub: a stand-in `FunctionTool` that defines
+    exactly what the real one gives the adapter and nothing else. An attribute the adapter is
+    not entitled to raises, exactly as it did on the real framework. `unittest.mock` is
+    deliberately not used — a mock answers to any name, which is the one property that would
+    make this test unable to fail."""
+
+    def _install_stub_camel(self):
+        """A minimal `camel` package in `sys.modules`, restored on cleanup."""
+        class FunctionTool:
+            """Stand-in for `camel.toolkits.FunctionTool`.
+
+            Only the members `adapters/camel.py` legitimately uses. Anything else is an
+            AttributeError, which is the point."""
+
+            def __init__(self, func=None, openai_tool_schema=None):
+                self.func = func
+                self.openai_tool_schema = openai_tool_schema or {
+                    "function": {"name": getattr(func, "__name__", "stub_tool")}}
+
+            def get_function_name(self):
+                return self.openai_tool_schema["function"]["name"]
+
+            def __call__(self, *args, **kwargs):
+                return self.func(*args, **kwargs)
+
+            async def async_call(self, *args, **kwargs):
+                return self.func(*args, **kwargs)
+
+        class AgentToolkit:
+            def __init__(self, *a, **kw):
+                pass
+
+            def agent_run_subagent(self, *a, **kw):
+                """Stand-in for the delegation entry point the adapter subclasses; the
+                adapter copies this docstring onto its own override."""
+                raise NotImplementedError
+
+        camel = types.ModuleType("camel")
+        toolkits = types.ModuleType("camel.toolkits")
+        agent_toolkit = types.ModuleType("camel.toolkits.agent_toolkit")
+        toolkits.FunctionTool = FunctionTool
+        agent_toolkit.AgentToolkit = AgentToolkit
+        toolkits.agent_toolkit = agent_toolkit
+        camel.toolkits = toolkits
+        added = {"camel": camel, "camel.toolkits": toolkits,
+                 "camel.toolkits.agent_toolkit": agent_toolkit}
+        saved = {k: sys.modules.get(k) for k in added}
+        saved["attenu_guard.adapters.camel"] = sys.modules.get("attenu_guard.adapters.camel")
+        sys.modules.update(added)
+        sys.modules.pop("attenu_guard.adapters.camel", None)
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+        self.addCleanup(restore)
+        import importlib
+        return importlib.import_module("attenu_guard.adapters.camel")
+
+    def _tool(self, camel_mod, guard, context_fn=None):
+        def stub_tool(rows=1):
+            return rows
+        return camel_mod.GuardedFunctionTool(stub_tool, guard, "repo.read",
+                                             context_fn=context_fn)
+
+    def test_an_allowed_call_passes_through_the_gate(self):
+        camel_mod = self._install_stub_camel()
+        g = _root()
+        tool = self._tool(camel_mod, g)
+        self.assertEqual(tool(rows=3), 3)
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["scope"]), ("allow", "repo.read"))
+
+    def test_the_gate_names_the_tool_it_is_authorizing(self):
+        """The regression itself: the helper is called with the tool's real name."""
+        camel_mod = self._install_stub_camel()
+        g = _root()
+        seen = {}
+
+        def context_fn(**kwargs):
+            return {"rows": kwargs.get("rows", 0)}
+
+        tool = self._tool(camel_mod, g, context_fn=context_fn)
+        real = camel_mod._safe_context
+
+        def spy(guard, compute, *args, **kwargs):
+            seen.update(tool=kwargs.get("tool"), scope=kwargs.get("scope"))
+            return real(guard, compute, *args, **kwargs)
+
+        camel_mod._safe_context = spy
+        self.addCleanup(setattr, camel_mod, "_safe_context", real)
+        tool(rows=2)
+        self.assertEqual(seen["scope"], "repo.read")
+        self.assertEqual(seen["tool"], "stub_tool",
+                         "the gate must name the tool, not raise reaching for it")
+
+    def test_a_raising_context_function_is_a_recorded_denial_not_an_attribute_error(self):
+        """The path the broken attribute sat on. It must reach the helper's own handler and
+        produce a `deny`, never an AttributeError from the gate itself."""
+        camel_mod = self._install_stub_camel()
+        g = _root()
+
+        def boom(**kwargs):
+            raise KeyError("rows")
+
+        tool = self._tool(camel_mod, g, context_fn=boom)
+        with self.assertRaises(AuthorityDenied):
+            tool(rows=1)
+        entry = g.audit_log().entries[-1]
+        self.assertEqual(entry["event"], "deny")
+        self.assertEqual(entry["reason"], ReasonCode.NO_AUTHORITY)
+        self.assertEqual(entry["tool"], "stub_tool")
+
+
 class RefusedDelegationIsADeny(unittest.TestCase):
     def test_reason_code_is_named(self):
         self.assertEqual(ReasonCode.DELEGATION_REFUSED, "delegation_refused")

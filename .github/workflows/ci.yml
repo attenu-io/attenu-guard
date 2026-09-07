@@ -170,8 +170,8 @@ jobs:
           # `version` is the compatibility contract and stays put as cases are appended;
           # `revision` and the count move together, so both are pinned deliberately here.
           assert doc["version"] == "bundle_vectors_v1", doc["version"]
-          assert doc["revision"] == "bundle_vectors_v1.2", doc["revision"]
-          assert len(doc["cases"]) == 17, len(doc["cases"])
+          assert doc["revision"] == "bundle_vectors_v1.3", doc["revision"]
+          assert len(doc["cases"]) == 18, len(doc["cases"])
           for case in doc["cases"]:
               signer = wire.HS256TestSigner(bytes.fromhex(case["signer"]["secret_hex"]),
                                             kid=case["signer"]["kid"])
@@ -181,6 +181,14 @@ jobs:
                           for d in report["failure_details"]]
               for expected in case["expect_failures"]:
                   assert expected in reported, (case["name"], expected, reported)
+              # `expect_report` (revision v1.3): named report counters a conformant verifier
+              # reproduces exactly. It exists for a rule accept/reject cannot distinguish —
+              # `valid_bundle_v2_ungated_allow` accepts either way, and only `ungated` says
+              # whether the un-gated allow was excused from containment or silently ignored.
+              # A case without the key asserts nothing about counters.
+              for counter, expected_value in (case.get("expect_report") or {}).items():
+                  assert report[counter] == expected_value, (case["name"], counter,
+                                                             report[counter], expected_value)
           print("packaged bundle vectors OK")
           PY
       - name: The observer-envelope vectors ship inside the installed package too

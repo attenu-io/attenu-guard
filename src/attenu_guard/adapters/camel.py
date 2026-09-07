@@ -327,7 +327,8 @@ class GuardedFunctionTool(FunctionTool):
         guard = _resolve(self.guard)
         # `guard`, never `self.guard`: a `GuardRef` has no `record_denial` (see smolagents).
         context: Mapping = _safe_context(guard, self.context_fn, *args,
-                                         tool=self.tool_name, scope=self.scope, **kwargs)
+                                         tool=self.get_function_name(), scope=self.scope,
+                                         **kwargs)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None
         extra = (
