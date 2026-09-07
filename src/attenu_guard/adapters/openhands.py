@@ -316,12 +316,24 @@ class GuardedDelegation:
         self._lock = threading.Lock()
         self._installed: dict[str, Any] = {}          # tool name -> the class we displaced
         self._resolver_classes: dict[Any, Any] = {}   # original class -> guarded resolver class
+        self._conversation_guards: dict[int, Guard] = {}   # id(conversation) -> its child Guard
         self._registry_module: Any = None             # the SDK registry module, while armed
         self._registry_original: Any = None           # its original `_REG` mapping
 
     # -- introspection ------------------------------------------------------
-    def active_guard(self) -> Guard:
-        """The Guard this tool call must be authorized against."""
+    def active_guard(self, conversation: Any = None) -> Guard:
+        """The Guard this tool call must be authorized against.
+
+        A conversation wins over the ContextVar when one is bound to it. The SDK's
+        `DelegateExecutor` runs each sub-agent in a plain `threading.Thread`, and a thread does
+        not inherit context, so a ContextVar-carried Guard never reaches a delegated child —
+        its tool calls would land on the PARENT's node. The conversation object, unlike the
+        context, IS handed to the executor on every call, so that is what the child Guard is
+        bound to. `task`-style delegation, which runs inline, keeps using the ContextVar."""
+        if conversation is not None:
+            bound = self._conversation_guards.get(id(conversation))
+            if bound is not None:
+                return bound
         return current_guard() or self.root
 
     def child(self, name: str) -> Optional[Guard]:
@@ -479,14 +491,17 @@ class GuardedDelegation:
         return tool.set_executor(_GuardedExecutor(tool.executor, tool.name, self))
 
     # -- the hook ------------------------------------------------------------
-    def call(self, tool_name: str, action: Any, inner: Callable[[], Any]) -> Any:
+    def call(self, tool_name: str, action: Any, inner: Callable[[], Any],
+             conversation: Any = None) -> Any:
         """Authorize one tool call, then run `inner` (or refuse, and never run it).
 
         Public so a project that wires its own `ToolExecutor` can reuse the gate
-        without going through `install()`.
+        without going through `install()`. `conversation`, when the caller has it, is how a
+        delegated sub-agent's calls find their own node across a thread boundary — see
+        `active_guard`.
         """
         args = _action_args(action)
-        gate = self._gate(tool_name, args)
+        gate = self._gate(tool_name, args, conversation)
         if gate.denial is not None:
             return self._deny(tool_name, gate.denial)
         if gate.child is None:
@@ -524,9 +539,10 @@ class GuardedDelegation:
         guard: Optional[Guard] = None
         snapshot: Any = None
 
-    def _gate(self, name: str, args: Mapping[str, Any]) -> "GuardedDelegation._Gate":
+    def _gate(self, name: str, args: Mapping[str, Any],
+              conversation: Any = None) -> "GuardedDelegation._Gate":
         """Decide, without running anything: deny / delegate / pass through."""
-        guard = self.active_guard()
+        guard = self.active_guard(conversation)
 
         if name == self.delegation_tool and (self.subagents or self.default_subagent_authority):
             return self._gate_delegation(guard, args)
@@ -651,12 +667,127 @@ class GuardedDelegation:
         self.children[str(subagent)] = child
         return self._Gate(child=child)
 
+    def delegate_executor(self, inner: Any) -> Any:
+        """Wrap the SDK's `DelegateExecutor` so `delegate` is a delegation seam too.
+
+        `openhands.tools.delegate` is the SDK's SECOND way to hand work to a sub-agent, and it
+        ships without a tool class — an app wires its own around `DelegateExecutor`. This
+        adapter only ever treated the configured `delegation_tool` (`task`) as a spawn, so an
+        app that delegates this way minted NO child node and the sub-agent's own tool calls were
+        recorded on the parent's node (OpenHands battery, `h18-omitted-delegate`: `terminal`
+        landed on n0). The ceiling still denied the write, because the rule was on the root — but
+        the attenuation was not real and the delegation graph was wrong, which is the whole
+        claim.
+
+        Wire it where the app builds the executor::
+
+            executor = guarded.delegate_executor(DelegateExecutor())
+
+        `spawn` mints one child per sub-agent id, from the Authority declared for its agent TYPE
+        (resolved through the SDK's registry, so `default` finds `general-purpose` — the same
+        alias table as `_canonical_subagent`, reached from the other side: `_resolve_agent_type`
+        returns the literal `"default"` when `agent_types` is omitted). A type with no declared
+        Authority is refused before the SDK creates anything, and the refusal is a `deny` on the
+        trail. Each child is then bound to ITS conversation, which is how its calls find their
+        own node once `_delegate_tasks` runs them in threads — see `active_guard`.
+        """
+        outer = self
+
+        class _GuardedDelegateExecutor:
+            """Structural wrapper: the SDK types executors, it does not isinstance-check them."""
+
+            def __init__(self) -> None:
+                self._inner = inner
+                self._bound: dict[str, Guard] = {}
+
+            @property
+            def inner(self) -> Any:
+                return self._inner
+
+            def __call__(self, action: Any, conversation: Any = None) -> Any:
+                command = getattr(action, "command", None)
+                if command == "spawn":
+                    return self._spawn(action, conversation)
+                return self._inner(action, conversation)
+
+            def _spawn(self, action: Any, conversation: Any) -> Any:
+                guard = outer.active_guard(conversation)
+                ids = list(getattr(action, "ids", None) or [])
+                types = list(getattr(action, "agent_types", None) or [])
+                # `_resolve_agent_type`'s own rule: a missing or blank entry is "default", which
+                # is an ALIAS, not an agent. Resolve it the same way a `task` delegation is.
+                wanted = [outer._canonical_subagent(
+                    (types[i].strip() if i < len(types) and types[i] else "") or "default")
+                    for i in range(len(ids))]
+
+                missing = [(i, t) for i, t in zip(ids, wanted) if outer._authority_for(t) is None]
+                if missing:
+                    agent_id, agent_type = missing[0]
+                    denial = guard.record_denial(
+                        Reason(ReasonCode.DELEGATION_REFUSED, constraint="agent_type",
+                               requested=agent_type,
+                               message=f"sub-agent type {agent_type!r} (id {agent_id!r}) has no "
+                                       f"declared Authority"),
+                        tool="delegate", disposition=Disposition.UNRESOLVED)
+                    return _delegate_error(f"AuthorityDenied: {denial.explain()}",
+                                           getattr(action, "command", "spawn"))
+
+                result = self._inner(action, conversation)
+                if getattr(result, "is_error", False):
+                    return result                      # the SDK refused; nothing was created
+                # Bind AFTER the SDK created the conversations: `_sub_agents[agent_id]` is the
+                # object its tool calls will be handed, in whatever thread they run in.
+                sub_agents = getattr(self._inner, "_sub_agents", {}) or {}
+                for agent_id, agent_type in zip(ids, wanted):
+                    sub = sub_agents.get(agent_id)
+                    if sub is None or agent_id in self._bound:
+                        continue
+                    child = guard.delegate(agent_type, outer._authority_for(agent_type),
+                                           task=f"delegate: {agent_id}")
+                    outer.children[agent_id] = child
+                    self._bound[agent_id] = child
+                    outer._conversation_guards[id(sub)] = child
+                return result
+
+            def close(self) -> None:
+                for agent_id, child in list(self._bound.items()):
+                    child.complete()               # the sub-agent is done: lifecycle end
+                    self._bound.pop(agent_id, None)
+                sub_agents = getattr(self._inner, "_sub_agents", {}) or {}
+                for sub in sub_agents.values():
+                    outer._conversation_guards.pop(id(sub), None)
+                close = getattr(self._inner, "close", None)
+                if callable(close):
+                    close()
+
+            def __getattr__(self, item: str) -> Any:
+                return getattr(self._inner, item)
+
+        return _GuardedDelegateExecutor()
+
+    def _authority_for(self, subagent: Any) -> Optional[Authority]:
+        """The Authority declared for this sub-agent name, or the observe-mode default."""
+        requested = self.subagents.get(subagent)
+        if requested is None and self.default_subagent_authority is not None and subagent:
+            requested = self.default_subagent_authority(str(subagent))
+        return requested
+
     def _deny(self, tool_name: str, decision: Decision):
         if self.on_deny == "raise":
             raise AuthorityDenied(decision)
         # `Agent._execute_action_event` catches ValueError from a tool and emits an
         # AgentErrorEvent, so the model sees the denial and can choose another action.
         raise ValueError(f"AuthorityDenied: {decision.explain()}")
+
+
+def _delegate_error(text: str, command: str) -> Any:
+    """A `DelegateObservation` carrying a refusal, or the plain text if the SDK is absent."""
+    try:
+        from openhands.tools.delegate import DelegateObservation
+
+        return DelegateObservation.from_text(text=text, command=command, is_error=True)
+    except Exception:
+        return text
 
 
 class _GuardingRegistry(dict):
@@ -696,7 +827,8 @@ class _GuardedExecutor:
 
     def __call__(self, action: Any, conversation: Any = None) -> Any:
         return self._owner.call(
-            self._tool_name, action, lambda: self._inner(action, conversation)
+            self._tool_name, action, lambda: self._inner(action, conversation),
+            conversation=conversation,
         )
 
     def close(self) -> None:

@@ -18,6 +18,23 @@ Both were found by real runs against an open-source agent (open-swe, 2026-09):
       the existing `no_authority` reason (its vocabulary already covers an adapter-level
       refusal upstream of scope/ceiling evaluation) and `disposition=unresolved`.
 
+  B6  AstrBot rewrites an MCP tool's name (`push.record` -> `push_record`) and keeps the
+      server's own on `mcp_tool.name`, which is what goes out on the wire. A policy declared
+      under the published name bound to nothing and the call ran as an unlisted passthrough.
+      Either spelling binds now, the published name is on the ledger entry's context, and a
+      policy that binds to NO registered tool is said out loud at install time.
+
+  B7  on the `Agent.tools is None` branch, AstrBot's own `_PermissionGuardedTool` wrapped
+      OUTSIDE this adapter's gate, and it returns an error string before delegating — so a
+      call AstrBot refused never reached the ledger. The nesting is inverted: our gate is
+      outermost, every call is recorded, and AstrBot's refusal is a result rather than an
+      erasure.
+
+  B8  the OpenHands SDK has a SECOND delegation mechanism (`DelegateExecutor`). It was not a
+      spawn seam, so no child node was minted and the sub-agent's calls landed on the parent's.
+      Hooked now — and bound to the CONVERSATION, because the SDK runs each sub-agent in a
+      plain thread, which inherits no contextvars.
+
   B5  the OpenHands gate keyed on the raw `subagent_type`, so the SDK's own aliases (`default`
       -> `general-purpose`) missed a declared sub-agent entirely. Resolved through the SDK's
       registry before minting.
@@ -32,6 +49,7 @@ Run: PYTHONPATH=src python3 tests/test_ledger_completeness.py
 """
 import re
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -286,31 +304,32 @@ class LateRegistrationIsCovered(unittest.TestCase):
     def _assert_guarded(self, resolver, gd):
         self.assertIs(getattr(resolver, "_attenu_guarded_by", None), gd)
 
-    def test_astrbot_install_is_a_re_runnable_sweep_and_patches_nothing(self):
-        # AstrBot's late-registration gap is NOT closed automatically, and that is a measured
-        # decision, not an oversight: the seam that closes it may trade a denial for a
-        # passthrough on the MCP-alias case, which cannot currently be settled because that case
-        # is itself flaky on unpatched code (see install()'s docstring). What is pinned here is the
-        # documented workaround — install() is a re-runnable sweep — and that the adapter leaves
-        # the manager's own methods alone, which is what the rejected seam did not.
+    def test_astrbot_re_sweeps_on_every_route_that_hands_out_tools(self):
+        # `GuardedTool` needs the real astrbot package to build its base class, which the stdlib
+        # CI job does not install (the pinned `integrations` job and the AstrBot battery exercise
+        # the wrapping itself). What is pinned here is the SEAM that was missing: both methods an
+        # agent gets its tools through re-sweep the manager first, so a tool appended by
+        # `add_func()`, or a `func_list` rebuilt wholesale by the MCP paths, is covered.
         from attenu_guard.adapters import astrbot as ab
         gd = ab.GuardedDelegation(_root(), tools={})
         mgr = _Manager([_Tool("early")])
         swept = []
         gd._sweep = lambda manager: swept.append(manager) or []
         gd.install(mgr)
-        mgr.func_list.append(_Tool("late_plugin"))
-        gd.install(mgr)                                   # the workaround: sweep again
-        self.assertEqual(swept, [mgr, mgr])
-        for method in ("add_func", "get_func", "get_full_tool_set"):
-            self.assertNotIn(method, mgr.__dict__,
-                             f"install() patched {method} on the manager instance")
+        self.assertEqual(swept, [mgr], "install() did not sweep the manager")
 
-    def test_astrbot_install_documents_the_gap_it_leaves_open(self):
-        src = (ADAPTERS / "astrbot.py").read_text()
-        block = src[src.index("def install"):src.index("def _sweep")]
-        self.assertIn("H12", block, "install() does not name the gap it leaves open")
-        self.assertIn("install()` again", block, "install() does not give the workaround")
+        mgr.func_list.append(_Tool("late_plugin"))               # add_func()'s route
+        mgr.func_list = [_Tool("late_mcp")]                      # the MCP rebuild, wholesale
+        mgr.get_full_tool_set()
+        mgr.get_func("late_mcp")
+        self.assertEqual(swept, [mgr, mgr, mgr],
+                         "a tool handed out after install() was never re-swept")
+
+        gd.uninstall()
+        self.assertIs(mgr.get_full_tool_set.__func__, _Manager.get_full_tool_set)
+        self.assertIs(mgr.get_func.__func__, _Manager.get_func)
+        mgr.get_full_tool_set()
+        self.assertEqual(len(swept), 3, "uninstall() left the sweep armed")
 
 
 class _Tool:
@@ -384,6 +403,198 @@ class SubagentAliasIsResolved(unittest.TestCase):
             gate = gd._gate_delegation(g, {"subagent_type": "nope", "prompt": "go"})
         self.assertFalse(gate.denial)
         self.assertEqual(g.audit_log().entries[-1]["reason"], ReasonCode.DELEGATION_REFUSED)
+
+
+class McpNameRewrite(unittest.TestCase):
+    """B6. The name the operator saw is the name the server publishes; AstrBot exposes another."""
+
+    def _gd(self, tools, **kw):
+        from attenu_guard.adapters import astrbot as ab
+        g = _root()
+        return g, ab.GuardedDelegation(g, tools=tools, **kw)
+
+    def test_a_policy_under_the_published_name_binds_to_the_exposed_tool(self):
+        from attenu_guard.adapters import astrbot as ab
+        g, gd = self._gd({"push.record": ab.ToolPolicy("repo.read")}, allow_unlisted=True)
+        gate = gd._gate("push_record", {}, None, _McpTool("push_record", "push.record"))
+        self.assertIsNone(gate.denial)
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["scope"]), ("allow", "repo.read"))
+        self.assertIsNone(entry.get("policy"), "it bound, so it is not an unlisted passthrough")
+
+    def test_the_ledger_carries_the_name_the_server_published(self):
+        from attenu_guard.adapters import astrbot as ab
+        g, gd = self._gd({"push.record": ab.ToolPolicy("repo.read")})
+        gd._gate("push_record", {}, None, _McpTool("push_record", "push.record"))
+        self.assertEqual(g.audit_log().entries[-1]["context"]["mcp_tool"], "push.record")
+
+    def test_the_exposed_name_still_wins_when_both_are_declared(self):
+        from attenu_guard.adapters import astrbot as ab
+        g, gd = self._gd({"push.record": ab.ToolPolicy("repo.write"),
+                          "push_record": ab.ToolPolicy("repo.read")})
+        gd._gate("push_record", {}, None, _McpTool("push_record", "push.record"))
+        self.assertEqual(g.audit_log().entries[-1]["scope"], "repo.read")
+
+    def test_a_policy_that_binds_to_nothing_is_reported(self):
+        from attenu_guard.adapters import astrbot as ab
+        reported = []
+        g, gd = self._gd({"push.record": ab.ToolPolicy("repo.read"),
+                          "typo_tool": ab.ToolPolicy("repo.read")},
+                         on_unbound=reported.append)
+        gd._sweep = lambda manager: []
+        gd.install(_Manager([_McpTool("push_record", "push.record")]))
+        self.assertEqual(reported, [["typo_tool"]],
+                         "an MCP policy under the published name is bound, a misspelling is not")
+
+
+class _McpTool:
+    """The shape that matters: an exposed `name`, and the server's own on `mcp_tool.name`."""
+
+    def __init__(self, name, published):
+        self.name = name
+        self.active = True
+        self.mcp_tool = types.SimpleNamespace(name=published)
+
+
+class GuardIsOutermost(unittest.TestCase):
+    """B7. A layer that can refuse must not sit outside the layer that records."""
+
+    def test_the_full_toolset_branch_is_re_nested_with_our_gate_outside(self):
+        from attenu_guard.adapters import astrbot as ab
+        gd = ab.GuardedDelegation(_root(), tools={})
+        raw = _Tool("secret_delete_all")
+        ours = _FakeGuarded(raw)
+        theirs = _PermissionLike(ours, None)             # AstrBot's, wrapping ours: the bug
+        tool_set = types.SimpleNamespace(tools=[theirs, _Tool("plain")])
+
+        with mock.patch.object(ab, "GuardedTool", _FakeGuarded):
+            rebuilt = gd._reassert_outermost(tool_set, None)
+
+        outer = rebuilt.tools[0]
+        self.assertIsInstance(outer, _FakeGuarded, "our gate is not outermost")
+        self.assertIsInstance(outer._wrapped, _PermissionLike, "AstrBot's check was dropped")
+        self.assertIs(outer._wrapped._wrapped, raw, "the tool is double-guarded")
+        self.assertIs(rebuilt.tools[1], tool_set.tools[1], "an unrecognised entry was touched")
+
+    def test_the_named_tool_branch_is_left_alone(self):
+        from attenu_guard.adapters import astrbot as ab
+        gd = ab.GuardedDelegation(_root(), tools={})
+        ours = _FakeGuarded(_Tool("secret_delete_all"))
+        tool_set = types.SimpleNamespace(tools=[ours])
+        with mock.patch.object(ab, "GuardedTool", _FakeGuarded):
+            rebuilt = gd._reassert_outermost(tool_set, None)
+        self.assertIs(rebuilt.tools[0], ours, "the get_func branch was re-wrapped")
+
+
+class _FakeGuarded:
+    """Stands in for `GuardedTool`, which needs the real astrbot package to build its base."""
+
+    def __init__(self, tool, owner=None):
+        self._wrapped = tool
+        self.name = getattr(tool, "name", None)
+
+    @property
+    def wrapped(self):
+        return self._wrapped
+
+
+class _PermissionLike:
+    """Stands in for AstrBot's `_PermissionGuardedTool`: same two-argument shape."""
+
+    def __init__(self, tool, manager):
+        self._wrapped = tool
+        self._mgr = manager
+        self.name = getattr(tool, "name", None)
+
+
+class DelegateExecutorIsASeam(unittest.TestCase):
+    """B8. The SDK's second delegation mechanism mints a child, and it reaches the thread."""
+
+    def _gd(self, **kw):
+        from attenu_guard.adapters import openhands as oh
+        g = _root()
+        return g, oh.GuardedDelegation(
+            g, tools={"terminal": oh.ToolPolicy("repo.read")},
+            subagents={"general-purpose": Authority(scopes={"repo.read"}, ttl=60)}, **kw)
+
+    def _sdk(self):
+        registry = types.ModuleType("subagent_registry_stub")
+        registry.get_agent_factory = lambda name: types.SimpleNamespace(
+            definition=types.SimpleNamespace(
+                name="general-purpose" if name in ("default", "general-purpose") else name))
+        return {"openhands.sdk.subagent.registry": registry,
+                "openhands.sdk.subagent": _pkg(registry)}
+
+    def test_a_spawned_subagent_gets_its_own_node_and_its_calls_land_there(self):
+        g, gd = self._gd()
+        inner = _FakeDelegateExecutor()
+        ex = gd.delegate_executor(inner)
+        with mock.patch.dict(sys.modules, self._sdk()):
+            ex(_Spawn(ids=["worker"]), conversation="parent-conv")   # agent_types omitted
+        spawn = g.audit_log().entries[-1]
+        self.assertEqual((spawn["event"], spawn["agent"]), ("spawn", "general-purpose"))
+        child_node = spawn["node"]
+
+        # The SDK runs each sub-agent in a plain Thread, which inherits no contextvars. The
+        # child's call must still land on the CHILD's node, not the parent's.
+        seen = []
+        sub = inner._sub_agents["worker"]
+        thread = threading.Thread(
+            target=lambda: seen.append(
+                gd.call("terminal", _Action({"command": "ls"}), lambda: "ok", conversation=sub)))
+        thread.start()
+        thread.join()
+        self.assertEqual(seen, ["ok"])
+        allow = g.audit_log().entries[-1]
+        self.assertEqual((allow["event"], allow["tool"]), ("allow", "terminal"))
+        self.assertEqual(allow["node"], child_node,
+                         "the delegated call was recorded on the parent's node")
+
+    def test_an_undeclared_agent_type_is_refused_before_anything_is_created(self):
+        g, gd = self._gd()
+        inner = _FakeDelegateExecutor()
+        ex = gd.delegate_executor(inner)
+        with mock.patch.dict(sys.modules, self._sdk()):
+            ex(_Spawn(ids=["worker"], agent_types=["code-explorer"]), conversation=None)
+        self.assertEqual(inner.calls, [], "the SDK created a sub-agent for a refused type")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"], entry["tool"]),
+                         ("deny", ReasonCode.DELEGATION_REFUSED, "delegate"))
+
+    def test_close_finalizes_every_child_and_unbinds_it(self):
+        g, gd = self._gd()
+        inner = _FakeDelegateExecutor()
+        ex = gd.delegate_executor(inner)
+        with mock.patch.dict(sys.modules, self._sdk()):
+            ex(_Spawn(ids=["worker"]), conversation=None)
+        ex.close()
+        self.assertEqual(g.audit_log().entries[-1]["event"], "done")
+        self.assertEqual(gd._conversation_guards, {})
+
+
+class _Spawn:
+    def __init__(self, ids, agent_types=None, command="spawn"):
+        self.ids = ids
+        self.agent_types = agent_types
+        self.command = command
+
+
+class _FakeDelegateExecutor:
+    """The SDK's `DelegateExecutor` surface this adapter actually touches."""
+
+    def __init__(self):
+        self._sub_agents = {}
+        self.calls = []
+        self.closed = False
+
+    def __call__(self, action, conversation=None):
+        self.calls.append(action)
+        for agent_id in getattr(action, "ids", None) or []:
+            self._sub_agents[agent_id] = types.SimpleNamespace(agent_id=agent_id)
+        return types.SimpleNamespace(is_error=False)
+
+    def close(self):
+        self.closed = True
 
 
 if __name__ == "__main__":

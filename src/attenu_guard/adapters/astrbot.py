@@ -145,6 +145,20 @@ __all__ = [
 ]
 
 
+def _warn_unbound(names: Sequence[str]) -> None:
+    """Default `on_unbound`: say it once, through `logging`, at install time.
+
+    Not a ledger entry: nothing has happened on the chain yet, and a `deny` for a call nobody
+    made would be a fabricated event. A caller who wants it on the trail passes its own
+    `on_unbound` and writes one — `Guard.record_denial` is right there."""
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "attenu-guard: %d declared tool policy/policies match no registered tool and will never "
+        "bind: %s. Check the spelling, or register the tool before install().",
+        len(names), ", ".join(repr(n) for n in names))
+
+
 def _elapsed_ms(started_at: float) -> int:
     return int((time.monotonic() - started_at) * 1000)
 
@@ -279,6 +293,7 @@ class GuardedDelegation:
         caller_context: Optional[Callable[[Any], Mapping[str, Any]]] = None,
         on_deny: str = "tool_error",
         allow_unlisted: bool = False,
+        on_unbound: Optional[Callable[[Sequence[str]], None]] = None,
         default_policy: Optional[Callable[[str], ToolPolicy]] = None,
         default_subagent_authority: Optional[Callable[[str], Authority]] = None,
         strict_single_hook: bool = False,
@@ -305,12 +320,14 @@ class GuardedDelegation:
         self.caller_context = caller_context or caller_facts
         self.on_deny = on_deny
         self.allow_unlisted = allow_unlisted
+        self.on_unbound = on_unbound or _warn_unbound
         self.default_policy = default_policy
         self.default_subagent_authority = default_subagent_authority
         self.strict_single_hook = strict_single_hook
         self.children: MutableMapping[str, Guard] = {}
         self._lock = threading.Lock()
         self._installed: list[tuple[Any, int, Any]] = []   # (manager, index, original tool)
+        self._armed: list[tuple[Any, str]] = []           # (manager, method) wrapped by _arm_manager
 
     # -- introspection ------------------------------------------------------
     def active_guard(self) -> Guard:
@@ -348,28 +365,15 @@ class GuardedDelegation:
 
         Returns the tool names now guarded. Idempotent.
 
-        LIMIT, measured 2026-09-07 against the AstrBot battery. This covers the tools on the
-        manager AT THIS CALL. AstrBot keeps adding to it afterwards — `add_func()` appends a
-        plugin's tool, and the MCP paths rebuild `func_list` wholesale (three `self.func_list =
-        [...]` sites in `func_tool_manager.py`) — and such a tool runs un-gated and un-ledgered
-        (battery H12, on both the plugin and the stdio-MCP route). **Call `install()` again after
-        registering tools**; that is a full re-sweep and it closes the gap.
-
-        Doing that sweep automatically was tried and is NOT shipped yet. Re-sweeping from
-        `get_func()` + `get_full_tool_set()` — the two methods an agent gets its tools through —
-        does fix H12 on both routes, and left every other battery case identical to unpatched
-        code except `h17-alias-native`, where an MCP tool the rule had DENIED came back as an
-        un-gated `allow` and the push went through. Re-wrapping an `MCPTool` after AstrBot has
-        rewritten its name plausibly moves which spelling the policy is keyed against, which
-        would be exactly that. It could not be confirmed: `h17-alias-native` flips between
-        `deny` and `allow` across runs on UNPATCHED code too, so the one case that would show
-        the interaction cannot currently settle it. Until it can, this adapter does not trade a
-        possible denial-to-passthrough for coverage that has a working workaround. The OpenHands
-        adapter's registry seam has no such interaction and IS armed automatically.
+        Tools registered AFTER this call are covered too — see `_arm_manager`.
         """
         names: list[str] = []
         with self._lock:
             names = self._sweep(tool_manager)
+            self._arm_manager(tool_manager)
+            unbound = self.unbound_policies(tool_manager)
+        if unbound:
+            self.on_unbound(unbound)
         return names
 
     def _sweep(self, tool_manager: Any) -> list[str]:
@@ -386,9 +390,98 @@ class GuardedDelegation:
             names.append(tool.name)
         return names
 
+    def _arm_manager(self, tool_manager: Any) -> None:
+        """Keep covering the manager as its tool list CHANGES. Caller holds `self._lock`.
+
+        `install()` guards the tools on the manager at the moment it is called. AstrBot keeps
+        adding to that manager afterwards: `add_func()` appends a plugin's tool, and the MCP
+        paths rebuild `func_list` wholesale (`self.func_list = [...]`, three sites in
+        `func_tool_manager.py`), which discards an eager wrapping entirely. Either way the tool
+        ran un-gated and un-ledgered — the AstrBot battery's H12 pushed through both routes, the
+        plugin one and stdio MCP, and the ledger showed root/spawn/done/done.
+
+        So the gate is re-applied where tools are HANDED OUT rather than where they arrive:
+        `get_func()` and `get_full_tool_set()` are the two methods an agent gets its tools
+        through, wrapped per instance to sweep first. That covers `add_func`, the MCP refresh and
+        a rebound `func_list` alike, without this adapter having to know which route a tool came
+        in by. Verified on the battery: both H12 routes go from a tool body that ran to a denial
+        on the ledger. Removed by `uninstall()`.
+
+        Note for anyone testing this: AstrBot resolves a named tool from the module-global
+        `llm_tools` singleton (`astr_agent_tool_exec.py:285`), and production has exactly one
+        manager. Arming a freshly constructed `FunctionToolManager()` masks the fix.
+        """
+        for method in ("get_func", "get_full_tool_set"):
+            original = getattr(tool_manager, method, None)
+            if original is None or getattr(original, "_attenu_guarded_by", None) is self:
+                continue
+
+            def make(original=original, outermost=(method == "get_full_tool_set")):
+                def wrapper(*args, **kwargs):
+                    with self._lock:
+                        self._sweep(tool_manager)
+                    result = original(*args, **kwargs)
+                    return self._reassert_outermost(result, tool_manager) if outermost else result
+                wrapper._attenu_guarded_by = self
+                wrapper._attenu_original = original
+                return wrapper
+
+            setattr(tool_manager, method, make())
+            self._armed.append((tool_manager, method))
+
+    def _reassert_outermost(self, tool_set: Any, tool_manager: Any) -> Any:
+        """Put this adapter's gate back on the OUTSIDE, on the `Agent.tools is None` branch.
+
+        `_build_handoff_toolset` takes that branch through `get_full_tool_set()`, which wraps
+        every non-builtin tool in AstrBot's own `_PermissionGuardedTool` — around whatever is in
+        `func_list`, which is this adapter's `GuardedTool`. Nesting that way is not merely
+        cosmetic: `_PermissionGuardedTool.call()` runs `_check_tool_permission` FIRST and returns
+        an error string without ever delegating, so a call AstrBot refuses never reaches this
+        adapter and never reaches the ledger. The audit trail then shows the calls that were
+        allowed and is silent about one that was stopped — the same blind spot open-swe had.
+
+        So the nesting is inverted here, once, on the objects the toolset actually hands out:
+        `GuardedTool(_PermissionGuardedTool(original))` instead of
+        `_PermissionGuardedTool(GuardedTool(original))`. Every invocation now enters this gate
+        first and is recorded, then AstrBot's permission check runs as part of the body — its
+        refusal is a RESULT of a call that is on the trail, not a decision that erased it. The
+        named-tools branch (`get_func`) already hands out this adapter's object directly and is
+        left alone.
+
+        Anything this does not recognise is passed through untouched.
+        """
+        entries = getattr(tool_set, "tools", None)
+        if entries is None:
+            return tool_set
+        items = list(entries.values()) if isinstance(entries, dict) else list(entries)
+        for index, tool in enumerate(items):
+            inner = getattr(tool, "_wrapped", None)
+            if inner is None or isinstance(tool, GuardedTool) or not isinstance(inner, GuardedTool):
+                continue                       # not AstrBot-over-ours: leave it exactly as it is
+            try:
+                rebuilt = type(tool)(inner.wrapped, tool_manager)      # AstrBot's, over the raw tool
+                items[index] = GuardedTool(rebuilt, self)              # ... and ours outside it
+            except Exception:
+                continue                       # a shape this does not know: better nested than broken
+        if isinstance(entries, dict):
+            for key, tool in zip(list(entries), items):
+                entries[key] = tool
+        else:
+            entries[:] = items
+        return tool_set
+
     def uninstall(self) -> list[str]:
         """Put the original tools back. Returns the names restored."""
         with self._lock:
+            for manager, method in reversed(self._armed):
+                wrapper = getattr(manager, method, None)
+                original = getattr(wrapper, "_attenu_original", None)
+                if original is not None:
+                    try:
+                        setattr(manager, method, original)
+                    except Exception:
+                        delattr(manager, method)      # fall back to the class's own method
+            self._armed.clear()
             names = []
             for manager, index, tool in reversed(self._installed):
                 try:
@@ -443,13 +536,15 @@ class GuardedDelegation:
 
     # -- the hook ------------------------------------------------------------
     async def call(self, tool_name: str, args: Mapping[str, Any], run_context: Any,
-                   inner: Callable[[], Any]) -> Any:
+                   inner: Callable[[], Any], tool: Any = None) -> Any:
         """Authorize one tool call, then run `inner` (or refuse, and never run it).
 
         Public so a project that wires its own tool wrapper can reuse the gate
-        without going through `install()`.
+        without going through `install()`. `tool` is the tool object being called,
+        when the caller has it: an `MCPTool` carries the name its SERVER publishes,
+        which is not the name AstrBot exposes — see `_policy_for`.
         """
-        gate = self._gate(tool_name, args, run_context)
+        gate = self._gate(tool_name, args, run_context, tool)
         if gate.denial is not None:
             return self._deny(gate.denial)
         return await self._run(gate, inner)
@@ -481,10 +576,60 @@ class GuardedDelegation:
         guard: Optional[Guard] = None
         snapshot: Any = None
 
-    def _gate(self, name: str, args: Mapping[str, Any], run_context: Any) -> "GuardedDelegation._Gate":
+    def _policy_for(self, name: str, tool: Any = None):
+        """The declared policy for this call, and the name its MCP server published (or None).
+
+        AstrBot rewrites an MCP tool's name on the way in — `MCPTool.__init__`
+        (`astrbot/core/agent/mcp_client.py`) turns the server's `push.record` into the exposed
+        `push_record` and keeps the original on `self.mcp_tool.name`, which is what goes back out
+        on the wire. Nothing inside AstrBot answers to the published name: its own permission
+        check and its config route are keyed on the exposed one, and asking for `push.record`
+        raises `ToolsServiceError: Tool 'push.record' not found`. So an operator who declares a
+        policy under the name the SERVER publishes — the only name they saw — had it bind to
+        nothing, and the call went through as an unlisted passthrough.
+
+        A policy declared under either spelling now binds, with the exposed name taking
+        precedence when both are declared (it is the name AstrBot itself uses). The published
+        name is returned so the ledger entry's context can carry it.
+        """
+        policy = self.tools.get(name)
+        published = None
+        if tool is not None:
+            mcp_tool = getattr(tool, "mcp_tool", None)
+            candidate = getattr(mcp_tool, "name", None)
+            if isinstance(candidate, str) and candidate and candidate != name:
+                published = candidate
+                if policy is None:
+                    policy = self.tools.get(candidate)
+        return policy, published
+
+    def unbound_policies(self, tool_manager: Any) -> list[str]:
+        """Declared tool policies that match NO tool this manager can hand out.
+
+        A rule that covers nothing is the failure mode an operator cannot see: the tool runs, the
+        ledger shows a passthrough, and the policy sits in the map looking correct. `install()`
+        reports this (through `on_unbound`, default: a `logging` warning) so a name that binds to
+        nothing is said out loud at the moment it could still be fixed — a misspelling, or an MCP
+        tool declared under a spelling that never resolves.
+
+        Both spellings count as bound: the exposed name and, for an `MCPTool`, the name its
+        server published. Names are checked against what the manager holds NOW, so a policy for a
+        tool registered later is reported and then stops being reported at the next sweep.
+        """
+        known = set()
+        for t in list(getattr(tool_manager, "func_list", []) or []):
+            inner = getattr(t, "wrapped", t)
+            for candidate in (getattr(inner, "name", None),
+                              getattr(getattr(inner, "mcp_tool", None), "name", None)):
+                if isinstance(candidate, str) and candidate:
+                    known.add(candidate)
+        return sorted(n for n in self.tools if n not in known)
+
+    def _gate(self, name: str, args: Mapping[str, Any], run_context: Any,
+              tool: Any = None) -> "GuardedDelegation._Gate":
         """Decide, without running anything: deny or pass through."""
         guard = self.active_guard()
-        policy = self.tools.get(name)
+        policy, published = self._policy_for(name, tool)
         if policy is None and self.default_policy is not None:
             policy = self.default_policy(name)
         if policy is None:
@@ -504,7 +649,12 @@ class GuardedDelegation:
 
         caller = dict(self.caller_context(run_context) or {})
         try:
-            context = policy.context_for(args, caller)
+            context = dict(policy.context_for(args, caller) or {})
+            if published is not None:
+                # The trail says what was actually called on the wire. AstrBot exposes an MCP
+                # tool under a rewritten name and sends the server's own name; a reader of the
+                # ledger who only sees `push_record` cannot tell which remote tool ran.
+                context.setdefault("mcp_tool", published)
         except Exception as exc:
             # The operator's own context function raised: no context, so no ceiling can be
             # evaluated. The body must not run (it does not) — and the refusal is RECORDED,
@@ -656,7 +806,8 @@ class GuardedTool:
 
             async def call(self, context: Any, **kwargs: Any) -> Any:
                 return await self._owner.call(
-                    self.name, kwargs, context, lambda: self._invoke(context, **kwargs))
+                    self.name, kwargs, context, lambda: self._invoke(context, **kwargs),
+                    tool=self._wrapped)
 
             def _invoke(self, context: Any, **kwargs: Any) -> Any:
                 """The wrapped tool's real body, chosen exactly as `_execute_local` would."""
