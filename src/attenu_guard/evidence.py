@@ -32,7 +32,7 @@ from attenu_guard import canonical
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.authority import Authority
 from attenu_guard.ceilings import describe as _describe_ceiling
-from attenu_guard.reasons import Capture, BodyState
+from attenu_guard.reasons import Capture, BodyState, Policy
 from attenu_guard.params import ParamsHashReason
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
@@ -59,6 +59,9 @@ LEDGER_FIELDS = frozenset({
     # 0.9.0 execution binding (schema_version=2 chains): every field named in the spec.
     "call_id", "capture", "adapter", "authorized_params_hash", "params_hash_reason", "params_salt",
     "body_state", "error_code", "invoked_params_hash", "duration_ms", "receipt", "pending_at_kill",
+    # `policy` marks an allow the chain never authorized (an `allow_unlisted` passthrough) — see
+    # reasons.Policy and the containment check below.
+    "policy",
 })
 # `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
 
@@ -897,7 +900,8 @@ def _valid_params_hash_reason(e: dict, hash_field: str) -> str | None:
     return None
 
 
-_ALLOW_ONLY_FIELDS = frozenset({"capture", "adapter", "authorized_params_hash", "params_hash_reason"})
+_ALLOW_ONLY_FIELDS = frozenset({"capture", "adapter", "authorized_params_hash", "params_hash_reason",
+                                "policy"})
 
 
 def _validate_allow(e: dict) -> str | None:
@@ -925,6 +929,10 @@ def _validate_allow(e: dict) -> str | None:
     for k in ("module", "version", "hook_path"):
         if not isinstance(adapter.get(k), str) or not adapter.get(k):
             return f"adapter[{k!r}] must be a non-empty string"
+    if _present_but_null(e, "policy"):
+        return "policy is explicitly null (omit it, or give a valid Policy value)"
+    if "policy" in e and e.get("policy") not in Policy.ALL:
+        return f"policy {e.get('policy')!r} not a known value"
     err = _valid_hash_field(e, "authorized_params_hash")
     if err:
         return err
@@ -1405,10 +1413,19 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
                     seq=spawn_e.get("seq"), node=node)
     checks["monotonicity"] = mono and not afail
 
-    # (3) containment: every allow action's scope within the acting node's authority
-    contained = True; actions = 0
+    # (3) containment: every allow action's scope within the acting node's authority.
+    # An allow carrying `policy` (reasons.Policy) is one the chain never authorized — an adapter
+    # running with `allow_unlisted=True` passed the call through un-gated and recorded that it
+    # did. Its `scope` is a label, not a claim of held authority, so testing it for containment
+    # would report a violation the entry never asserted. Such entries are counted as UNGATED and
+    # reported as their own number instead: a reader sees how much of the run was actually
+    # measured, which is the honest answer and never a silent one.
+    contained = True; actions = 0; ungated = 0
     for e in entries:
         if e.get("event") != "allow":
+            continue
+        if e.get("policy") is not None:
+            ungated += 1
             continue
         actions += 1
         node = e.get("node"); scope = e.get("scope"); ctx = e.get("context") or {}
@@ -1446,7 +1463,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     excluded = ("anchor", "expected_anchor", "envelopes")
     return {"ok": all(v for k, v in checks.items() if k not in excluded) and not log,
             "checks": checks, "failures": log.messages, "failure_details": log.details,
-            "nodes": len(auth), "actions_checked": actions, "chain_id": bundle.get("chain_id"),
+            "nodes": len(auth), "actions_checked": actions, "ungated": ungated, "chain_id": bundle.get("chain_id"),
             "execution_binding": execution_binding, "envelopes": envelope_summary,
             "verified_against": "expected_anchor" if (expected_anchor is not None or expected_head is not None)
                                 else "bundle_anchor"}

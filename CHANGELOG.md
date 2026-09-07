@@ -6,6 +6,10 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- `Guard.record_passthrough(tool)`: an adapter running with `allow_unlisted=True` passed an undeclared tool straight through and left NOTHING on the audit trail (found on a real open-swe run — the tool ran, the ledger showed root/spawn/deny/done and no trace of it). The passthrough is now recorded as an `allow` marked `policy="unlisted"`, a new allow-only ledger field that says the call happened AND that the chain did not authorize it. `verify_bundle` counts those entries as `ungated` in its report instead of testing them for containment (they assert no authority to contain), so an un-gated call can never read as an authorized one and can never be silently absent either. Fixed in the langchain, openhands and astrbot adapters; `attenu-guard`'s fail-closed default (`allow_unlisted=False`) is unchanged
+- `ReasonCode.DELEGATION_REFUSED` and a ledger entry for it: a delegation refused by the adapter before it reached the chain (the named sub-agent has no declared Authority) went back to the model as a tool error with no audit entry at all, so the refusal was visible in the transcript and nowhere else. It is now a `deny` with `disposition=unresolved`, routed through `Guard.record_denial()`. A delegation refused structurally by the chain (revoked/expired parent, depth/fanout) now also records the decision beside the `spawn_denied` lifecycle entry, so every refused delegation appears in the `denials()` fold an operator's queue is built from. Same fix in all three adapters
+
 ### Changed
 - README first sentence and the repository description say what the contract is: the caller declares the child's grant, the library bounds it by the parent's (the meet), so a child never holds more than its parent; "only what its task needs" and "strict subset" overstated it (equal authority is permitted, and task text does not narrow a grant)
 

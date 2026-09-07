@@ -461,6 +461,10 @@ class GuardedDelegation:
             policy = self.default_policy(name)
         if policy is None:
             if self.allow_unlisted:
+                # Un-gated, but never invisible: the call happened, so it goes on the ledger as
+                # an `allow` marked `policy="unlisted"` — which says the chain did NOT authorize
+                # it. A verifier counts those as ungated instead of checking containment.
+                guard.record_passthrough(name)
                 return self._Gate()
             # No authority is known for this tool: the refusal goes on the ledger
             # (record_denial) as `unresolved` — an operator's Decisions queue is a
@@ -495,20 +499,25 @@ class GuardedDelegation:
         requested = self.subagents.get(subagent)
         if requested is None and self.default_subagent_authority is not None:
             requested = self.default_subagent_authority(subagent)
+        # A refused delegation is a DENY on the audit trail, not just a message back to the model:
+        # the sub-agent asked for authority and did not get it. Routed through record_denial so the
+        # refusal lands in the same tamper-evident log — and in the `denials()` fold an operator's
+        # Decisions queue is built from — as every other refusal.
         if requested is None:
-            return self._Gate(denial=Decision.deny(
-                Reason("delegation_refused", constraint="subagent", requested=subagent,
+            return self._Gate(denial=guard.record_denial(
+                Reason(ReasonCode.DELEGATION_REFUSED, constraint="subagent", requested=subagent,
                        message=f"sub-agent {subagent!r} has no declared Authority"),
-                node=guard.node_id))
+                tool=subagent, disposition=Disposition.UNRESOLVED))
         try:
             child = guard.delegate(subagent, requested, task=task)
         except AuthorityError as exc:
             # A structural failure (revoked/expired parent, depth/fanout overflow).
-            # attenu-guard already wrote a `spawn_denied` audit entry; surface the
-            # same reason to the caller.
-            return self._Gate(denial=Decision.deny(
+            # attenu-guard already wrote a `spawn_denied` chain-lifecycle entry; record the
+            # DECISION too, so a refused delegation is a deny on the trail whichever way it was
+            # refused (`spawn_denied` is not folded by `denials()`; `deny` is).
+            return self._Gate(denial=guard.record_denial(
                 Reason(exc.reason, requested=subagent, message=str(exc)),
-                node=guard.node_id))
+                tool=subagent, disposition=Disposition.UNRESOLVED))
         self.children[subagent] = child
         return self._Gate(child=child)
 

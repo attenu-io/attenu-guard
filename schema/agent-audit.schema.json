@@ -22,6 +22,7 @@
     "task": { "type": "string", "description": "Natural-language task the delegation was scoped to." },
     "scope": { "type": "string" },
     "tool": { "type": ["string", "null"] },
+    "policy": { "type": "string", "enum": ["unlisted"], "description": "Allow entries only, and only when the chain did NOT authorize the call: `unlisted` means an adapter running in incremental-rollout mode (allow_unlisted) passed a tool with no declared policy through un-gated and recorded that it did. `scope` on such an entry is a label, not held authority, so a verifier counts it as ungated rather than checking it for containment. Absent on a normal, check()-authorized allow." },
     "requested": { "type": "object", "description": "Authority requested at a spawn." },
     "granted": { "type": "object", "description": "Authority actually granted (the attenuated meet)." },
     "authority": { "type": "object" },

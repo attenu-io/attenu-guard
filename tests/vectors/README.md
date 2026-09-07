@@ -297,6 +297,17 @@ envelope v1's set, and a v2 declares its own.
 "reason is the text before the first colon" rule: their message names the node there instead,
 so a verifier states those two reasons explicitly rather than parsing them out.
 
+**Un-gated allows are not a containment failure, and not a containment pass either.** An `allow`
+entry carrying `"policy": "unlisted"` was written by an adapter running in incremental-rollout
+mode (`allow_unlisted=True`): the tool had no declared policy, so the call ran WITHOUT an
+authorization check, and the entry records that it happened. Its `scope` is a label, not a claim
+of held authority, so a verifier MUST NOT test it for containment — the entry asserts nothing to
+contain. It must not silently ignore it either: the reference verifier counts those entries
+separately and reports the number as `ungated`, alongside `actions_checked`, so a reader can see
+how much of the run was actually measured. `policy` is an allow-only field; on a `schema_version=2`
+chain a `deny` carrying it is invalid, and the only value v1 defines is `unlisted`. No reason token
+is involved: an un-gated call is not a violation of anything the bundle claims.
+
 Execution binding is checked on `schema_version=2` chains only; on a v1 bundle these cannot
 occur and the report says `"not applicable"`. Every failure in the binding loop is about a
 PAIR and is positioned on the **outcome**: the allow was a complete, valid record when it was

@@ -43,6 +43,10 @@ class ReasonCode:
     MAX_DEPTH = "max_depth"
     MAX_FANOUT = "max_fanout"
     CHAIN_CEILING = "chain_ceiling"
+    DELEGATION_REFUSED = "delegation_refused"   # an adapter refused a delegation before it reached
+                                                # the chain (the named sub-agent has no declared
+                                                # Authority) — nothing was minted, so there is no
+                                                # `spawn_denied`; the refusal is recorded as a deny
     NO_AUTHORITY = "no_authority"               # principal holds no Authority at all in this chain
                                                 # (adapter-level: unknown/undelegated agent, unmapped
                                                 # tool, unparseable args) — upstream of scope/ceilings
@@ -66,6 +70,20 @@ class Disposition:
     UNRESOLVED = "unresolved"                   # no authority known for this tool at all
     OUT_OF_AUTHORITY = "out_of_authority"       # resolved and grantable, but not held by THIS node — real over-reach
     ALL = frozenset({HELD_PENDING_GRANT, WITHHELD_TIER2, UNRESOLVED, OUT_OF_AUTHORITY})
+
+
+class Policy:
+    """HOW an `allow` entry came to be — present only when the answer is not "the chain authorized it".
+
+    An adapter running with `allow_unlisted=True` (incremental rollout) lets a tool with no declared
+    policy run WITHOUT a `check()`. That call happened, so it belongs on the ledger; but the chain
+    never authorized it, so it must not be recorded as though it had been. `policy="unlisted"` says
+    exactly that, and the bundle verifier counts such entries as ungated (`report["ungated"]`)
+    instead of testing them for containment against an authority they were never measured against.
+    An `allow` with no `policy` field is the normal case: authorized by `Guard.check()`.
+    """
+    UNLISTED = "unlisted"                        # passed through un-gated under allow_unlisted
+    ALL = frozenset({UNLISTED})
 
 
 class Capture:

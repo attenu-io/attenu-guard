@@ -79,7 +79,7 @@ from .authority import Authority, AuthorityError
 from .chain import Chain, Node, MonotonicClock
 from .audit import AuditLog, CommittedAuditError
 from .reasons import (
-    Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult,
+    Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult, Policy,
 )
 from .ceilings import ctx_field_of, is_metered
 from . import params as params_mod
@@ -685,6 +685,56 @@ class Guard:
             try:
                 self._log_decision(decision, resolved_scope, tool, resolved_ctx, disposition,
                                    extra_fields={"call_id": call_id} if is_v2 else None)
+            except CommittedAuditError as exc:
+                exc.decision = self._attach_call_id(decision, call_id)
+                raise
+            return self._attach_call_id(decision, call_id)
+
+    def record_passthrough(self, tool: str, *, scope: str | None = None,
+                           context: Mapping | None = None,
+                           policy: str = Policy.UNLISTED) -> Decision:
+        """Put an UN-GATED call on the audit trail as an `allow` marked `policy`, and return it
+        as an (allowed) Decision — for an adapter running with `allow_unlisted=True`, where a tool
+        with no declared policy runs without a `check()` at all.
+
+        The call happened, so it belongs on the ledger; the chain never authorized it, so the
+        entry says so rather than pretending. `policy="unlisted"` is what the bundle verifier
+        reads: such entries are counted as ungated (`verify_bundle(...)["ungated"]`) instead of
+        being tested for containment against an authority they were never measured against.
+        Nothing is evaluated here and no meter moves — exactly as with `record_denial()`, the
+        caller has already decided; this only records it.
+
+        `scope` defaults to `tool` because the published audit schema requires a string scope on
+        an allow entry; it is a LABEL on an ungated entry, never a claim of held authority.
+
+        On a `schema_version=2` chain this allocates a `call_id` and records the honest
+        `Capture.PRE_HOOK_ONLY` (there is no wrapper observation to bind), so a passthrough never
+        sits in `complete()`'s pending set."""
+        if policy not in Policy.ALL:
+            raise ValueError(f"unknown policy {policy!r}; expected one of {sorted(Policy.ALL)}")
+        decision = Decision.allow(self._node.node_id)
+        is_v2 = self._is_v2
+        extra = {"policy": policy}
+
+        with self._chain._lock:
+            call_id = None
+            if is_v2:
+                try:
+                    call_id = os.urandom(16).hex()
+                except Exception:  # pragma: no cover - CSPRNG failure is not reproducible
+                    # Fail-closed, exactly as check()/record_denial(): nothing is written. The
+                    # caller still passes the call through (that decision was its own), but this
+                    # library never writes an entry it could not identify.
+                    return Decision.deny(
+                        Reason(ReasonCode.CALL_ID_UNAVAILABLE, message="csprng unavailable"),
+                        node=self._node.node_id)
+                extra["call_id"] = call_id
+                extra["capture"] = Capture.PRE_HOOK_ONLY
+                extra["adapter"] = {"module": "attenu_guard", "version": _package_version(),
+                                    "hook_path": "Guard.record_passthrough"}
+            try:
+                self._log_decision(decision, scope if scope is not None else tool, tool,
+                                   dict(context) if context else {}, None, extra_fields=extra)
             except CommittedAuditError as exc:
                 exc.decision = self._attach_call_id(decision, call_id)
                 raise
