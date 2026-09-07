@@ -695,6 +695,21 @@ Per entry — the entry, not the node, because a node carries several entries an
 an `allow` never creates a node of its own — a verifier reports one of two
 states:
 
+- **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-07** — the same Rust verifier against
+  **`envelope_vectors_v1.2`** (nineteen cases, 197,346 bytes, sha256
+  `a8be5ff764a86122ca09e94340416b7169531bf5d0cc76a0b1fc87f8272eb16e`, checked before scoring):
+  **19 of 19**, unmodified, every entry state matching `expect_states` and every required
+  `{reason, seq, node}` at its declared position. Pinned, by his own correction, at
+  `XuebinMa/agent-guard` commit `2b474d26a8c02fe5c0f4180f44300f08bd6ae000` on `main` (the squash-merge
+  of the branch commit he first named); checked from this side: the commit is on `main` and the fixture
+  bytes match ours. His caveats, carried as he put them: row 19 was written from his own description of
+  the gap, so his verifier passing it "establishes very little about that verifier"; what it establishes
+  is that the description was executable across three implementations. His build raises no extra on
+  row 19 (it stops judging an envelope once the duplicate rule has claimed the entry), which the scoring
+  rules permit. He also built the mirror case — first envelope defective, second valid — and found it
+  discriminates nothing beyond row 19, so it is recorded here as checked and not proposed. His stated
+  boundary: independent reproduction of the released corpus at that pin; not verifier completeness,
+  runtime correctness or certification.
 - **`witness-signed`**: an envelope exists whose `subject` matches the entry
   recomputed from the bundle, and whose signature verifies under the trusted key
   its `witness.kid` names. A signature that verifies under some *other* trusted
