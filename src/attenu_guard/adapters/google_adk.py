@@ -197,11 +197,44 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from google.adk.agents.base_agent import BaseAgent
-from google.adk.agents.callback_context import CallbackContext
-from google.adk.plugins.base_plugin import BasePlugin
-from google.adk.tools.agent_tool import AgentTool
 from google.adk.tools.base_tool import BaseTool
-from google.adk.tools.tool_context import ToolContext
+
+# The plugin surface is ADK 1.x and later. On an older build (evo-ai pins google-adk 0.3.0)
+# `google.adk.plugins` and `google.adk.apps.App` do not exist, and importing them made this whole
+# module unimportable — so the shipped adapter could not attach to such a project AT ALL, which
+# is worse than attaching a different way. The two hook points it needs are older than the plugin
+# API: every agent has carried `before_agent_callback` and `before_tool_callback` since 0.x. When
+# the plugin base is missing, this module still imports and `attach()` uses those instead. Same
+# hooks, same semantics, same ledger; see `attach`.
+try:                                    # ADK >= 1.x
+    from google.adk.plugins.base_plugin import BasePlugin
+
+    HAS_PLUGIN_API = True
+except ImportError:                     # ADK 0.x — no plugin surface
+    HAS_PLUGIN_API = False
+
+    class BasePlugin:                   # type: ignore[no-redef]
+        """Stand-in for ADK's plugin base on builds that have none.
+
+        Only what ADK itself relies on: a `name`. This class is never registered anywhere on
+        such a build (there is nothing to register it with) — it exists so the module imports
+        and `attach()` can bind the very same methods to per-agent callbacks."""
+
+        def __init__(self, name: str = "attenu_guard") -> None:
+            self.name = name
+
+try:
+    from google.adk.agents.callback_context import CallbackContext
+except ImportError:                     # pragma: no cover - older layouts
+    CallbackContext = Any               # type: ignore[assignment,misc]
+try:
+    from google.adk.tools.agent_tool import AgentTool
+except ImportError:                     # pragma: no cover - older layouts
+    AgentTool = ()                      # type: ignore[assignment,misc]
+try:
+    from google.adk.tools.tool_context import ToolContext
+except ImportError:                     # pragma: no cover - older layouts
+    ToolContext = Any                   # type: ignore[assignment,misc]
 
 from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
 from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
@@ -315,7 +348,11 @@ class DelegationGuardPlugin(BasePlugin):
                           `scope_not_granted` reason rather than vanishing.
         root_agent_name:  the agent that holds `root_guard`. Defaults to the
                           first agent ADK runs.
-        exempt_tools:     extra tool names to skip entirely. ADK's own
+        exempt_tools:     extra tool names to skip AUTHORIZATION for. They are still
+                          recorded — an exempt call lands on the ledger as an `allow`
+                          marked `policy="unlisted"`, saying the chain did not authorize
+                          it, so an exemption is visible to a reader instead of being a
+                          hole in the trail. ADK's own
                           `transfer_to_agent` and every `AgentTool` are already
                           skipped, because they are delegation, not action —
                           they are governed by `delegations` (and optionally by
@@ -355,6 +392,8 @@ class DelegationGuardPlugin(BasePlugin):
         self._delegations = dict(delegations)
         self._tools = dict(tools)
         self._exempt = set(exempt_tools) | {TRANSFER_TOOL_NAME}
+        # Delegation, not action: recorded as spawns, so never also as a passthrough.
+        self._delegation_exempt = {TRANSFER_TOOL_NAME}
         self._delegation_scope = delegation_scope
         self._raise = raise_on_deny
         self._default_tool_authority = default_tool_authority
@@ -392,6 +431,96 @@ class DelegationGuardPlugin(BasePlugin):
         return dict(self._guards)
 
     # ---- hook 1: control transfers to an agent --------------------------
+    # ---- attaching without the plugin API (ADK 0.x) --------------------------
+    def attach(self, agent: Any, *, recursive: bool = True) -> list[str]:
+        """Bind these same hooks to an agent's own callbacks. Returns the agent names covered.
+
+        The plugin path stays the default and is what you want on ADK 1.x and later::
+
+            App(name="app", root_agent=root, plugins=[guarded])
+
+        On a build with no plugin surface — ADK 0.x, where `google.adk.plugins` and
+        `google.adk.apps.App` do not exist — there is nothing to register a plugin with, and
+        before this the adapter could not attach at all. Every agent has carried
+        `before_agent_callback` / `before_tool_callback` (and their `after_` twins) since 0.x,
+        and ADK calls them at the same points in the same order, so::
+
+            guarded.attach(root_agent)      # walks sub_agents and AgentTool-wrapped agents
+
+        gives the same two hook points, the same authorization, and the same ledger. The
+        per-agent signatures are positional and carry no `agent` argument, so each binding is a
+        closure over the agent it was attached to; ADK awaits an awaitable callback result on
+        both paths (`inspect.isawaitable`), so these stay async exactly like the plugin methods.
+
+        Existing callbacks are NOT displaced: an attribute already holding a callable becomes a
+        list with this adapter's first, so a project's own hook still runs. This adapter's own
+        hooks never short-circuit an allowed call, so running first is safe and running before a
+        project's hook is the point — authorization has to happen before anything else decides.
+
+        Idempotent per agent. `recursive` walks `sub_agents` and into every `AgentTool`'s wrapped
+        agent, which is ADK's second delegation site.
+        """
+        covered: list[str] = []
+        seen: set = set()
+        stack = [agent]
+        while stack:
+            a = stack.pop()
+            if a is None or id(a) in seen:
+                continue
+            seen.add(id(a))
+            if getattr(a, "_attenu_guard_attached", None) is self:
+                continue
+            for attr, hook in (("before_agent_callback", self._on_before_agent(a)),
+                               ("after_agent_callback", self._on_after_agent(a)),
+                               ("before_tool_callback", self._on_before_tool),
+                               ("after_tool_callback", self._on_after_tool)):
+                if not hasattr(a, attr):
+                    continue
+                existing = getattr(a, attr, None)
+                if existing is None:
+                    setattr(a, attr, hook)
+                elif isinstance(existing, list):
+                    setattr(a, attr, [hook, *existing])
+                else:
+                    setattr(a, attr, [hook, existing])
+            try:
+                a._attenu_guard_attached = self
+            except Exception:  # noqa: BLE001 - a frozen agent model still gets its callbacks
+                pass
+            covered.append(getattr(a, "name", "<unnamed>"))
+            if recursive:
+                stack.extend(getattr(a, "sub_agents", None) or [])
+                for t in getattr(a, "tools", None) or []:
+                    inner = getattr(t, "agent", None)
+                    if inner is not None:
+                        stack.append(inner)
+        return covered
+
+    # The four per-agent adapters. Each one normalizes ADK's positional callback signature onto
+    # the keyword-only plugin methods above, so there is exactly ONE implementation of each hook.
+    def _on_before_agent(self, agent: Any) -> Callable:
+        async def before_agent(callback_context: Any = None, **_kw: Any):
+            return await self.before_agent_callback(agent=agent, callback_context=callback_context)
+
+        return before_agent
+
+    def _on_after_agent(self, agent: Any) -> Callable:
+        async def after_agent(callback_context: Any = None, **_kw: Any):
+            return await self.after_agent_callback(agent=agent, callback_context=callback_context)
+
+        return after_agent
+
+    async def _on_before_tool(self, tool: Any = None, args: Any = None,
+                              tool_context: Any = None, **_kw: Any):
+        return await self.before_tool_callback(
+            tool=tool, tool_args=dict(args or {}), tool_context=tool_context)
+
+    async def _on_after_tool(self, tool: Any = None, args: Any = None, tool_context: Any = None,
+                             tool_response: Any = None, **_kw: Any):
+        return await self.after_tool_callback(
+            tool=tool, tool_args=dict(args or {}), tool_context=tool_context,
+            result=tool_response)
+
     async def before_agent_callback(
         self, *, agent: BaseAgent, callback_context: CallbackContext
     ) -> None:
@@ -442,6 +571,18 @@ class DelegationGuardPlugin(BasePlugin):
             )
 
         if tool.name in self._exempt:
+            # Un-gated by the operator's own instruction, but never invisible: the call happened,
+            # so it goes on the ledger as an `allow` marked `policy="unlisted"`, which says the
+            # chain did not authorize it (`Guard.record_passthrough`; a verifier counts those as
+            # ungated rather than checking containment). This was the one path in this adapter
+            # that ran a tool and wrote nothing — the B1 shape. ADK's own `transfer_to_agent` and
+            # every `AgentTool` are exempt because they are DELEGATION, recorded as spawns
+            # elsewhere on this same ledger, so they are not recorded again here.
+            if tool.name not in self._delegation_exempt:
+                try:
+                    guard.record_passthrough(tool.name or "<unnamed>")
+                except Exception:  # noqa: BLE001 - a gap in the record must not break the call
+                    pass
             return None
 
         declared = self._tools.get(tool.name or "")
