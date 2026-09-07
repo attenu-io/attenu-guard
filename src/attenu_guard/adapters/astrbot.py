@@ -122,6 +122,7 @@ from __future__ import annotations
 
 import contextvars
 import inspect
+import hashlib
 import threading
 import time
 from contextlib import contextmanager
@@ -459,7 +460,9 @@ class GuardedDelegation:
             if inner is None or isinstance(tool, GuardedTool) or not isinstance(inner, GuardedTool):
                 continue                       # not AstrBot-over-ours: leave it exactly as it is
             try:
-                rebuilt = type(tool)(inner.wrapped, tool_manager)      # AstrBot's, over the raw tool
+                # `_BodyWitness` goes innermost, so the outcome can say whether AstrBot's own
+                # permission check let the call reach the tool at all — see `_record_inner_refusal`.
+                rebuilt = type(tool)(_BodyWitness(inner.wrapped), tool_manager)
                 items[index] = GuardedTool(rebuilt, self)              # ... and ours outside it
             except Exception:
                 continue                       # a shape this does not know: better nested than broken
@@ -547,7 +550,43 @@ class GuardedDelegation:
         gate = self._gate(tool_name, args, run_context, tool)
         if gate.denial is not None:
             return self._deny(gate.denial)
-        return await self._run(gate, inner)
+        witness = _find_witness(tool)
+        if witness is not None:
+            witness.ran = False
+        started = time.monotonic()
+        result = await self._run(gate, inner)
+        if witness is not None and not witness.ran:
+            self._record_inner_refusal(gate, tool_name, result, _elapsed_ms(started))
+        return result
+
+    def _record_inner_refusal(self, gate: "GuardedDelegation._Gate", tool_name: str,
+                              result: Any, duration_ms: int) -> None:
+        """The body never ran, so something nested inside this gate refused: say so on the entry.
+
+        Written as the existing `outcome` event — no new event, no new field, no new vocabulary.
+        `body_state` is `returned`, which is the truth about what this wrapper observed (a value
+        came back to it), and the `receipt` — the spec's slot for unverified carriage of what the
+        body produced — names the refusal and commits to its text by digest without logging it.
+        A reader of the bundle sees `allow` followed by an `outcome` whose receipt says the body
+        did not run; `verify_bundle` reports the call as `observed` and still accepts.
+
+        Silent on a v1 chain, which has no outcome event, and on any call this gate did not get a
+        `call_id` for. Never raises into the caller's path: a missing outcome is a gap in the
+        record, not a reason to fail a call that already happened."""
+        decision = gate.decision or gate.passthrough
+        guard = gate.guard or self.active_guard()
+        call_id = getattr(decision, "call_id", None)
+        if call_id is None or guard.schema_version != 2:
+            return
+        text = result if isinstance(result, str) else repr(result)
+        try:
+            guard.record_outcome(
+                call_id, BodyState.RETURNED, duration_ms=duration_ms,
+                receipt={"type": "framework_refusal",
+                         "ref": "astrbot:_PermissionGuardedTool",
+                         "digest": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()})
+        except Exception:                  # already outcomed, or a chain that will not take it
+            return
 
     # -- execution binding (0.9.0): runs the body and closes out the outcome, v2 only ----
     async def _run(self, gate: "GuardedDelegation._Gate", call: Callable[[], Any]) -> Any:
@@ -575,6 +614,9 @@ class GuardedDelegation:
         decision: Optional[Decision] = None
         guard: Optional[Guard] = None
         snapshot: Any = None
+        # An un-gated passthrough's own Decision (`Guard.record_passthrough`), kept so an inner
+        # layer's refusal can still be bound to the entry that recorded the call.
+        passthrough: Optional[Decision] = None
 
     def _policy_for(self, name: str, tool: Any = None):
         """The declared policy for this call, and the name its MCP server published (or None).
@@ -637,8 +679,7 @@ class GuardedDelegation:
                 # Un-gated, but never invisible: the call happened, so it goes on the ledger as
                 # an `allow` marked `policy="unlisted"` — which says the chain did NOT authorize
                 # it. A verifier counts those as ungated instead of checking containment.
-                guard.record_passthrough(name)
-                return self._Gate()
+                return self._Gate(passthrough=guard.record_passthrough(name), guard=guard)
             # No authority is known for this tool: the refusal goes on the ledger
             # (record_denial) as `unresolved` — an operator's Decisions queue is a
             # fold over the ledger, not over this adapter's memory.
@@ -753,6 +794,73 @@ async def _await_maybe(result: Any) -> Any:
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+def _invoke_tool(tool: Any, context: Any, **kwargs: Any) -> Any:
+    """A tool's real body, chosen exactly as `FunctionToolExecutor._execute_local` would."""
+    if getattr(tool, "handler", None) is not None:
+        return tool.handler(getattr(getattr(context, "context", None), "event", None), **kwargs)
+    call_override = getattr(type(tool), "call", None)
+    base_call = getattr(_base_function_tool(), "call", None)
+    if call_override is not None and call_override is not base_call:
+        return tool.call(context, **kwargs)
+    run = getattr(tool, "run", None)
+    if run is not None:
+        return run(getattr(getattr(context, "context", None), "event", None), **kwargs)
+    return "error: tool has no callable handler"
+
+
+def _base_function_tool() -> Any:
+    from astrbot.core.agent.tool import FunctionTool
+
+    return FunctionTool
+
+
+class _BodyWitness:
+    """Sits between an inner framework layer and the tool's real body, and records whether the
+    body actually ran.
+
+    With this adapter's gate on the OUTSIDE (see `_reassert_outermost`), a layer nested inside it
+    can still refuse: AstrBot's `_PermissionGuardedTool` returns an error string without ever
+    calling the tool. The call IS on the ledger — that was the point of inverting the nesting —
+    but an `allow` read on its own then says the call went through, which is the opposite of what
+    happened. The gate cannot ask "were you refused?", and sniffing the returned text for an
+    error message would be guesswork. So it observes the one fact that is not ambiguous: did the
+    real body run at all. A result that came back without the body running is a refusal by
+    something in between, and the outcome says so.
+
+    Transparent in every other respect: attribute lookups reach the wrapped tool."""
+
+    def __init__(self, tool: Any) -> None:
+        self._wrapped = tool
+        self.name = getattr(tool, "name", None)
+        self.description = getattr(tool, "description", None)
+        self.parameters = getattr(tool, "parameters", {}) or {}
+        self.handler = None                # force the executor through call(), as the layers do
+        self.active = getattr(tool, "active", True)
+        self.ran = False
+
+    @property
+    def wrapped(self) -> Any:
+        return self._wrapped
+
+    async def call(self, context: Any, **kwargs: Any) -> Any:
+        self.ran = True
+        return await _await_maybe(_invoke_tool(self._wrapped, context, **kwargs))
+
+    def __getattr__(self, item: str) -> Any:
+        return getattr(self.__dict__["_wrapped"], item)
+
+
+def _find_witness(tool: Any, depth: int = 6) -> Optional["_BodyWitness"]:
+    """The `_BodyWitness` nested somewhere inside `tool`, if this adapter put one there."""
+    seen = 0
+    while tool is not None and seen < depth:
+        if isinstance(tool, _BodyWitness):
+            return tool
+        tool = getattr(tool, "_wrapped", None)
+        seen += 1
+    return None
 
 
 class GuardedTool:

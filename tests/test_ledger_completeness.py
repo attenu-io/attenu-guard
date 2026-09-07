@@ -157,10 +157,16 @@ class AdapterSourceContract(unittest.TestCase):
     def test_allow_unlisted_records_a_passthrough(self):
         bad = []
         for name in MIRRORED:
-            src = (ADAPTERS / f"{name}.py").read_text()
-            block = re.search(r"if self\.allow_unlisted:\n(.*?return self\._Gate\(\))", src, re.S)
-            self.assertIsNotNone(block, f"{name}: no allow_unlisted branch found")
-            if "record_passthrough(" not in block.group(1):
+            lines = (ADAPTERS / f"{name}.py").read_text().splitlines()
+            starts = [i for i, l in enumerate(lines) if l.strip() == "if self.allow_unlisted:"]
+            self.assertEqual(len(starts), 1, f"{name}: expected one allow_unlisted branch")
+            i = starts[0]
+            branch = []
+            for line in lines[i + 1:]:                 # the branch runs to its own `return`
+                branch.append(line)
+                if "return self._Gate(" in line:
+                    break
+            if "record_passthrough(" not in "\n".join(branch):
                 bad.append(f"{name}: an allow_unlisted passthrough leaves nothing on the ledger")
         self.assertEqual(bad, [])
 
@@ -478,7 +484,10 @@ class GuardIsOutermost(unittest.TestCase):
         outer = rebuilt.tools[0]
         self.assertIsInstance(outer, _FakeGuarded, "our gate is not outermost")
         self.assertIsInstance(outer._wrapped, _PermissionLike, "AstrBot's check was dropped")
-        self.assertIs(outer._wrapped._wrapped, raw, "the tool is double-guarded")
+        # innermost: the witness that says whether AstrBot's check let the body run at all
+        from attenu_guard.adapters import astrbot as ab_mod
+        self.assertIsInstance(outer._wrapped._wrapped, ab_mod._BodyWitness)
+        self.assertIs(outer._wrapped._wrapped.wrapped, raw, "the tool is double-guarded")
         self.assertIs(rebuilt.tools[1], tool_set.tools[1], "an unrecognised entry was touched")
 
     def test_the_named_tool_branch_is_left_alone(self):
@@ -746,6 +755,62 @@ class SmolagentsParity(unittest.TestCase):
         block = src[src.index("class DelegatedAgent"):]
         for field in ("self.name =", "self.description =", "self.inputs =", "self.output_type ="):
             self.assertIn(field, block, f"DelegatedAgent does not mirror {field}")
+
+
+class InnerRefusalIsOnTheEntry(unittest.TestCase):
+    """B7 follow-up. Our gate is outermost, so an inner layer's refusal is a RESULT — and a
+    result the entry has to carry, or an `allow` read alone says the call went through."""
+
+    def test_a_body_that_never_ran_is_recorded_as_an_outcome_and_still_verifies(self):
+        from attenu_guard.adapters import astrbot as ab
+
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        chain_id="c", schema_version=2)
+        gd = ab.GuardedDelegation(g, tools={}, allow_unlisted=True)
+
+        witness = ab._BodyWitness(_Tool("secret_delete_all"))          # never fires: refused
+        tool = _PermissionLike(witness, None)
+
+        result = asyncio.run(gd.call("secret_delete_all", {}, None,
+                                     lambda: "error: Permission denied.", tool=tool))
+        self.assertEqual(result, "error: Permission denied.")
+
+        allow, outcome = g.audit_log().entries[-2:]
+        self.assertEqual((allow["event"], allow["policy"]), ("allow", Policy.UNLISTED))
+        self.assertEqual(outcome["event"], "outcome")
+        self.assertEqual(outcome["call_id"], allow["call_id"], "the outcome is not bound to it")
+        self.assertEqual(outcome["body_state"], BodyState.RETURNED)
+        self.assertEqual(outcome["receipt"]["type"], "framework_refusal")
+        self.assertEqual(outcome["receipt"]["ref"], "astrbot:_PermissionGuardedTool")
+
+        signer = HS256TestSigner(secret=b"k", kid="k")
+        report = verify_bundle(export_bundle(g.audit_log(), signer, strict=True), signer)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["execution_binding"]["per_call"][allow["call_id"]], "observed")
+
+    def test_a_body_that_did_run_records_no_refusal(self):
+        from attenu_guard.adapters import astrbot as ab
+
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        chain_id="c", schema_version=2)
+        gd = ab.GuardedDelegation(g, tools={}, allow_unlisted=True)
+        witness = ab._BodyWitness(_Tool("echo_note"))
+
+        def body():                                         # the real body IS reached this time
+            witness.ran = True
+            return "noted"
+
+        asyncio.run(gd.call("echo_note", {}, None, body, tool=_PermissionLike(witness, None)))
+        self.assertEqual([e["event"] for e in g.audit_log().entries[-1:]], ["allow"])
+
+    def test_no_witness_means_no_outcome_and_no_error(self):
+        from attenu_guard.adapters import astrbot as ab
+
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        chain_id="c", schema_version=2)
+        gd = ab.GuardedDelegation(g, tools={}, allow_unlisted=True)
+        asyncio.run(gd.call("plain", {}, None, lambda: "ok", tool=_Tool("plain")))
+        self.assertEqual(g.audit_log().entries[-1]["event"], "allow")
 
 
 if __name__ == "__main__":
