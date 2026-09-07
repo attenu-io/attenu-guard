@@ -322,9 +322,10 @@ class SecondTurnGetsANewNode(unittest.TestCase):
                          "the over-reach was not recorded on the turn's own node")
 
     def test_a_revoked_agent_is_never_re_spawned(self):
-        # The regression this nearly shipped with: `revoke()` marks the subtree complete too, so
-        # a cascade-revoked agent looked exactly like a finished one and came back on its next
-        # turn with a live node. Revoked is not finished.
+        # The regression this nearly shipped with: `after_agent_callback` marks the node complete
+        # when the turn's run returns, so an agent revoked afterwards is BOTH finished and
+        # revoked — it looked exactly like a finished one and came back on its next turn with a
+        # live node. Revoked is not finished.
         g = self._guard({"orders.read", "delegate.billing"})
         plugin = self._plugin(g)
         self._turn(plugin)
@@ -337,11 +338,10 @@ class SecondTurnGetsANewNode(unittest.TestCase):
             tool=_tool("lookup_order"), tool_args={}, tool_context=_tool_context("billing")))
         self.assertIsInstance(denied, dict, "a revoked agent was allowed to act again")
         entry = g.audit_log().entries[-1]
-        self.assertEqual(entry["event"], "deny")
-        # `check()` reports `node_finalized` before it looks at revocation — a core ordering
-        # detail, not this adapter's contract. What this test owns is that the call is REFUSED
-        # and the node was not replaced with a live one.
-        self.assertIn(entry["reason"], ("revoked", "node_finalized"), entry)
+        # `revoked`, not `node_finalized`: revocation is what a reader acts on, and `check()`
+        # reports it first now (B19). This node is both — the turn finished, then it was
+        # revoked — so this is exactly the entry that used to read `node_finalized`.
+        self.assertEqual((entry["event"], entry["reason"]), ("deny", "revoked"), entry)
         self.assertIs(plugin.guard_for("billing"), child, "the revoked node was re-spawned")
         spawns = [e for e in g.audit_log().entries if e["event"] == "spawn"]
         self.assertEqual(len(spawns), 1, "a new node was minted for a revoked agent")

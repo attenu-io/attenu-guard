@@ -696,8 +696,9 @@ class DelegationGuardPlugin(BasePlugin):
         if existing is not None:
             # REVOKED is not FINISHED. A revoked node must keep answering as revoked: re-spawning
             # it would hand the agent a fresh, live node and undo the revocation — the one thing
-            # this library must never do. `revoke()` marks the subtree complete as well, so
-            # without this check a cascade-revoked agent came back on its next turn.
+            # this library must never do. It is reachable because `after_agent_callback` marks a
+            # node complete when the agent's run returns, so an agent revoked after a turn is
+            # BOTH; without this check it came back live on its next turn.
             if existing.is_revoked:
                 return existing
             return self._respawn(agent_name, existing)

@@ -1002,5 +1002,63 @@ class WitnessOnEveryPath(unittest.TestCase):
         self.assertNotIn("outcome", events)
 
 
+class RevocationIsReportedBeforeFinalization(unittest.TestCase):
+    """B19. Both are denials; the difference is which one a reader acts on.
+
+    A node can be both finalized and revoked: an agent finishes its run, whatever records that
+    marks the node complete, and the operator revokes it afterwards. Testing finalization first
+    reported `node_finalized` for such a node — the refusal correct, the reason wrong, when
+    `revoked` is the name the closed vocabulary already has for it. Nothing about WHETHER a call
+    is refused changes; every published vector is byte-identical.
+    """
+
+    def _chain(self, chain_id):
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        chain_id=chain_id, schema_version=2)
+        return g, g.delegate("child", Authority(scopes={"repo.read"}, ttl=600), task="t")
+
+    def test_a_revoked_and_finalized_node_reports_revoked(self):
+        g, child = self._chain("b19a")
+        child.complete()
+        g.revoke(child.node_id)
+        decision = child.check("repo.read", tool="read_file")
+        self.assertFalse(decision)
+        self.assertEqual(decision.reasons[0].code, ReasonCode.REVOKED)
+        self.assertEqual(g.audit_log().entries[-1]["reason"], ReasonCode.REVOKED)
+
+    def test_a_child_revoked_by_a_whole_chain_kill_reports_revoked(self):
+        # `revoke()` does not finalize anything (checked, not assumed), so this one never hit the
+        # bug — it is here so the cascade path cannot regress into it either.
+        g, child = self._chain("b19b")
+        g.revoke()
+        self.assertEqual(child.check("repo.read", tool="read_file").reasons[0].code,
+                         ReasonCode.REVOKED)
+
+    def test_a_merely_finalized_node_still_reports_node_finalized(self):
+        g, child = self._chain("b19c")
+        child.complete()
+        self.assertEqual(child.check("repo.read", tool="read_file").reasons[0].code,
+                         ReasonCode.NODE_FINALIZED)
+
+    def test_a_revoked_node_that_was_never_finalized_is_unchanged(self):
+        g, child = self._chain("b19d")
+        g.revoke(child.node_id)
+        self.assertEqual(child.check("repo.read", tool="read_file").reasons[0].code,
+                         ReasonCode.REVOKED)
+
+    def test_both_states_still_refuse_the_call(self):
+        # The property that must not move: a denial is a denial either way.
+        for label, revoke, finalize in (("revoked+complete", True, True),
+                                        ("complete", False, True),
+                                        ("revoked", True, False)):
+            with self.subTest(label):
+                g, child = self._chain(f"b19-{label}")
+                if finalize:
+                    child.complete()
+                if revoke:
+                    g.revoke(child.node_id)
+                self.assertFalse(child.check("repo.read", tool="read_file"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

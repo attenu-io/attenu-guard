@@ -535,7 +535,16 @@ class Guard:
             # 1. refuse if the node is finalized (v2 only — a v1 chain's complete() has always
             #    been a pure informational marker that leaves authority, and check(), untouched;
             #    see complete()'s docstring and Guard.issue()'s module-docstring note on v1/v2).
-            if is_v2 and getattr(self._node, "complete", False):
+            # REVOCATION IS REPORTED FIRST. A node can be BOTH: an agent finishes its run (a
+            # holder marks the node complete) and is revoked afterwards, which is the ordinary
+            # shape wherever a framework records "this agent is done" — the Google ADK adapter's
+            # `after_agent_callback` does exactly that. Testing finalization first reported
+            # `node_finalized` for such a node, and the refusal was right while the reason was
+            # wrong: `revoked` is what a reader acts on, and the closed vocabulary already names
+            # it. Both are denials, so nothing about WHETHER a call is refused changes here —
+            # only which reason it carries. (`revoke()` does not itself finalize anything;
+            # verified, not assumed.)
+            if is_v2 and getattr(self._node, "complete", False) and not self._chain.is_revoked(nid):
                 decision = Decision.deny(
                     Reason(ReasonCode.NODE_FINALIZED, message="node already finalized (complete())"),
                     node=nid)
