@@ -189,7 +189,7 @@ One JSON object holding every case:
 ```jsonc
 {
   "version": "bundle_vectors_v1",         // compatibility contract; does not move
-  "revision": "bundle_vectors_v1.3",      // additive counter; moves when a case is appended
+  "revision": "bundle_vectors_v1.4",      // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -237,8 +237,8 @@ rejecting case declares `expect_failures`: the **minimal set** of
   position and declared minimal set are stable for life. So `version` is the
   compatibility contract and stays `bundle_vectors_v1` — an implementation that
   scored the file before still scores it — while `revision` moves with each
-  addition, which is what a report should name (`bundle_vectors_v1.3`,
-  eighteen cases). Iterate `cases`; do not assume a length.
+  addition, which is what a report should name (`bundle_vectors_v1.4`,
+  twenty cases). Iterate `cases`; do not assume a length.
 - A case MAY also declare **`expect_report`**: named counters from the verifier's own report
   that a conformant implementation MUST reproduce exactly. It exists for a rule that
   accept/reject cannot distinguish — where two different behaviours both accept, and only the
@@ -316,6 +316,16 @@ separately and reports the number as `ungated`, alongside `actions_checked`, so 
 how much of the run was actually measured. `policy` is an allow-only field; on a `schema_version=2`
 chain a `deny` carrying it is invalid, and the only value v1 defines is `unlisted`. No reason token
 is involved: an un-gated call is not a violation of anything the bundle claims.
+
+Both halves of that rule are **version-independent**, and this is the one place they have to be
+stated rather than pinned by a row: every bundle in this file is a `schema_version=2` chain, so
+`reject_unknown_policy_value` and `reject_policy_on_spawn` exercise them on v2 only. A
+`schema_version=1` chain can carry `policy` too — `Guard.record_passthrough` writes it on either
+version, and it is not a v2-only field — so a verifier MUST validate the value and its placement
+on a v1 bundle as well. Reference implementations have gotten this wrong by validating `policy`
+inside the execution-binding pass, which does not run on a v1 chain: every undefined value then
+bought the containment exemption there. If your v2-only reading of these two rows leaves your v1
+path unchecked, you have the bug they exist to prevent.
 
 Execution binding is checked on `schema_version=2` chains only; on a v1 bundle these cannot
 occur and the report says `"not applicable"`. Every failure in the binding loop is about a
@@ -453,9 +463,31 @@ actually report are the same set, so a new check cannot be added without a row h
   an allow-only field; on a v2 chain a `deny` carrying it is invalid, and `unlisted` is the
   only value v1 defines. (Added in revision v1.3.)
 
+- `reject_unknown_policy_value` — `valid_bundle_v2_ungated_allow` with the un-gated
+  allow at `seq` 6 carrying `"policy": "made-up"` instead of the one value v1 defines.
+  **`"expect": "reject"`**, and it must fail on BOTH counts. Required: `invalid_allow`
+  on seq 6 (the value is not one the format defines) AND `containment` on seq 6 — the
+  one that matters. An undefined value buys NO containment exemption, so `legacy.sync`
+  is measured against the summarizer's `{crm.read}` like any other allow and is outside
+  it. A verifier that skips containment whenever `policy` is merely PRESENT accepts this
+  bundle and reports `containment: true`, which is an out-of-authority action excused by
+  a marker anyone can write. `ungated` is 0 here: nothing was honestly un-gated.
+  (Added in revision v1.4.)
+
+- `reject_policy_on_spawn` — `valid_bundle_v2_ungated_allow` with the delegation at
+  `seq` 1 carrying `"policy": "unlisted"`: a DEFINED value on an entry that is not an
+  allow. **`"expect": "reject"`**. Required: `policy_on_non_allow` on seq 1. `policy`
+  answers how an ALLOW came to be; on a `spawn`, `root` or `outcome` it means nothing,
+  and a verifier that checks the value but not WHERE it may appear accepts this. It is
+  the same rule that makes a `deny` carrying it invalid, extended to every other event.
+  The un-gated allow at seq 6 is untouched and still exempt, so the bundle fails on the
+  spawn alone. (Added in revision v1.4.)
+
 None of the four v1.1 cases or the four v1.2 rejecting cases has a permitted
 extra: each fails exactly one check and reports exactly one failure. The v1.3 case has no
-failures at all — it is an accepting row whose whole content is a report counter.
+failures at all — it is an accepting row whose whole content is a report counter. The first
+v1.4 case is the one row in the file with TWO required failures, because it breaks two rules
+with one change and either alone would leave the other untested.
 
 Attenuation is a lattice relation over three dimensions, not a scope list, so
 the v1.1 ttl and ceiling cases add no scope at all. A verifier that compares

@@ -61,7 +61,7 @@ VECTORS_VERSION = "bundle_vectors_v1"
 # contract and stays put: an implementation that scored `bundle_vectors_v1` still scores it.
 # `revision` is the additive counter — it moves whenever a case is appended, so a reader can
 # tell which corpus they ran without diffing case lists.
-VECTORS_REVISION = "bundle_vectors_v1.3"
+VECTORS_REVISION = "bundle_vectors_v1.4"
 
 VECTORS_DIR = Path(__file__).resolve().parent / BUNDLES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -633,6 +633,52 @@ def gen_cases() -> list:
         "`policy` is allow-only: on a v2 chain a deny carrying it is invalid.",
         _ungated_bundle(), expect="accept",
         expect_report={"actions_checked": 2, "ungated": 1}))
+
+    # Revision v1.4. The row above says a `policy`-marked allow is exempt from containment. That
+    # exemption is only sound if the value naming it is one the format DEFINES, and if `policy`
+    # appears only where it means something. Neither is implied by the accepting row, and the
+    # natural implementation of it — "skip containment when `policy` is present" — is exactly
+    # the bug this corpus exists to stop: a made-up marker on an out-of-authority action then
+    # verifies clean. Two rejecting rows, derived from valid_bundle_v2_ungated_allow by exactly
+    # one change each.
+    ungated = _ungated_bundle()
+
+    def _unknown_policy_value(es):
+        for e in es:
+            if e.get("policy") is not None:
+                e["policy"] = "made-up"
+
+    cases.append(_case(
+        "reject_unknown_policy_value",
+        "The un-gated allow at seq 6 carries \"policy\": \"made-up\" instead of the one value "
+        "v1 defines. Derived from valid_bundle_v2_ungated_allow by that single change, so the "
+        "bundle is otherwise the accepting row byte for byte. It MUST reject on BOTH counts, "
+        "and the second is the one that matters: the value is not one the format defines "
+        "(invalid_allow), AND an undefined value does not buy the containment exemption, so "
+        "`legacy.sync` is measured against the summarizer's {crm.read} like any other allow and "
+        "is outside it (containment). A verifier that skips containment whenever `policy` is "
+        "merely PRESENT accepts this bundle and reports containment true — an out-of-authority "
+        "action excused by a marker anyone can write. Report `ungated` as 0 here: nothing was "
+        "honestly un-gated. Both failures sit on seq 6, node the child.",
+        _mutate(ungated, _unknown_policy_value),
+        expect="reject", expect_failures=[_fail("containment", 6, n1),
+                                          _fail("invalid_allow", 6, n1)]))
+
+    def _policy_on_spawn(es):
+        es[1]["policy"] = "unlisted"
+
+    cases.append(_case(
+        "reject_policy_on_spawn",
+        "The delegation at seq 1 carries \"policy\": \"unlisted\" — a DEFINED value, on an "
+        "entry that is not an allow. Derived from valid_bundle_v2_ungated_allow by that single "
+        "change. `policy` answers how an ALLOW came to be; on a spawn, root or outcome it means "
+        "nothing, and a verifier that checks the value but not WHERE it may appear accepts this. "
+        "The same rule is why a deny carrying it is invalid, which the v2 record schema already "
+        "states — this row extends it to every other event. The un-gated allow at seq 6 is "
+        "untouched and still exempt, so the bundle fails on the spawn alone. Required: "
+        "policy_on_non_allow at seq 1, node the child.",
+        _mutate(ungated, _policy_on_spawn),
+        expect="reject", expect_failures=[_fail("policy_on_non_allow", 1, n1)]))
 
     return cases
 

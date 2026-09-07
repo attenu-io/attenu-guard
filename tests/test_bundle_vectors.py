@@ -75,7 +75,7 @@ class TestBundleVectors(unittest.TestCase):
         # an implementation that scored bundle_vectors_v1 still scores it. `revision` is the
         # additive counter that does move, so a reader can name the corpus they ran.
         self.assertEqual(self.document["version"], "bundle_vectors_v1")
-        self.assertEqual(self.document["revision"], "bundle_vectors_v1.3")
+        self.assertEqual(self.document["revision"], "bundle_vectors_v1.4")
         self.assertEqual([c["name"] for c in self.document["cases"]], [
             "valid_bundle_v2",
             "reject_params_mismatch",
@@ -104,6 +104,11 @@ class TestBundleVectors(unittest.TestCase):
             # that runs it through containment rejects an honest bundle, one that drops it
             # silently understates the run.
             "valid_bundle_v2_ungated_allow",
+            # revision v1.4 — the two rules the accepting row above does not imply: the value
+            # naming a containment exemption must be one the format defines, and `policy` may
+            # appear only on an allow.
+            "reject_unknown_policy_value",
+            "reject_policy_on_spawn",
         ])
 
     def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
@@ -145,9 +150,16 @@ class TestBundleVectors(unittest.TestCase):
             if case["expect"] != "reject" or case["name"] in reshaped:
                 continue
             with self.subTest(case=case["name"]):
-                base_name = "valid_bundle_v2_literal" if case["name"].endswith("_literal") else "valid_bundle_v2"
-                if base_name != "valid_bundle_v2":
-                    self.assertIn(base_name, case["description"])   # a row off the second base names it
+                # The base a row derives from: the accepting case its description NAMES, and
+                # `valid_bundle_v2` when it names none. Selecting on the `_literal` suffix alone
+                # silently mis-based revision v1.4's rows, which come off the un-gated bundle
+                # and end in neither suffix — they were compared against a base one entry
+                # shorter and failed on the count, not on the rule.
+                named = [n for n in ("valid_bundle_v2_literal", "valid_bundle_v2_ungated_allow")
+                         if n in case["description"]]
+                self.assertLessEqual(len(named), 1,
+                                     f"{case['name']} names more than one base")
+                base_name = named[0] if named else "valid_bundle_v2"
                 base_entries = by_name[base_name]["bundle"]["entries"]
                 entries = case["bundle"]["entries"]
                 self.assertEqual(len(entries), len(base_entries))
@@ -265,7 +277,7 @@ class TestBundleVectors(unittest.TestCase):
         self.assertEqual(vectors.read_bundle_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_bundle_vectors()
         self.assertEqual(loaded["version"], "bundle_vectors_v1")
-        self.assertEqual(loaded["revision"], "bundle_vectors_v1.3")
+        self.assertEqual(loaded["revision"], "bundle_vectors_v1.4")
         self.assertEqual([c["name"] for c in loaded["cases"]],
                          [c["name"] for c in self.document["cases"]])
 
