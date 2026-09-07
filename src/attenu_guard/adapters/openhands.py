@@ -317,6 +317,10 @@ class GuardedDelegation:
         self._installed: dict[str, Any] = {}          # tool name -> the class we displaced
         self._resolver_classes: dict[Any, Any] = {}   # original class -> guarded resolver class
         self._conversation_guards: dict[int, Guard] = {}   # id(conversation) -> its child Guard
+        # Conversations the CHAIN refused to mint a child for. The SDK has already created them,
+        # so they exist and can call tools; they hold no authority, and `active_guard`'s fallback
+        # would otherwise hand them the root's. Every call from one is refused, on the trail.
+        self._refused_conversations: set[int] = set()
         self._registry_module: Any = None             # the SDK registry module, while armed
         self._registry_original: Any = None           # its original `_REG` mapping
 
@@ -544,6 +548,15 @@ class GuardedDelegation:
         """Decide, without running anything: deny / delegate / pass through."""
         guard = self.active_guard(conversation)
 
+        if conversation is not None and id(conversation) in self._refused_conversations:
+            # The chain refused to mint this sub-agent's node (a ceiling, a revoked or expired
+            # parent). It holds nothing, so every call it makes is refused — never the root's
+            # authority, which is what `active_guard`'s fallback would otherwise give it.
+            return self._Gate(denial=guard.record_denial(
+                Reason(ReasonCode.NO_AUTHORITY, requested=name,
+                       message=f"tool {name!r} called by a sub-agent the chain refused to mint"),
+                tool=name, disposition=Disposition.UNRESOLVED))
+
         if name == self.delegation_tool and (self.subagents or self.default_subagent_authority):
             return self._gate_delegation(guard, args)
 
@@ -742,8 +755,23 @@ class GuardedDelegation:
                     sub = sub_agents.get(agent_id)
                     if sub is None or agent_id in self._bound:
                         continue
-                    child = guard.delegate(agent_type, outer._authority_for(agent_type),
-                                           task=f"delegate: {agent_id}")
+                    try:
+                        child = guard.delegate(agent_type, outer._authority_for(agent_type),
+                                               task=f"delegate: {agent_id}")
+                    except AuthorityError:
+                        # The chain refused this one — a fanout or depth ceiling, a revoked or
+                        # expired parent. `Guard.delegate` has already written `spawn_denied`,
+                        # so the refusal is on the trail once.
+                        #
+                        # This used to escape the loop uncaught, with every conversation the SDK
+                        # had just created still live and NOT bound: `active_guard` then fell
+                        # back to the root, and the sub-agents the chain had REFUSED ran on the
+                        # parent's full authority. With a fanout of one and ids ["a", "b"], "a"
+                        # was attenuated and "b" silently was not. Refusing one id must not
+                        # widen it, and must not abandon the ids after it either — each is
+                        # decided on its own, and a refused one is marked fail-closed.
+                        outer._refused_conversations.add(id(sub))
+                        continue
                     outer.children[agent_id] = child
                     self._bound[agent_id] = child
                     outer._conversation_guards[id(sub)] = child
@@ -756,6 +784,7 @@ class GuardedDelegation:
                 sub_agents = getattr(self._inner, "_sub_agents", {}) or {}
                 for sub in sub_agents.values():
                     outer._conversation_guards.pop(id(sub), None)
+                    outer._refused_conversations.discard(id(sub))
                 close = getattr(self._inner, "close", None)
                 if callable(close):
                     close()

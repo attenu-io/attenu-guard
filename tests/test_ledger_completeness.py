@@ -423,6 +423,84 @@ class WitnessIsPerCallNotPerTool(unittest.TestCase):
                          "the body never ran, so nothing was invoked with those arguments")
 
 
+class SpawnNeverLeavesASubAgentOnTheParentsAuthority(unittest.TestCase):
+    """OpenHands' `delegate` seam mints a child per sub-agent id AFTER the SDK has created the
+    conversations. `guard.delegate()` can refuse there — a revoked or expired parent, a depth or
+    fanout ceiling — and that call was the one delegation site in the adapter with no
+    `except AuthorityError` around it (`_gate_delegation`, the other seam, has one).
+
+    The refusal then escaped mid-loop with the sub-agent conversations already live and NOT
+    bound to any child Guard. `active_guard(conversation)` falls back to `current_guard() or
+    self.root`, so those sub-agents ran their tools on the PARENT's node with the parent's full
+    authority. With ids `["a", "b"]` and a fanout of one, `a` was attenuated and `b` silently
+    was not, which is the widening this library exists to prevent."""
+
+    def _executor(self, guarded, sub_agents):
+        class _Inner:
+            def __init__(self):
+                self._sub_agents = sub_agents
+
+            def __call__(self, action, conversation=None):
+                return SimpleNamespace(is_error=False, command=action.command)
+
+        return guarded.delegate_executor(_Inner())
+
+    def _guarded(self, max_children):
+        import importlib
+        oh = importlib.import_module("attenu_guard.adapters.openhands")
+        root = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                           max_fanout=max_children)
+        return oh, oh.GuardedDelegation(
+            root, tools={"terminal": oh.ToolPolicy("repo.read")},
+            subagents={"general-purpose": Authority(scopes={"repo.read"}, ttl=900)})
+
+    def test_a_ceiling_refusal_mid_spawn_does_not_leave_a_sub_agent_on_the_root(self):
+        oh, guarded = self._guarded(max_children=1)
+        subs = {"a": SimpleNamespace(id="a"), "b": SimpleNamespace(id="b")}
+        executor = self._executor(guarded, subs)
+        action = SimpleNamespace(command="spawn", ids=["a", "b"],
+                                 agent_types=["general-purpose", "general-purpose"])
+
+        executor(action, None)                       # must not raise out of the tool executor
+
+        # `b` is the one the ceiling refused. `terminal` is inside the ROOT's authority, so if
+        # the fallback still hands it the root's Guard the call goes through — which is the
+        # widening. It must be refused instead, and said so on the trail.
+        ran = []
+        with self.assertRaises(ValueError):          # the adapter's denial convention
+            guarded.call("terminal", SimpleNamespace(),
+                         lambda: ran.append(True), conversation=subs["b"])
+        self.assertEqual(ran, [], "a sub-agent the chain refused ran a tool")
+        last = guarded.root.audit_log().entries[-1]
+        self.assertEqual(last["event"], "deny")
+
+        # The control: `a` WAS minted, and is unaffected.
+        guarded.call("terminal", SimpleNamespace(), lambda: ran.append("a"),
+                     conversation=subs["a"])
+        self.assertEqual(ran, ["a"])
+
+    def test_the_refusal_is_on_the_ledger(self):
+        oh, guarded = self._guarded(max_children=1)
+        subs = {"a": SimpleNamespace(id="a"), "b": SimpleNamespace(id="b")}
+        executor = self._executor(guarded, subs)
+        executor(SimpleNamespace(command="spawn", ids=["a", "b"],
+                                agent_types=["general-purpose", "general-purpose"]), None)
+        events = [e["event"] for e in guarded.root.audit_log().entries]
+        self.assertIn("spawn_denied", events,
+                      "a delegation the chain refused must be on the trail")
+
+    def test_a_spawn_within_the_ceiling_is_unchanged(self):
+        oh, guarded = self._guarded(max_children=4)
+        subs = {"a": SimpleNamespace(id="a"), "b": SimpleNamespace(id="b")}
+        executor = self._executor(guarded, subs)
+        executor(SimpleNamespace(command="spawn", ids=["a", "b"],
+                                agent_types=["general-purpose", "general-purpose"]), None)
+        for name in ("a", "b"):
+            bound = guarded.active_guard(subs[name])
+            self.assertIsNot(bound, guarded.root)
+            self.assertEqual(sorted(bound.authority.scopes), ["repo.read"])
+
+
 class RefusedDelegationIsADeny(unittest.TestCase):
     def test_reason_code_is_named(self):
         self.assertEqual(ReasonCode.DELEGATION_REFUSED, "delegation_refused")
