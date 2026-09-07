@@ -299,6 +299,8 @@ envelope v1's set, and a v2 declares its own.
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
 | `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
 | `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority | that spawn entry |
+| `invalid_policy` | an `allow` carries a `policy` value this format does not define (`unlisted` is the only one v1 defines) | that allow entry |
+| `policy_on_non_allow` | an entry other than an `allow` carries `policy`, which is an allow-only field | that entry |
 
 `unreadable_authority` and `unreadable_granted` are the two historical exceptions to the
 "reason is the text before the first colon" rule: their message names the node there instead,

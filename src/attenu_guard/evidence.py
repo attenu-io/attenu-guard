@@ -944,7 +944,7 @@ def _validate_allow(e: dict) -> str | None:
             return f"adapter[{k!r}] must be a non-empty string"
     if _present_but_null(e, "policy"):
         return "policy is explicitly null (omit it, or give a valid Policy value)"
-    if "policy" in e and e.get("policy") not in Policy.ALL:
+    if "policy" in e and not _is_known_policy(e.get("policy")):
         return f"policy {e.get('policy')!r} not a known value"
     err = _valid_hash_field(e, "authorized_params_hash")
     if err:
@@ -1066,6 +1066,58 @@ def _v2_field_leaks_on_v1(entries: list[dict]) -> _FailureLog:
             failures.add("v2_field_on_v1",
                          f"v2_field_on_v1: seq={e.get('seq')} event={e.get('event')!r} "
                          f"carries v2-only field(s) {leaked} on a schema_version=1 entry",
+                         seq=e.get("seq"), node=e.get("node"))
+    return failures
+
+
+def _is_known_policy(value) -> bool:
+    """A `policy` the format defines. Type-checked first: `Policy.ALL` is a set, and a bundle is
+    untrusted input that can carry an unhashable value there (`[]`, `{}`) — a membership test
+    alone raises `TypeError` out of the verifier instead of reporting an invalid bundle."""
+    return isinstance(value, str) and value in Policy.ALL
+
+
+def _policy_failures(entries: list[dict], bundle_v) -> _FailureLog:
+    """`policy` is checked on EVERY bundle version, because it is what excuses an entry from
+    containment.
+
+    An `allow` carrying `policy` is not tested for containment: it says the chain never
+    authorized the call, so there is nothing to contain. That exemption is only sound if the
+    value naming it is one the format actually defines. It was validated in `_validate_allow`,
+    which runs inside `_execution_binding` — and that returns early on a schema_version=1
+    bundle. So on a v1 chain ANY non-null value bought the exemption: `"anything"`, `0`, `""`.
+    An out-of-authority action stamped with a made-up policy verified clean and reported
+    `containment: True`, which is the one thing this bundle exists to say honestly.
+
+    Two rules, both version-independent:
+
+      * `policy` may appear ONLY on an `allow`. It answers "how did this allow come to be";
+        on a `spawn`, `root` or `outcome` it means nothing and was accepted silently (only
+        `deny` was checked, by `_validate_deny`'s allow-only-field rule).
+      * its value must be one `reasons.Policy` defines (`unlisted` is the only one in v1).
+
+    On a v2 bundle `_validate_allow`/`_validate_deny` already report these two entry shapes and
+    their strings are the published contract, so this check stands down for exactly those cases
+    and covers what they do not reach. No message is ever emitted twice."""
+    failures = _FailureLog()
+    for e in entries:
+        if "policy" not in e:
+            continue
+        ev = e.get("event")
+        if ev == "allow":
+            if bundle_v == 2:
+                continue                    # _validate_allow owns this entry's message
+            if not _is_known_policy(e.get("policy")):
+                failures.add("invalid_policy",
+                             f"invalid_policy: seq={e.get('seq')} allow carries policy "
+                             f"{e.get('policy')!r}, not a value this format defines",
+                             seq=e.get("seq"), node=e.get("node"))
+        else:
+            if ev == "deny" and bundle_v == 2:
+                continue                    # _validate_deny owns this entry's message
+            failures.add("policy_on_non_allow",
+                         f"policy_on_non_allow: seq={e.get('seq')} event={ev!r} carries "
+                         f"`policy`, which is an allow-only field",
                          seq=e.get("seq"), node=e.get("node"))
     return failures
 
@@ -1437,7 +1489,10 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     for e in entries:
         if e.get("event") != "allow":
             continue
-        if e.get("policy") is not None:
+        if _is_known_policy(e.get("policy")):
+            # Only a policy value the format DEFINES buys the exemption. An entry carrying
+            # anything else is reported by `_policy_failures` and still measured here, so a
+            # made-up marker cannot excuse an out-of-authority action.
             ungated += 1
             continue
         actions += 1
@@ -1459,6 +1514,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
                                       else ({"status": "not applicable"}, _FailureLog()))
     if execution_binding.get("failures"):
         log.extend(eb_failures)
+    log.extend(_policy_failures(entries, bundle_v))
 
     # (4) observer envelopes. Never required — an absent envelope is the status quo and changes
     # nothing — but a PRESENT one has to verify, and a broken one lands in this same list. The

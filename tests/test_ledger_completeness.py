@@ -71,6 +71,8 @@ from attenu_guard.reasons import (  # noqa: E402
     BodyState, Capture, Disposition, Policy, ReasonCode,
 )
 
+_UNSET = object()
+
 ADAPTERS = ROOT / "src" / "attenu_guard" / "adapters"
 MIRRORED = ("langchain", "openhands", "astrbot")
 
@@ -247,6 +249,92 @@ class CamelGateRunsWithoutTheFramework(unittest.TestCase):
         self.assertEqual(entry["event"], "deny")
         self.assertEqual(entry["reason"], ReasonCode.NO_AUTHORITY)
         self.assertEqual(entry["tool"], "stub_tool")
+def _rehash(entries):
+    """Re-chain a hand-built bundle so integrity passes and the CONTENT is what is under test."""
+    from attenu_guard.audit import GENESIS, _hash
+    prev = GENESIS
+    for e in entries:
+        e["prev_hash"] = prev
+        e["hash"] = _hash(prev, {k: v for k, v in e.items() if k != "hash"})
+        prev = e["hash"]
+    return entries
+
+
+class PolicyIsValidatedBeforeItExcusesContainment(unittest.TestCase):
+    """`policy` is what makes the verifier SKIP the containment check on an `allow`, so the value
+    that buys that exemption has to be checked — on every chain version, not only v2.
+
+    Found reading the verifier for the 0.16.0 release. `verify_bundle` skipped containment for
+    any `allow` whose `policy` was merely non-None, while the only place the value was validated
+    (`_validate_allow`) runs inside `_execution_binding`, which returns early on a
+    schema_version=1 bundle. So on a v1 chain `"policy": "anything-at-all"` — or `0`, or `""` —
+    turned an out-of-authority action into an accepted bundle reporting `containment: True`. The
+    published vectors say `unlisted` is the only value v1 defines; the reference verifier did not
+    enforce it, and containment is the check the whole bundle exists to make."""
+
+    def _v1_bundle_with(self, policy_value, scope="repo.write"):
+        g = _root()
+        g.check("repo.read", tool="read_file")
+        signer = HS256TestSigner(secret=b"k", kid="k")
+        bundle = export_bundle(g.audit_log(), signer)
+        import copy
+        forged = copy.deepcopy([e for e in bundle["entries"] if e["event"] == "allow"][0])
+        forged["seq"] = len(bundle["entries"])
+        forged["scope"] = scope                     # NOT held by the node
+        if policy_value is not _UNSET:
+            forged["policy"] = policy_value
+        bundle["entries"].append(forged)
+        _rehash(bundle["entries"])
+        from attenu_guard import evidence as _ev
+        bundle["anchor"] = _ev._anchor_for(bundle["entries"], signer)
+        return verify_bundle(bundle, signer), signer
+
+    def test_an_out_of_authority_allow_is_a_containment_failure_when_unmarked(self):
+        # The control: without `policy`, this is exactly the violation containment exists for.
+        report, _ = self._v1_bundle_with(_UNSET)
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["containment"])
+
+    def test_an_unknown_policy_value_does_not_buy_a_containment_exemption_on_v1(self):
+        for bogus in ("totally-made-up", "", 0, False, []):
+            with self.subTest(policy=bogus):
+                report, _ = self._v1_bundle_with(bogus)
+                self.assertFalse(
+                    report["ok"],
+                    f"policy={bogus!r} excused an out-of-authority allow on a v1 chain")
+                self.assertEqual(report["ungated"], 0,
+                                 "an invalid policy value is not an un-gated call")
+
+    def test_the_one_defined_value_still_works_on_v1(self):
+        # The behaviour the release ships must not move: a real passthrough is exempt.
+        report, _ = self._v1_bundle_with(Policy.UNLISTED)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["ungated"], 1)
+        self.assertEqual(report["actions_checked"], 1)
+
+    def test_policy_is_an_allow_only_field_on_every_event(self):
+        """`policy` says HOW an ALLOW came to be. On anything else it is meaningless, and the
+        verifier accepted it silently on `outcome`, `spawn` and `root` (only `deny` was checked)."""
+        g = _root(schema_version=2)
+        child = g.delegate("worker", Authority(scopes={"repo.read"}, ttl=60), task="t")
+        d = g.check("repo.read", tool="read_file", capture=Capture.WRAPPER_SYNC,
+                    adapter={"module": "m", "version": "1", "hook_path": "h"})
+        g.record_outcome(d.call_id, BodyState.RETURNED, duration_ms=1)
+        signer = HS256TestSigner(secret=b"k", kid="k")
+        base = export_bundle(g.audit_log(), signer)
+        import copy
+        from attenu_guard import evidence as _ev
+        for event in ("outcome", "spawn", "root"):
+            with self.subTest(event=event):
+                bundle = copy.deepcopy(base)
+                for e in bundle["entries"]:
+                    if e["event"] == event:
+                        e["policy"] = Policy.UNLISTED
+                _rehash(bundle["entries"])
+                bundle["anchor"] = _ev._anchor_for(bundle["entries"], signer)
+                report = verify_bundle(bundle, signer)
+                self.assertFalse(report["ok"],
+                                 f"policy on a {event!r} entry was accepted")
 
 
 class RefusedDelegationIsADeny(unittest.TestCase):
