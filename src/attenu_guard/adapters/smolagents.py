@@ -105,6 +105,7 @@ from attenu_guard import AuthorityDenied, Guard, __version__
 from attenu_guard.reasons import BodyState, Capture
 
 __all__ = [
+    "install",
     "GuardRef",
     "UnboundGuard",
     "GuardedTool",
@@ -155,6 +156,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(args, kwargs) -> Any:
@@ -295,7 +297,8 @@ class GuardedTool(Tool):
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         guard = _resolve(self.guard)
-        context: Mapping = self.context_fn(*args, **kwargs) if self.context_fn else {}
+        context: Mapping = _safe_context(self.guard, self.context_fn, *args,
+                                         tool=self.name, scope=self.scope, **kwargs)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None
         extra = (
@@ -355,6 +358,90 @@ def guard_tools(guard: GuardLike,
     ]
 
 
+class _UnlistedTool(Tool):
+    """A tool nobody declared a scope for, RECORDED rather than invisible.
+
+    `install(..., allow_unlisted=True)` wraps an undeclared tool in this instead of leaving it
+    bare. The call is not authorized — no scope was declared, so there is nothing to check — but
+    it lands on the ledger as an `allow` marked `policy="unlisted"`, the same shape every other
+    adapter uses (`Guard.record_passthrough`). Before this, an undeclared smolagents tool ran
+    with no entry of any kind, which is how a tool added to `agent.tools` after the wrapping pass
+    went unrecorded (minion battery, H12)."""
+
+    skip_forward_signature_validation = True
+
+    def __init__(self, inner: Tool, guard: GuardLike):
+        super().__init__()
+        self.inner = inner
+        self.guard = guard
+        self.name = inner.name
+        self.description = inner.description
+        self.inputs = inner.inputs
+        self.output_type = inner.output_type
+        output_schema = getattr(inner, "output_schema", None)
+        if output_schema is not None:
+            self.output_schema = output_schema
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        _resolve(self.guard).record_passthrough(self.name)
+        return self.inner(*args, **kwargs)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"UnlistedTool(name={self.name!r})"
+
+
+def install(guard: GuardLike, agent: Any, scopes: Optional[Mapping[Any, str]] = None, *,
+            context_fns: Optional[Mapping[str, Callable[..., Mapping]]] = None,
+            metered: Optional[Iterable[str]] = None,
+            on_denied: str = "raise",
+            allow_unlisted: bool = True,
+            scope_for: Optional[Callable[[str], Optional[str]]] = None) -> list:
+    """Guard every tool on `agent`, in place, and RE-RUN to cover tools added later.
+
+    `guard_tools()` wraps a list you hand it, once. smolagents agents keep a mutable
+    `agent.tools` dict and hosts add to it after construction — a tool put there after the
+    wrapping pass ran with no ledger entry at all (minion battery, H12). This is the same
+    installer shape the langchain and astrbot adapters have, in this adapter's idiom.
+
+    `scopes` maps a `Tool` instance OR a tool NAME to the scope it needs; `scope_for` is the
+    observe-mode hook (called with a tool name when nothing was declared, exactly like
+    `default_policy` elsewhere) and takes precedence over `allow_unlisted`. With
+    `allow_unlisted=True` (the default here, because this is the incremental-rollout entry point)
+    an undeclared tool is wrapped in `_UnlistedTool` and RECORDED as a passthrough; with False it
+    is left untouched, which is the pre-existing behaviour and the one that leaves no trace.
+
+    Idempotent and re-runnable: already-guarded tools are skipped. Returns the names now guarded.
+    """
+    context_fns = dict(context_fns or {})
+    metered_names = set(metered or ())
+    by_name: dict = {}
+    for tool, scope in dict(scopes or {}).items():
+        by_name[tool if isinstance(tool, str) else getattr(tool, "name", None)] = scope
+
+    tools = getattr(agent, "tools", None)
+    if not isinstance(tools, dict):
+        raise TypeError("agent.tools must be the dict smolagents builds (name -> Tool)")
+
+    installed = []
+    for name, tool in list(tools.items()):
+        if isinstance(tool, (GuardedTool, _UnlistedTool)):
+            continue
+        scope = by_name.get(name)
+        if scope is None and scope_for is not None:
+            scope = scope_for(name)
+        if scope is not None:
+            tools[name] = GuardedTool(tool, guard, scope,
+                                      context_fn=context_fns.get(name),
+                                      metered=name in metered_names,
+                                      on_denied=on_denied)
+        elif allow_unlisted:
+            tools[name] = _UnlistedTool(tool, guard)
+        else:
+            continue
+        installed.append(name)
+    return sorted(installed)
+
+
 class DelegatedAgent:
     """Put this in `managed_agents=[...]` in place of the raw sub-agent.
 
@@ -395,9 +482,19 @@ class DelegatedAgent:
         self.delegate_context = dict(delegate_context or {})
         self.child_guards: list[Guard] = []
 
-        # The tool-facing identity smolagents reads off a managed agent.
+        # The tool-facing identity smolagents reads off a managed agent. `name` and
+        # `description` are not enough: `_setup_managed_agents` also stamps `inputs` and
+        # `output_type` onto every managed agent, and those two are what the model-facing tool
+        # schema is built from. Swapping this proxy into an ALREADY-BUILT `managed_agents` dict
+        # therefore produced an agent-as-tool with no argument schema at all (minion run). They
+        # are mirrored from the wrapped agent when it carries them, and otherwise carry the same
+        # defaults smolagents itself stamps, so the proxy is invisible either way.
         self.name = agent.name
         self.description = agent.description
+        self.inputs = getattr(agent, "inputs", None) or {
+            "task": {"type": "string", "description": "Long detailed description of the task."}
+        }
+        self.output_type = getattr(agent, "output_type", None) or "string"
 
     # -- the delegation hook ------------------------------------------------
     def mint(self, task: str) -> Guard:

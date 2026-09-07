@@ -182,6 +182,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
@@ -389,7 +390,9 @@ def _authorize_v1(
                          "rather than evaluating ceilings against an unknown quantity")
         reg.record_denial(agent_name, tool_name, scope, decision)
         return _outcome(decision, on_denied)
-    decision = guard.check(scope, context=dict(context_fn(arguments)) if context_fn else {},
+    decision = guard.check(scope,
+                           context=dict(_safe_context(guard, context_fn, arguments,
+                                                      tool=tool_name, scope=scope)),
                            metered=metered, tool=tool_name, disposition=disposition)
     if decision:
         return ToolGuardrailFunctionOutput.allow(output_info=decision.to_dict())
@@ -493,7 +496,9 @@ def guarded_tool(
 
         snapshot = _snapshot_params(arguments)
         decision = guard.check(
-            scope, context=dict(context_fn(arguments)) if context_fn else {}, metered=metered,
+            scope, context=dict(_safe_context(guard, context_fn, arguments, tool=tool_name,
+                                              scope=scope)),
+            metered=metered,
             tool=tool_name, disposition=disposition, capture=Capture.WRAPPER_ASYNC,
             adapter=_ADAPTER_INFO, authorized_params=snapshot,
         )

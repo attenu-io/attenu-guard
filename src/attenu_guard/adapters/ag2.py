@@ -312,6 +312,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
@@ -480,7 +481,7 @@ class _Gate:
             arguments = event.serialized_arguments
         except Exception:
             arguments = {}
-        ctx = policy.context(arguments) if policy.context else {}
+        ctx = _safe_context(guard, policy.context, arguments, tool=name, scope=policy.scope)
         v2 = self.strict_single_hook and guard.schema_version == 2
         snapshot = _snapshot_params(arguments) if v2 else None
         extra = (

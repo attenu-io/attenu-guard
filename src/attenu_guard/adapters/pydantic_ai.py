@@ -154,6 +154,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(args: Mapping[str, Any]) -> Any:
@@ -321,7 +322,7 @@ def authorize_tool_call(
     if policy.scope is None:  # UNGUARDED
         return
 
-    context = dict(policy.context(args)) if policy.context is not None else {}
+    context = dict(_safe_context(guard, policy.context, args, tool=tool_name, scope=policy.scope))
     decision = guard.check(
         policy.scope, context=context, metered=policy.metered, tool=tool_name,
         disposition=policy.disposition,
@@ -354,7 +355,7 @@ def _authorize_v2(
     `adapter` names the hook point that observed the call: the two differ in what their wrapper
     capture actually encloses, so the ledger records which one it was."""
     snapshot = _snapshot_params(args)
-    context = dict(policy.context(args)) if policy.context is not None else {}
+    context = dict(_safe_context(guard, policy.context, args, tool=tool_name, scope=policy.scope))
     decision = guard.check(
         policy.scope, context=context, metered=policy.metered, tool=tool_name,
         disposition=policy.disposition, capture=Capture.WRAPPER_ASYNC, adapter=dict(adapter),

@@ -690,6 +690,27 @@ class Guard:
                 raise
             return self._attach_call_id(decision, call_id)
 
+    # ---- identity, not value ------------------------------------------
+    def __copy__(self) -> "Guard":
+        """A Guard is an IDENTITY, not a value: copying returns the same object.
+
+        A Guard names one node of one chain and writes to one append-only ledger. A copy that
+        forked either would be a second authority for the same principal, writing a second
+        history — the thing this library exists to make impossible. Returning `self` is the only
+        answer that keeps the node, the sequence counter and the hash chain single.
+
+        This is also what makes a Guard survivable in hosts that copy their tool objects.
+        `copy.deepcopy` of a guarded tool used to raise `TypeError: cannot pickle
+        'itertools.count' object` (the chain's sequence counter; the audit log's `RLock` is the
+        same class of problem), which crashed the host rather than the guard — reported from a
+        minion-agent run, whose tool wrapper deep-copies every tool.
+        """
+        return self
+
+    def __deepcopy__(self, memo) -> "Guard":
+        memo[id(self)] = self
+        return self
+
     def record_passthrough(self, tool: str, *, scope: str | None = None,
                            context: Mapping | None = None,
                            policy: str = Policy.UNLISTED) -> Decision:

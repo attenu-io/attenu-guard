@@ -207,6 +207,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(kwargs: Mapping[str, Any]) -> Any:
@@ -269,11 +270,11 @@ def guarded_tool(
     adapter_info = {"module": __name__, "version": __version__,
                     "hook_path": f"{__name__}.guarded_tool"}
 
-    def _context_for(kwargs: Dict[str, Any]) -> Mapping[str, Any]:
+    def _context_for(guard, kwargs: Dict[str, Any]) -> Mapping[str, Any]:
         if context is None:
             return {}
         if callable(context):
-            return context(kwargs)
+            return _safe_context(guard, context, kwargs, tool=tool_name, scope=scope)
         return context
 
     async def _guarded(ctx: Context, **kwargs):
@@ -292,7 +293,7 @@ def guarded_tool(
         extra = dict(capture=Capture.WRAPPER_ASYNC, adapter=adapter_info,
                     authorized_params=snapshot) if v2 else {}
         decision = guard.check(
-            scope, context=_context_for(kwargs), metered=metered, tool=tool_name,
+            scope, context=_context_for(guard, kwargs), metered=metered, tool=tool_name,
             disposition=disposition, **extra,
         )
         if not decision:

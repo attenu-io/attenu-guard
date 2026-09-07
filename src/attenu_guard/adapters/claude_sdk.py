@@ -251,6 +251,7 @@ _ADAPTER_INFO = {"module": __name__, "version": __version__, "hook_path": f"{__n
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -594,7 +595,8 @@ class DelegationGuardRegistry:
                                 disposition=Disposition.UNRESOLVED)
             return self._deny(tool_name, agent_id, msg)
 
-        ctx = policy.context(tool_input)   # evaluated exactly once -- never re-run for the commitment
+        ctx = _safe_context(guard, policy.context_fn, tool_input, tool=tool_name,
+                            scope=policy.scope)   # evaluated once -- never re-run for the commitment
         extra = dict(capture=Capture.FRAMEWORK_POST_HOOK, adapter=_ADAPTER_INFO,
                     authorized_params=raw_snapshot) if v2_bind else {}
         decision = guard.check(policy.scope, context=ctx,

@@ -49,6 +49,7 @@ Run: PYTHONPATH=src python3 tests/test_ledger_completeness.py
 """
 import re
 import sys
+import asyncio
 import threading
 import types
 import unittest
@@ -58,12 +59,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from attenu_guard import Authority, AuthorityError, Guard, Reason  # noqa: E402
+from attenu_guard import (  # noqa: E402
+    Authority, AuthorityDenied, AuthorityError, Guard, Reason,
+)
 from attenu_guard.wire import HS256TestSigner  # noqa: E402
 from attenu_guard.evidence import (  # noqa: E402
     LEDGER_FIELDS, denials, export_bundle, verify_bundle,
 )
-from attenu_guard.reasons import Capture, Disposition, Policy, ReasonCode  # noqa: E402
+from attenu_guard.reasons import (  # noqa: E402
+    BodyState, Capture, Disposition, Policy, ReasonCode,
+)
 
 ADAPTERS = ROOT / "src" / "attenu_guard" / "adapters"
 MIRRORED = ("langchain", "openhands", "astrbot")
@@ -595,6 +600,152 @@ class _FakeDelegateExecutor:
 
     def close(self):
         self.closed = True
+
+
+class GuardIsAnIdentity(unittest.TestCase):
+    """B10. Copying a Guard must not fork the ledger — and must not crash the host."""
+
+    def test_deepcopy_returns_the_same_guard_and_the_ledger_still_chains(self):
+        import copy
+
+        g = _root()
+        holder = {"tool": g, "other": [1, 2, 3]}
+        clone = copy.deepcopy(holder)                  # used to raise TypeError on itertools.count
+        self.assertIs(clone["tool"], g)
+        self.assertEqual(clone["other"], [1, 2, 3])
+        self.assertIsNot(clone["other"], holder["other"], "deepcopy stopped copying everything")
+        g.check("repo.read", tool="read_file")
+        entries = g.audit_log().entries
+        self.assertEqual([e["seq"] for e in entries], list(range(len(entries))))
+
+    def test_copy_returns_the_same_guard(self):
+        import copy
+
+        g = _root()
+        self.assertIs(copy.copy(g), g)
+
+
+class AsyncNodeAuthorizesEagerly(unittest.TestCase):
+    """B9. A guard whose enforcement depends on the caller awaiting is not a guard."""
+
+    def _node(self, guard, scope="denied.scope"):
+        from attenu_guard.adapters.langgraph import guard_node
+
+        @guard_node(guard, scope)
+        async def f():
+            return "ran"
+
+        return f
+
+    def test_an_unawaited_denied_call_raises_and_is_recorded(self):
+        g = Guard.issue("a", Authority(scopes=set(), ttl=60), chain_id="c", schema_version=2)
+        f = self._node(g)
+        with self.assertRaises(AuthorityDenied):
+            f()                                        # NOT awaited: the check must still run
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"]), ("deny", "scope_not_granted"))
+
+    def test_an_unawaited_allowed_call_still_writes_its_allow(self):
+        g = Guard.issue("a", Authority(scopes={"repo.read"}, ttl=60), chain_id="c",
+                        schema_version=2)
+        f = self._node(g, "repo.read")
+        coro = f()
+        self.addCleanup(coro.close)
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["scope"]), ("allow", "repo.read"))
+        self.assertEqual(entry["capture"], Capture.WRAPPER_ASYNC)
+
+    def test_awaiting_still_binds_the_outcome(self):
+        g = Guard.issue("a", Authority(scopes={"repo.read"}, ttl=60), chain_id="c",
+                        schema_version=2)
+        f = self._node(g, "repo.read")
+        self.assertEqual(asyncio.run(f()), "ran")
+        events = [e["event"] for e in g.audit_log().entries]
+        self.assertEqual(events[-2:], ["allow", "outcome"])
+        self.assertEqual(g.audit_log().entries[-1]["body_state"], BodyState.RETURNED)
+
+    def test_v1_is_unchanged(self):
+        g = Guard.issue("a", Authority(scopes=set(), ttl=60), chain_id="c")
+        with self.assertRaises(AuthorityDenied):
+            self._node(g)()
+        self.assertEqual(g.audit_log().entries[-1]["event"], "deny")
+
+
+class ContextFailureIsRecordedEverywhere(unittest.TestCase):
+    """B4, across every adapter. One helper, so no adapter can forget."""
+
+    #: adapters that call an operator context callable at gate time. openhands and astrbot
+    #: return a denial in their own idiom instead of raising, and are covered by their own tests.
+    ADAPTERS = ("a2a", "ag2", "agent_framework", "agno", "autogen", "camel", "claude_sdk",
+                "crewai", "haystack", "langchain", "langgraph", "llama_index", "openai_agents",
+                "pydantic_ai", "semantic_kernel", "smolagents")
+
+    def test_every_such_adapter_routes_its_context_call_through_the_helper(self):
+        bad = []
+        for name in self.ADAPTERS:
+            src = (ADAPTERS / f"{name}.py").read_text()
+            if "_safe_context(" not in src:
+                bad.append(f"{name}: calls a context function without the shared guard")
+            if "from ._context import" not in src:
+                bad.append(f"{name}: does not import the shared helper")
+        self.assertEqual(bad, [])
+
+    def test_no_adapter_calls_a_context_callable_bare(self):
+        # The shapes the bug had: `policy.context(...)`, `context_fn(...)`, `.context_for(...)`
+        # evaluated straight into `guard.check(...)`, with nothing catching a raise.
+        bare = re.compile(r"context=(?:dict\()?(?:policy\.)?context(?:_fn|_for)?\(")
+        offenders = []
+        for path in sorted(ADAPTERS.glob("*.py")):
+            if path.name.startswith("_"):
+                continue
+            for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                if bare.search(line):
+                    offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+        self.assertEqual(offenders, [])
+
+    def test_the_helper_records_a_deny_and_raises(self):
+        from attenu_guard.adapters import _context
+
+        g = _root()
+
+        def boom(_args):
+            raise RuntimeError("approval store unreachable")
+
+        with self.assertRaises(AuthorityDenied):
+            _context.evaluate(g, boom, {"q": 1}, tool="push", scope="repo.read")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"], entry["tool"], entry["scope"],
+                          entry["disposition"]),
+                         ("deny", ReasonCode.NO_AUTHORITY, "push", "repo.read",
+                          Disposition.UNRESOLVED))
+
+    def test_the_helper_is_transparent_when_nothing_fails(self):
+        from attenu_guard.adapters import _context
+
+        g = _root()
+        self.assertEqual(_context.evaluate(g, None), {})
+        self.assertEqual(_context.evaluate(g, {"rows": 5}), {"rows": 5})   # a literal mapping
+        self.assertEqual(_context.evaluate(g, lambda a: {"rows": a["n"]}, {"n": 7}), {"rows": 7})
+        self.assertEqual(len(g.audit_log().entries), 1, "a working context function wrote a row")
+
+
+class SmolagentsParity(unittest.TestCase):
+    """B11 and B12. Source-text: smolagents is not installed in the stdlib CI job."""
+
+    def test_install_exists_and_records_undeclared_tools(self):
+        src = (ADAPTERS / "smolagents.py").read_text()
+        self.assertIn("def install(", src, "smolagents has no installer")
+        block = src[src.index("class _UnlistedTool"):src.index("class DelegatedAgent")]
+        self.assertIn("record_passthrough(", block,
+                      "an undeclared smolagents tool still leaves no ledger entry")
+        self.assertIn("allow_unlisted", block + src[src.index("def install("):],
+                      "no incremental-rollout switch")
+
+    def test_delegated_agent_mirrors_the_whole_model_facing_schema(self):
+        src = (ADAPTERS / "smolagents.py").read_text()
+        block = src[src.index("class DelegatedAgent"):]
+        for field in ("self.name =", "self.description =", "self.inputs =", "self.output_type ="):
+            self.assertIn(field, block, f"DelegatedAgent does not mirror {field}")
 
 
 if __name__ == "__main__":

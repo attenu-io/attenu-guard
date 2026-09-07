@@ -103,6 +103,7 @@ from typing import Callable, Mapping, Optional
 from .. import AuthorityDenied, __version__
 from ..reasons import Capture, BodyState
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 __all__ = ["guard_node", "DelegatedToolNode", "add_guarded_node", "is_langgraph_available"]
 
@@ -206,7 +207,8 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
                         "hook_path": f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', resolved_tool)}"}
 
         def _authorize(args, kwargs, snapshot):
-            context: Mapping = context_fn(*args, **kwargs) if context_fn else {}
+            context: Mapping = _safe_context(guard, context_fn, *args, tool=resolved_tool,
+                                             scope=tool_scope, **kwargs)
             extra = dict(capture=capture, adapter=adapter_info, authorized_params=snapshot) if v2 else {}
             decision = guard.check(tool_scope, context=context, tool=resolved_tool,
                                    disposition=disposition, **extra)
@@ -215,13 +217,30 @@ def guard_node(guard, tool_scope: str, *, context_fn: Optional[Callable] = None,
             return decision
 
         if is_async_fn and v2:
+            # AUTHORIZE EAGERLY, in a SYNC wrapper, exactly as v1 does. Putting the check inside
+            # the coroutine body made it conditional on the caller awaiting: calling the node
+            # without awaiting it created a coroutine and returned — no check, no ledger row, no
+            # AuthorityDenied, and a denied scope looked allowed. A guard whose enforcement
+            # depends on the caller's politeness is not a guard. The decision is taken at CALL
+            # time; the outcome is still closed out from inside the coroutine, which is where the
+            # body actually runs, so execution binding is unaffected (`capture` is
+            # `wrapper_async` either way, `authorized_params` is committed before the body, and
+            # `record_outcome` still observes the real return/raise/cancel).
+            #
+            # A caller who never awaits the returned coroutine leaves a call authorized and
+            # unresolved — `complete()` reports it as pending, which is the honest state: it WAS
+            # authorized, and nothing observed it finish. That is strictly better than the
+            # previous behaviour, where the same code path recorded nothing at all.
             @functools.wraps(fn)
-            async def wrapped(*args, **kwargs):
+            def wrapped(*args, **kwargs):
                 snapshot = _snapshot_params(args, kwargs)
                 decision = _authorize(args, kwargs, snapshot)
+                return _run(decision, snapshot, fn(*args, **kwargs))
+
+            async def _run(decision, snapshot, coro):
                 start = time.monotonic()
                 try:
-                    result = await fn(*args, **kwargs)
+                    result = await coro
                 except asyncio.CancelledError:
                     # The wrapper stopped observing while the body may still run -- exactly
                     # spec's `abandoned`, not `raised`. Still re-raised: cancellation must

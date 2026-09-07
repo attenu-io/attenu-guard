@@ -237,6 +237,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
@@ -315,7 +316,8 @@ def guarded_tool_hook(
         )
         decision = guard.check(
             policy.scope,
-            context=policy.context_for(arguments),
+            context=_safe_context(guard, policy.context, arguments, tool=function_name,
+                                  scope=policy.scope),
             metered=policy.metered,
             tool=function_name,
             disposition=policy.disposition,

@@ -358,6 +358,7 @@ _ADAPTER_INFO = {
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(tool_input: Mapping[str, Any]) -> Any:
@@ -584,7 +585,8 @@ class CrewAIGuardBridge:
                 decision=decision,
             )
 
-        context = dict(policy.context_fn(args)) if policy.context_fn else {}
+        context = dict(_safe_context(guard, policy.context_fn, args, tool=tool_name,
+                                     scope=policy.scope))
         # STRICT MODE (opt-in, see __init__'s "strict_single_hook"): only then does this bridge
         # promise FRAMEWORK_POST_HOOK observation and stash a pending outcome. Otherwise (the
         # default), check() gets no capture/authorized_params at all, so a v2 guard stamps its

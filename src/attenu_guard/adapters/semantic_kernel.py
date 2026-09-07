@@ -222,6 +222,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 __all__ = [
@@ -554,7 +555,8 @@ def attach_guard(
                     authorized_params=snapshot) if v2 else {}
         decision = guard.check(
             policy.scope,
-            context=policy.context_for(context.arguments),
+            context=_safe_context(guard, policy.context, context.arguments,
+                                  tool=function.fully_qualified_name, scope=policy.scope),
             metered=policy.metered,
             tool=function.fully_qualified_name,
             disposition=policy.disposition,

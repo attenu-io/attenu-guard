@@ -167,6 +167,7 @@ from a2a.types.a2a_pb2 import AgentExtension, Message, Role, SendMessageRequest
 
 from attenu_guard import Authority, AuthorityDenied, AuthorityError, Guard, evidence, wire, __version__
 from attenu_guard.reasons import BodyState, Capture, Disposition
+from ._context import evaluate as _safe_context
 
 __all__ = [
     "EXTENSION_URI",
@@ -515,7 +516,7 @@ def guarded_tool(fn: Callable, *, scope: str,
         """Raise `AuthorityDenied` on denial; else return `(guard, call_id_or_None,
         snapshot_or_None)` -- the last two set only for an ALLOWED, v2 check()."""
         guard = require_guard()
-        ctx = dict(context_for(*args, **kwargs)) if context_for else {}
+        ctx = dict(_safe_context(guard, context_for, *args, tool=tool, scope=scope, **kwargs))
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None
         extra = (

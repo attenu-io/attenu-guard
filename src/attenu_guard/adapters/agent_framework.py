@@ -341,6 +341,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
@@ -491,7 +492,7 @@ class DelegationGuard(FunctionMiddleware):
             dict(capture=Capture.WRAPPER_ASYNC, adapter=_ADAPTER_INFO, authorized_params=snapshot)
             if v2 else {}
         )
-        ctx = policy.context(arguments) if policy.context else {}
+        ctx = _safe_context(guard, policy.context, arguments, tool=name, scope=policy.scope)
         decision = guard.check(
             policy.scope, context=ctx, tool=name, metered=policy.metered,
             disposition=policy.disposition, **extra,

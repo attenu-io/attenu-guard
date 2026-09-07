@@ -154,6 +154,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(args, kwargs) -> Any:
@@ -324,7 +325,8 @@ class GuardedFunctionTool(FunctionTool):
         `async_call` is authorizing.
         """
         guard = _resolve(self.guard)
-        context: Mapping = self.context_fn(*args, **kwargs) if self.context_fn else {}
+        context: Mapping = _safe_context(self.guard, self.context_fn, *args,
+                                         tool=self.tool_name, scope=self.scope, **kwargs)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None
         extra = (

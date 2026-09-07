@@ -108,6 +108,7 @@ def _elapsed_ms(started_at: float) -> int:
 
 
 from ._snapshot import freeze as _freeze
+from ._context import evaluate as _safe_context
 
 
 def _snapshot_params(arguments: Mapping[str, Any]) -> Any:
@@ -275,7 +276,7 @@ class GuardedWorkbench(StaticStreamWorkbench):
                 decision=None,
             ), None
 
-        context = policy.context(arguments) if policy.context else {}
+        context = _safe_context(guard, policy.context, arguments, tool=name, scope=policy.scope)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(arguments) if v2 else None
         extra = (
