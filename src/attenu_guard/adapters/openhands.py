@@ -407,6 +407,17 @@ class GuardedDelegation:
         worse: guarding on the read side means patching the `resolve_tool` name already bound
         into `openhands.sdk.agent.base`, and guarding nothing means a whole class of tool runs
         unrecorded. Narrow, reversible, and one seam.
+
+        KNOWN GAP — the SDK's BUILT-IN tools are not covered. `resolve_tool` falls back to
+        `BUILT_IN_TOOL_CLASSES` (`FinishTool`, `ThinkTool`, `InvokeSkillTool`, `SwitchLLMTool`,
+        `VisionInspectTool`) for any name that is not in `_REG`, so those five never pass
+        through this mapping and run un-gated and un-ledgered. Verified on openhands-sdk 1.44.1.
+        Seeding them into `_REG` would close it, and is deliberately NOT done here: the SDK
+        derives its own behaviour from `list_registered_tools()` — `openhands/tools/preset/
+        default.py` skips registering `FinishTool` when the name is present, and
+        `openhands/sdk/subagent/registry.py` validates a sub-agent's declared tools against that
+        same list — so seeding changes what a sub-agent is allowed to declare. That is a change
+        to the framework's own validation, not to this adapter, and it needs its own decision.
         """
         from openhands.sdk.tool import registry as _registry
 
