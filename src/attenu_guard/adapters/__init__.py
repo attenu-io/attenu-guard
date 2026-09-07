@@ -12,6 +12,13 @@ framework is only imported when YOU import its adapter:
 
 Available (see docs/INTEGRATIONS.md for hooks, versions and evidence):
 
+    openhands        ToolPolicy / GuardedDelegation — the OpenHands software-agent-sdk:
+                     ToolDefinition.set_executor + the SDK tool registry, so one install
+                     reaches sub-agent conversations too; `task` sub-agent delegation
+    astrbot          ToolPolicy / GuardedDelegation — AstrBot: a handler=None FunctionTool
+                     wrapper installed into the tool registry, so both branches of
+                     `_build_handoff_toolset` hand out guarded tools; handoff delegation
+                     via a BaseFunctionToolExecutor subclass
     langgraph        guard_node / DelegatedToolNode — hand-written LangGraph nodes
                      (importable with NO langgraph installed; lazy imports only)
     langchain        ToolPolicy / GuardedDelegation — LangGraph ToolNode(wrap_tool_call),

@@ -18,7 +18,7 @@ import attenu_guard.adapters as adapters_pkg  # noqa: E402
 ADAPTERS_DIR = Path(adapters_pkg.__path__[0])
 ADAPTER_MODULES = sorted(m.name for m in pkgutil.iter_modules([str(ADAPTERS_DIR)]) if not m.name.startswith("_"))
 # adapters that hold a tool -> policy MAP and therefore have an "undeclared tool" refusal path
-POLICY_MAP_ADAPTERS = {"ag2", "agent_framework", "agno", "autogen", "claude_sdk", "crewai", "google_adk", "langchain", "pydantic_ai", "semantic_kernel"}
+POLICY_MAP_ADAPTERS = {"ag2", "agent_framework", "astrbot", "agno", "autogen", "claude_sdk", "crewai", "google_adk", "langchain", "openhands", "pydantic_ai", "semantic_kernel"}
 
 
 class AdapterDispositionContract(unittest.TestCase):
