@@ -671,30 +671,6 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   sha256 matches ours and the repository's Rust checks are green on that commit. His stated boundary:
   independent reproduction of the released corpus at that pin; not verifier completeness, runtime
   correctness or certification.
-
-## Observer envelope vectors
-
-`envelopes/envelope_vectors_v1.json` is the third suite, and the narrowest.
-The token vectors pin what a delegation token means; the bundle vectors pin
-what the ledger of a run has to satisfy; these pin the one question neither
-can answer — **was this delegation event signed by something outside the
-process that wrote it?**
-
-An **observer envelope** is a witness's Ed25519 signature over the **identity**
-of one committed ledger entry, never over its contents, which the entry's own
-`hash` already covers. Envelopes travel beside the ledger in the bundle's
-top-level `envelopes` array. No entry changes, so a bundle without them stays
-valid exactly as it is today.
-
-An envelope is **never required**. An absent one is the status quo and changes
-nothing; every entry of a bundle without them reports `process-asserted`. A
-**present** one has to verify: a broken envelope lands in the same failure list
-as the chain-level checks and the bundle rejects.
-
-Per entry — the entry, not the node, because a node carries several entries and
-an `allow` never creates a node of its own — a verifier reports one of two
-states:
-
 - **Xuebin Ma (@XuebinMa), agent-guard, 2026-09-07** — the same Rust verifier against
   **`envelope_vectors_v1.2`** (nineteen cases, 197,346 bytes, sha256
   `a8be5ff764a86122ca09e94340416b7169531bf5d0cc76a0b1fc87f8272eb16e`, checked before scoring):
@@ -720,6 +696,30 @@ states:
   two facts a bundle does not separate — a hop nobody undertook to cover, and a
   hop a witness undertook to cover and never did. v1 takes the weaker reading
   and stops there.
+
+## Observer envelope vectors
+
+`envelopes/envelope_vectors_v1.json` is the third suite, and the narrowest.
+The token vectors pin what a delegation token means; the bundle vectors pin
+what the ledger of a run has to satisfy; these pin the one question neither
+can answer — **was this delegation event signed by something outside the
+process that wrote it?**
+
+An **observer envelope** is a witness's Ed25519 signature over the **identity**
+of one committed ledger entry, never over its contents, which the entry's own
+`hash` already covers. Envelopes travel beside the ledger in the bundle's
+top-level `envelopes` array. No entry changes, so a bundle without them stays
+valid exactly as it is today.
+
+An envelope is **never required**. An absent one is the status quo and changes
+nothing; every entry of a bundle without them reports `process-asserted`. A
+**present** one has to verify: a broken envelope lands in the same failure list
+as the chain-level checks and the bundle rejects.
+
+Per entry — the entry, not the node, because a node carries several entries and
+an `allow` never creates a node of its own — a verifier reports one of two
+states:
+
 
 `observed.result` never changes the state. A verifying envelope is
 witness-signed whatever the witness concluded, and the report line prints the
