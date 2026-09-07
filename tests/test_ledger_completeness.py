@@ -372,10 +372,10 @@ class WitnessIsPerCallNotPerTool(unittest.TestCase):
                         schema_version=2)
         guarded = ab.GuardedDelegation(g, tools={"read_file": ab.ToolPolicy("repo.read")})
 
-        started = asyncio.Event()
+        started_box: list = []            # the Event is created under the running loop (py3.9)
 
         async def slow_body(_event, **kwargs):
-            started.set()
+            started_box[0].set()
             await asyncio.sleep(0.05)          # A's body genuinely runs, and is still running
             return "ok"
 
@@ -388,11 +388,12 @@ class WitnessIsPerCallNotPerTool(unittest.TestCase):
         async def run_b():
             # B is refused by a layer BETWEEN the gate and the body — AstrBot's own
             # `_PermissionGuardedTool` does exactly this. The body never runs.
-            await started.wait()
+            await started_box[0].wait()
             return await guarded.call("read_file", {}, None,
                                       lambda: "error: Permission denied.", tool=witness)
 
         async def main():
+            started_box.append(asyncio.Event())
             return await asyncio.gather(run_a(), run_b())
 
         asyncio.run(main())

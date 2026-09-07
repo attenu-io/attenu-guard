@@ -148,7 +148,7 @@ def test_a_body_refused_by_astrbots_own_permission_check_carries_the_receipt(man
     result = asyncio.run(guarded.call("echo_note", {}, None,
                                       lambda: "error: Permission denied.", tool=inner))
     assert result == "error: Permission denied."
-    assert witness.ran is False
+    # the witness keeps no per-tool state (it is per-call, on a ContextVar): the receipt below is the proof
 
     allow, outcome = g.audit_log().entries[-2:]
     assert (allow["event"], allow["scope"]) == ("allow", "chat.note")
@@ -165,8 +165,12 @@ def test_a_body_that_runs_records_no_receipt(manager):
     witness = _BodyWitness(_fn_tool("echo_note"))
 
     def body():
-        witness.ran = True
+        witness.mark_ran()                 # what `_BodyWitness.call` does when the real body is reached
         return "noted"
 
     asyncio.run(guarded.call("echo_note", {}, None, body, tool=witness))
-    assert [e["event"] for e in g.audit_log().entries][-1] == "allow"
+    entries = g.audit_log().entries
+    last = entries[-1]
+    assert (last["event"], last["scope"]) == ("allow", "chat.note"), "a body that ran ends on its allow"
+    assert not any(e["event"] == "outcome" and "receipt" in e for e in entries), \
+        "a body that ran carries no refusal receipt"
