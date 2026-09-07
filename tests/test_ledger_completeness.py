@@ -52,6 +52,7 @@ import sys
 import asyncio
 import threading
 import types
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -811,6 +812,60 @@ class InnerRefusalIsOnTheEntry(unittest.TestCase):
         gd = ab.GuardedDelegation(g, tools={}, allow_unlisted=True)
         asyncio.run(gd.call("plain", {}, None, lambda: "ok", tool=_Tool("plain")))
         self.assertEqual(g.audit_log().entries[-1]["event"], "allow")
+
+    def test_the_main_agent_toolset_as_astrbot_builds_it_carries_the_receipt(self):
+        """The construction the battery traced, built through the adapter's own code.
+
+        `install()` sweeps `func_list`, then `get_full_tool_set()` wraps each entry in AstrBot's
+        `_PermissionGuardedTool` and `_reassert_outermost` re-nests it, giving
+        `GuardedTool -> _PermissionGuardedTool -> _BodyWitness -> raw` — verified against a real
+        AstrBot run. The tool here is DECLARED, which is what the earlier version got wrong: the
+        receipt was bound to `gate.decision`, set only in strict mode, so on a normally-checked
+        call there was no call_id to bind to and `_record_inner_refusal` gave up silently. Only
+        the un-gated passthrough path — the one the first test happened to use — ever recorded.
+        """
+        from attenu_guard.adapters import astrbot as ab
+
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        chain_id="c", schema_version=2)
+        gd = ab.GuardedDelegation(g, tools={"secret_delete_all": ab.ToolPolicy("repo.read")})
+        raw = _Tool("secret_delete_all")
+        mgr = _PermissionManager([raw])
+        with mock.patch.object(ab, "GuardedTool", _FakeGuarded):
+            gd.install(mgr)
+            handed = mgr.get_full_tool_set().tools[0]
+
+        self.assertEqual(_chain(handed),
+                         ["_FakeGuarded", "_PermissionLike", "_BodyWitness", "_Tool"])
+
+        # AstrBot's permission check refuses: a value comes back, the body never runs.
+        result = asyncio.run(gd.call("secret_delete_all", {}, None,
+                                     lambda: "error: Permission denied.",
+                                     tool=handed._wrapped))
+        self.assertEqual(result, "error: Permission denied.")
+        allow, outcome = g.audit_log().entries[-2:]
+        self.assertEqual((allow["event"], allow["scope"]), ("allow", "repo.read"))
+        self.assertIsNone(allow.get("policy"), "this must be the DECLARED path, not a passthrough")
+        self.assertEqual(outcome["event"], "outcome")
+        self.assertEqual(outcome["call_id"], allow["call_id"])
+        self.assertEqual(outcome["receipt"]["type"], "framework_refusal")
+
+
+def _chain(tool, depth=6):
+    out = []
+    while tool is not None and len(out) < depth:
+        out.append(type(tool).__name__)
+        tool = getattr(tool, "_wrapped", None)
+    return out
+
+
+class _PermissionManager(_Manager):
+    """`get_full_tool_set()` as AstrBot's does it: every entry wrapped in its own permission
+    proxy, around whatever this adapter put in `func_list`."""
+
+    def get_full_tool_set(self):
+        return SimpleNamespace(tools=[_PermissionLike(t, self) for t in self.func_list])
+
 
 
 class ContextHelperGetsTheResolvedGuard(unittest.TestCase):

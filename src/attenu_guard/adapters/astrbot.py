@@ -453,7 +453,11 @@ class GuardedDelegation:
         """
         entries = getattr(tool_set, "tools", None)
         if entries is None:
-            return tool_set
+            # AstrBot returns a `ToolSet`; a deployment that hands back a bare sequence is
+            # re-nested just the same rather than silently skipped.
+            if not isinstance(tool_set, list):
+                return tool_set
+            entries = tool_set
         items = list(entries.values()) if isinstance(entries, dict) else list(entries)
         for index, tool in enumerate(items):
             inner = getattr(tool, "_wrapped", None)
@@ -574,7 +578,7 @@ class GuardedDelegation:
         Silent on a v1 chain, which has no outcome event, and on any call this gate did not get a
         `call_id` for. Never raises into the caller's path: a missing outcome is a gap in the
         record, not a reason to fail a call that already happened."""
-        decision = gate.decision or gate.passthrough
+        decision = gate.decision or gate.authorized or gate.passthrough
         guard = gate.guard or self.active_guard()
         call_id = getattr(decision, "call_id", None)
         if call_id is None or guard.schema_version != 2:
@@ -618,6 +622,9 @@ class GuardedDelegation:
         # An un-gated passthrough's own Decision (`Guard.record_passthrough`), kept so an inner
         # layer's refusal can still be bound to the entry that recorded the call.
         passthrough: Optional[Decision] = None
+        # The `guard.check()` Decision for a normally-authorized call, kept unconditionally —
+        # `decision` above is set only in strict mode. Same purpose as `passthrough`.
+        authorized: Optional[Decision] = None
 
     def _policy_for(self, name: str, tool: Any = None):
         """The declared policy for this call, and the name its MCP server published (or None).
@@ -727,7 +734,14 @@ class GuardedDelegation:
         )
         if not decision:
             return self._Gate(denial=decision)
-        return self._Gate(decision=decision if v2 else None, guard=guard, snapshot=snapshot)
+        # `decision` drives execution binding and is set only in strict mode (v2); `authorized`
+        # is the SAME Decision kept unconditionally, because an inner layer's refusal has to be
+        # bound to the entry that recorded the call whether or not this adapter also promised to
+        # observe the body. Keeping only the strict one is why the receipt appeared on the
+        # passthrough path and nowhere else: on a normally-checked call there was nothing with a
+        # call_id to bind to, so `_record_inner_refusal` silently gave up.
+        return self._Gate(decision=decision if v2 else None, authorized=decision,
+                          guard=guard, snapshot=snapshot)
 
     def _gate_delegation(self, guard: Guard, subagent: str, task: str) -> "GuardedDelegation._Gate":
         requested = self.subagents.get(subagent)
