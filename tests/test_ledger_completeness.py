@@ -337,6 +337,92 @@ class PolicyIsValidatedBeforeItExcusesContainment(unittest.TestCase):
                                  f"policy on a {event!r} entry was accepted")
 
 
+class WitnessIsPerCallNotPerTool(unittest.TestCase):
+    """The AstrBot gate's "did the body actually run?" flag is state on the shared tool object.
+
+    `_BodyWitness` is built ONCE per tool, at install time, and `GuardedDelegation.call` does
+    `witness.ran = False` -> await the body -> `if not witness.ran: record a refusal receipt`.
+    AstrBot is a chat bot: two conversations, or one model turn with parallel tool calls, invoke
+    the SAME tool object concurrently on the same loop. The flag then belongs to whichever call
+    wrote it last, and the receipt says something untrue about a tamper-evident ledger in both
+    directions — a refused call reported as if its body ran, or a call that ran reported as
+    refused.
+
+    A lock cannot fix it: the flag has the wrong LIFETIME, not the wrong guard. It has to be per
+    invocation."""
+
+    def _adapter(self):
+        import importlib
+        return importlib.import_module("attenu_guard.adapters.astrbot")
+
+    def _tool(self, ab, name, body):
+        # `handler` is the first branch `_invoke_tool` takes, and the only one that does not
+        # import AstrBot itself — the adapter is exercised, the framework is not needed.
+        tool = SimpleNamespace(name=name, description="", parameters={},
+                               active=True, handler=body or (lambda _e, **k: "ok"))
+        return ab._BodyWitness(tool)
+
+    def _receipts(self, guard):
+        return [e.get("receipt", {}).get("type")
+                for e in guard.audit_log().entries if e["event"] == "outcome"]
+
+    def test_a_refused_body_is_still_reported_when_another_call_ran_concurrently(self):
+        ab = self._adapter()
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        schema_version=2)
+        guarded = ab.GuardedDelegation(g, tools={"read_file": ab.ToolPolicy("repo.read")})
+
+        started = asyncio.Event()
+
+        async def slow_body(_event, **kwargs):
+            started.set()
+            await asyncio.sleep(0.05)          # A's body genuinely runs, and is still running
+            return "ok"
+
+        witness = self._tool(ab, "read_file", slow_body)
+
+        async def run_a():
+            return await guarded.call("read_file", {}, None,
+                                      lambda: witness.call(None), tool=witness)
+
+        async def run_b():
+            # B is refused by a layer BETWEEN the gate and the body — AstrBot's own
+            # `_PermissionGuardedTool` does exactly this. The body never runs.
+            await started.wait()
+            return await guarded.call("read_file", {}, None,
+                                      lambda: "error: Permission denied.", tool=witness)
+
+        async def main():
+            return await asyncio.gather(run_a(), run_b())
+
+        asyncio.run(main())
+        receipts = self._receipts(g)
+        self.assertIn("framework_refusal", receipts,
+                      "the refused call left no refusal receipt: a concurrent call's body "
+                      "cleared the shared flag")
+        self.assertEqual(receipts.count("framework_refusal"), 1,
+                         "exactly one of the two calls was refused")
+
+    def test_strict_mode_does_not_record_a_refused_body_as_returned(self):
+        """In strict mode `_run` closes the outcome BEFORE the witness is consulted, so the
+        refusal receipt is dropped by a swallowed DuplicateOutcomeError and the ledger keeps an
+        `outcome/returned` carrying `invoked_params` — an affirmative claim that the body was
+        invoked with those arguments, which is the claim execution binding exists to make true."""
+        ab = self._adapter()
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                        schema_version=2)
+        guarded = ab.GuardedDelegation(g, tools={"read_file": ab.ToolPolicy("repo.read")},
+                                       strict_single_hook=True)
+        witness = self._tool(ab, "read_file", None)
+        asyncio.run(guarded.call("read_file", {"path": "x"}, None,
+                                 lambda: "error: Permission denied.", tool=witness))
+        outcome = [e for e in g.audit_log().entries if e["event"] == "outcome"][-1]
+        self.assertEqual(outcome.get("receipt", {}).get("type"), "framework_refusal",
+                         "strict mode recorded a refused body as an ordinary return")
+        self.assertNotIn("invoked_params_hash", outcome,
+                         "the body never ran, so nothing was invoked with those arguments")
+
+
 class RefusedDelegationIsADeny(unittest.TestCase):
     def test_reason_code_is_named(self):
         self.assertEqual(ReasonCode.DELEGATION_REFUSED, "delegation_refused")
@@ -1038,7 +1124,7 @@ class InnerRefusalIsOnTheEntry(unittest.TestCase):
         witness = ab._BodyWitness(_Tool("echo_note"))
 
         def body():                                         # the real body IS reached this time
-            witness.ran = True
+            witness.mark_ran()                              # what `_BodyWitness.call` does
             return "noted"
 
         asyncio.run(gd.call("echo_note", {}, None, body, tool=_PermissionLike(witness, None)))

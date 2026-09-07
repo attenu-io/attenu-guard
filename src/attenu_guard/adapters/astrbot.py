@@ -177,6 +177,22 @@ _ACTIVE_GUARD: contextvars.ContextVar[Optional[Guard]] = contextvars.ContextVar(
     "attenu_guard_active_astrbot", default=None
 )
 
+# Whether the body of the call CURRENTLY being gated actually ran. A list, set by
+# `GuardedDelegation.call` and appended to by `_BodyWitness.call`.
+#
+# This used to be a `ran` flag on the `_BodyWitness` itself, and a witness is built ONCE per
+# tool, at install time — so the flag was per-TOOL state answering a per-CALL question. AstrBot
+# is a chat bot: two conversations, or one model turn with parallel tool calls, invoke the same
+# tool object concurrently on the same loop. `call()` reset the flag, awaited the body, and read
+# whatever the LAST writer left, so the refusal receipt could be dropped for a call that was
+# refused or written for a call that ran. Either way the ledger stated something untrue, which
+# is worse than the gap the witness was added to close. A lock would not have helped: the flag
+# had the wrong lifetime, not the wrong guard. A ContextVar is per-task, so concurrent calls on
+# one tool each observe their own body and nothing is shared.
+_BODY_RAN: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar(
+    "attenu_guard_body_ran_astrbot", default=None
+)
+
 
 def current_guard() -> Optional[Guard]:
     """The Guard currently in force, or None outside any delegation."""
@@ -555,12 +571,20 @@ class GuardedDelegation:
         gate = self._gate(tool_name, args, run_context, tool)
         if gate.denial is not None:
             return self._deny(gate.denial)
-        witness = _find_witness(tool)
-        if witness is not None:
-            witness.ran = False
+        # One list per invocation, not one flag per tool: see `_BODY_RAN`. `None` means this
+        # call has no witness in it, so nothing observed the body and nothing is claimed.
+        marker: Optional[list] = [] if _find_witness(tool) is not None else None
+        token = _BODY_RAN.set(marker)
         started = time.monotonic()
-        result = await self._run(gate, inner)
-        if witness is not None and not witness.ran:
+        try:
+            result = await self._run(gate, inner, body_ran=marker)
+        finally:
+            _BODY_RAN.reset(token)
+        # Strict mode closes the outcome inside `_run`, carrying the receipt there — writing a
+        # second one here would be a `DuplicateOutcomeError`, and swallowing it (which is what
+        # this did) left an `outcome/returned` with `invoked_params` standing for a body that
+        # never ran.
+        if marker is not None and not marker and gate.decision is None:
             self._record_inner_refusal(gate, tool_name, result, _elapsed_ms(started))
         return result
 
@@ -583,18 +607,16 @@ class GuardedDelegation:
         call_id = getattr(decision, "call_id", None)
         if call_id is None or guard.schema_version != 2:
             return
-        text = result if isinstance(result, str) else repr(result)
         try:
             guard.record_outcome(
                 call_id, BodyState.RETURNED, duration_ms=duration_ms,
-                receipt={"type": "framework_refusal",
-                         "ref": "astrbot:_PermissionGuardedTool",
-                         "digest": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()})
+                receipt=_refusal_receipt(result))
         except Exception:                  # already outcomed, or a chain that will not take it
             return
 
     # -- execution binding (0.9.0): runs the body and closes out the outcome, v2 only ----
-    async def _run(self, gate: "GuardedDelegation._Gate", call: Callable[[], Any]) -> Any:
+    async def _run(self, gate: "GuardedDelegation._Gate", call: Callable[[], Any],
+                   *, body_ran: Optional[list] = None) -> Any:
         if gate.decision is None:
             return await _await_maybe(call())
         start = time.monotonic()
@@ -606,6 +628,14 @@ class GuardedDelegation:
                                       invoked_params=gate.snapshot,
                                       duration_ms=_elapsed_ms(start))
             raise
+        if body_ran is not None and not body_ran:
+            # A witness was in place and the body never reached it: something nested between
+            # this gate and the tool refused. The ONE outcome this call gets says so, and it
+            # does NOT carry `invoked_params` — nothing was invoked with those arguments.
+            gate.guard.record_outcome(gate.decision.call_id, BodyState.RETURNED,
+                                      duration_ms=_elapsed_ms(start),
+                                      receipt=_refusal_receipt(result))
+            return result
         gate.guard.record_outcome(gate.decision.call_id, BodyState.RETURNED,
                                   invoked_params=gate.snapshot,
                                   duration_ms=_elapsed_ms(start))
@@ -853,18 +883,36 @@ class _BodyWitness:
         self.parameters = getattr(tool, "parameters", {}) or {}
         self.handler = None                # force the executor through call(), as the layers do
         self.active = getattr(tool, "active", True)
-        self.ran = False
 
     @property
     def wrapped(self) -> Any:
         return self._wrapped
 
+    def mark_ran(self) -> None:
+        """Record that the body of the call currently being gated was reached.
+
+        On `_BODY_RAN` (a per-invocation list), never on `self` — a witness is built once per
+        TOOL and would otherwise be answering a per-CALL question with shared state."""
+        marker = _BODY_RAN.get()
+        if marker is not None:
+            marker.append(True)
+
     async def call(self, context: Any, **kwargs: Any) -> Any:
-        self.ran = True
+        self.mark_ran()
         return await _await_maybe(_invoke_tool(self._wrapped, context, **kwargs))
 
     def __getattr__(self, item: str) -> Any:
         return getattr(self.__dict__["_wrapped"], item)
+
+
+def _refusal_receipt(result: Any) -> dict:
+    """The spec's `receipt` slot, naming a refusal that happened BELOW this gate and committing
+    to the text it returned by digest without logging it. One builder, so the two places that
+    write this outcome (strict mode inside `_run`, everything else in `call`) cannot drift."""
+    text = result if isinstance(result, str) else repr(result)
+    return {"type": "framework_refusal",
+            "ref": "astrbot:_PermissionGuardedTool",
+            "digest": hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()}
 
 
 def _with_witness(tool: Any) -> Any:
