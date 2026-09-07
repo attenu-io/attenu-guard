@@ -84,10 +84,22 @@ class ExemptToolsAreRecorded(unittest.TestCase):
 
 @unittest.skipIf(DelegationGuardPlugin is None, "google-adk is not installed")
 class CallbackFallback(unittest.TestCase):
-    """B13. The hook points ADK has had since 0.x, driven exactly as ADK drives them."""
+    """B13 / B13b. The hook points ADK 0.x has, driven the way ADK 0.3.0 actually drives them.
+
+    This stub is the point of the test, so it mimics 0.3.0 exactly and refuses to be generous:
+
+      * it CALLS the callback and never awaits it (`base_agent.py:261`,
+        `functions.py:156-160` — nothing in 0.3.0 checks `isawaitable`);
+      * it uses the return value directly, treating any truthy value as "skip the tool body"
+        (`if not function_response:`).
+
+    A coroutine is truthy, so an async callback fails these tests the same way it failed on the
+    real 0.3.0: every tool body skipped, the coroutine handed back as the tool result, nothing
+    authorized and nothing recorded — failing open on the trail while looking like it worked.
+    """
 
     class _Agent:
-        """The per-agent callback surface, as ADK 0.x exposes it: four attributes, positional
+        """The per-agent callback surface as ADK 0.x exposes it: four attributes, positional
         calls, no `agent` argument."""
 
         def __init__(self, name, sub_agents=(), tools=()):
@@ -99,11 +111,44 @@ class CallbackFallback(unittest.TestCase):
             self.before_tool_callback = None
             self.after_tool_callback = None
 
+    @staticmethod
+    def _first(hook):
+        return hook[0] if isinstance(hook, list) else hook
+
+    def _fire(self, hook, *args):
+        """Call it as ADK 0.3.0 does — synchronously — and refuse a coroutine outright."""
+        result = self._first(hook)(*args)
+        self.assertFalse(
+            asyncio.iscoroutine(result),
+            "the callback returned a coroutine; ADK 0.3.0 never awaits one, and would treat it "
+            "as truthy — skipping the tool body and recording nothing")
+        return result
+
+    def _run_tool(self, agent, tool, args, tool_context, body):
+        """ADK 0.3.0's own dispatch, reproduced: `functions.py:156-160`."""
+        function_response = self._fire(agent.before_tool_callback, tool, args, tool_context)
+        if not function_response:                       # falsy => the tool actually runs
+            function_response = body()
+            if agent.after_tool_callback is not None:
+                self._fire(agent.after_tool_callback, tool, args, tool_context, function_response)
+        return function_response
+
     def _plugin(self, guard, **kw):
-        return DelegationGuardPlugin(guard, delegations={"billing": Authority(scopes={"orders.read"}, ttl=60)},
-                                     tools={"lookup_order": ToolAuthority("orders.read"),
-                                            "refund": ToolAuthority("payments.write")},
-                                     root_agent_name="root_agent", **kw)
+        return DelegationGuardPlugin(
+            guard,
+            delegations={"billing": Authority(scopes={"orders.read"}, ttl=60)},
+            tools={"lookup_order": ToolAuthority("orders.read"),
+                   "refund": ToolAuthority("payments.write")},
+            root_agent_name="root_agent", **kw)
+
+    def test_no_bound_callback_is_a_coroutine_function(self):
+        g = _root()
+        root = self._Agent("root_agent")
+        self._plugin(g).attach(root)
+        for attr in ("before_agent_callback", "after_agent_callback",
+                     "before_tool_callback", "after_tool_callback"):
+            self.assertFalse(asyncio.iscoroutinefunction(self._first(getattr(root, attr))),
+                             f"{attr} is async; ADK 0.x would never await it")
 
     def test_attach_walks_the_tree_and_binds_all_four_hooks(self):
         g = _root()
@@ -118,39 +163,76 @@ class CallbackFallback(unittest.TestCase):
                          "before_tool_callback", "after_tool_callback"):
                 self.assertIsNotNone(getattr(agent, attr), f"{agent.name}.{attr} not bound")
 
-    def test_the_bound_callbacks_authorize_and_record_exactly_as_the_plugin_does(self):
+    def test_the_agent_hooks_return_none_so_adk_does_not_put_a_value_in_an_event(self):
+        # `base_agent.py:261` puts a non-None return straight into `Event(content=...)`; anything
+        # but None there is a pydantic ValidationError on 0.3.0.
         g = _root()
         root = self._Agent("root_agent")
         self._plugin(g).attach(root)
+        self.assertIsNone(self._fire(root.before_agent_callback, _tool_context("root_agent")))
+        self.assertIsNone(self._fire(root.after_agent_callback, _tool_context("root_agent")))
 
-        # ADK 0.x calls these positionally, and awaits an awaitable result.
-        asyncio.run(root.before_agent_callback(_tool_context("root_agent")))
-        allowed = asyncio.run(root.before_tool_callback(
-            _tool("lookup_order"), {}, _tool_context("root_agent")))
-        self.assertIsNone(allowed, "an authorized call must not be short-circuited")
+    def test_an_allowed_tool_runs_its_body_and_is_recorded(self):
+        g = _root()
+        root = self._Agent("root_agent")
+        self._plugin(g).attach(root)
+        ran = []
+        out = self._run_tool(root, _tool("lookup_order"), {}, _tool_context("root_agent"),
+                             lambda: ran.append(1) or {"ok": True})
+        self.assertEqual(ran, [1], "the tool body was skipped for an AUTHORIZED call")
+        self.assertEqual(out, {"ok": True})
         self.assertEqual(g.audit_log().entries[-1]["scope"], "orders.read")
 
-        denied = asyncio.run(root.before_tool_callback(
-            _tool("refund"), {"amount": 10}, _tool_context("root_agent")))
-        self.assertIsInstance(denied, dict, "a denial must short-circuit the tool body")
+    def test_a_denied_tool_is_short_circuited_and_recorded(self):
+        g = _root()
+        root = self._Agent("root_agent")
+        self._plugin(g).attach(root)
+        ran = []
+        out = self._run_tool(root, _tool("refund"), {"amount": 10}, _tool_context("root_agent"),
+                             lambda: ran.append(1) or {"ok": True})
+        self.assertEqual(ran, [], "a DENIED tool's body ran")
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out.get("error"), "authority_denied")
         entry = g.audit_log().entries[-1]
         self.assertEqual((entry["event"], entry["tool"], entry["reason"]),
                          ("deny", "refund", "scope_not_granted"))
+
+    def test_an_exempt_tool_runs_and_is_recorded_as_an_unlisted_passthrough(self):
+        # B14 evidence on this path, not only through the plugin surface.
+        g = _root()
+        root = self._Agent("root_agent")
+        self._plugin(g, exempt_tools=["health_check"]).attach(root)
+        ran = []
+        self._run_tool(root, _tool("health_check"), {}, _tool_context("root_agent"),
+                       lambda: ran.append(1) or {"ok": True})
+        self.assertEqual(ran, [1], "an exempt tool must still run")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["tool"], entry["policy"]),
+                         ("allow", "health_check", Policy.UNLISTED))
+
+    def test_an_undeclared_tool_is_denied_on_this_path_too(self):
+        g = _root()
+        root = self._Agent("root_agent")
+        self._plugin(g).attach(root)
+        ran = []
+        self._run_tool(root, _tool("integration_push"), {}, _tool_context("root_agent"),
+                       lambda: ran.append(1) or {"ok": True})
+        self.assertEqual(ran, [])
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"]), ("deny", "scope_not_granted"))
 
     def test_an_existing_callback_is_kept_and_ours_runs_first(self):
         g = _root()
         root = self._Agent("root_agent")
         marker = []
-
-        async def theirs(*a, **k):
-            marker.append("theirs")
-
-        root.before_tool_callback = theirs
+        root.before_tool_callback = lambda *a, **k: marker.append("theirs")
         self._plugin(g).attach(root)
         self.assertIsInstance(root.before_tool_callback, list)
-        self.assertIs(root.before_tool_callback[1], theirs, "the project's own hook was dropped")
-        asyncio.run(root.before_tool_callback[0](
-            _tool("lookup_order"), {}, _tool_context("root_agent")))
+        self.assertIs(root.before_tool_callback[1].__func__ if hasattr(
+            root.before_tool_callback[1], "__func__") else root.before_tool_callback[1],
+            root.before_tool_callback[1], "the project's own hook was dropped")
+        self._fire(root.before_tool_callback, _tool("lookup_order"), {},
+                   _tool_context("root_agent"))
         self.assertEqual(g.audit_log().entries[-1]["scope"], "orders.read")
 
     def test_attach_is_idempotent(self):

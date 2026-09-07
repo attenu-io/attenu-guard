@@ -449,8 +449,11 @@ class DelegationGuardPlugin(BasePlugin):
 
         gives the same two hook points, the same authorization, and the same ledger. The
         per-agent signatures are positional and carry no `agent` argument, so each binding is a
-        closure over the agent it was attached to; ADK awaits an awaitable callback result on
-        both paths (`inspect.isawaitable`), so these stay async exactly like the plugin methods.
+        closure over the agent it was attached to, and every binding is a PLAIN FUNCTION: ADK
+        0.3.0 never awaits a callback result — it uses the return value directly, and treats a
+        truthy one as "skip the tool body" — so an async callback there would skip every body and
+        record nothing. See `_on_before_agent` for the detail. Sync returns are correct on 1.x and
+        2.x as well, so the same functions are bound on every version.
 
         Existing callbacks are NOT displaced: an attribute already holding a callable becomes a
         list with this adapter's first, so a project's own hook still runs. This adapter's own
@@ -496,41 +499,45 @@ class DelegationGuardPlugin(BasePlugin):
                         stack.append(inner)
         return covered
 
-    # The four per-agent adapters. Each one normalizes ADK's positional callback signature onto
-    # the keyword-only plugin methods above, so there is exactly ONE implementation of each hook.
+    # The per-agent adapters. PLAIN FUNCTIONS, not coroutines, and that is the whole point:
+    # ADK 0.3.0 never awaits a callback result. `base_agent.py:261` calls
+    # `before_agent_callback(...)` and puts the return straight into an `Event`, and
+    # `functions.py:156-160` does `function_response = agent.before_tool_callback(...)` then
+    # `if not function_response:` before calling the tool. A coroutine is truthy, so an async
+    # callback there would skip EVERY tool body, hand the coroutine back as the tool result, and
+    # authorize nothing while recording nothing — failing open on the audit trail while looking
+    # like it worked. (An earlier revision of this file bound async callbacks and asserted ADK
+    # awaits them; that is true on 1.x/2.x and false on 0.x, which is precisely the range
+    # `attach()` exists for. Verified against a real google-adk 0.3.0, not reasoned about.)
+    #
+    # Sync is also correct on 1.x/2.x, where a non-awaitable return is used as-is, so `attach()`
+    # binds the same plain functions on every version.
     def _on_before_agent(self, agent: Any) -> Callable:
-        async def before_agent(callback_context: Any = None, **_kw: Any):
-            return await self.before_agent_callback(agent=agent, callback_context=callback_context)
+        def before_agent(callback_context: Any = None, **_kw: Any):
+            return self._before_agent_sync(agent, callback_context)
 
         return before_agent
 
     def _on_after_agent(self, agent: Any) -> Callable:
-        async def after_agent(callback_context: Any = None, **_kw: Any):
-            return await self.after_agent_callback(agent=agent, callback_context=callback_context)
+        def after_agent(callback_context: Any = None, **_kw: Any):
+            return self._after_agent_sync(agent, callback_context)
 
         return after_agent
 
-    async def _on_before_tool(self, tool: Any = None, args: Any = None,
-                              tool_context: Any = None, **_kw: Any):
-        return await self.before_tool_callback(
-            tool=tool, tool_args=dict(args or {}), tool_context=tool_context)
+    def _on_before_tool(self, tool: Any = None, args: Any = None, tool_context: Any = None,
+                        **_kw: Any):
+        return self._before_tool_sync(tool, dict(args or {}), tool_context)
 
-    async def _on_after_tool(self, tool: Any = None, args: Any = None, tool_context: Any = None,
-                             tool_response: Any = None, **_kw: Any):
-        return await self.after_tool_callback(
-            tool=tool, tool_args=dict(args or {}), tool_context=tool_context,
-            result=tool_response)
+    def _on_after_tool(self, tool: Any = None, args: Any = None, tool_context: Any = None,
+                       tool_response: Any = None, **_kw: Any):
+        return self._after_tool_sync(tool, dict(args or {}), tool_context, tool_response)
 
-    async def before_agent_callback(
-        self, *, agent: BaseAgent, callback_context: CallbackContext
-    ) -> None:
+    def _before_agent_sync(self, agent: Any, callback_context: Any) -> None:
         self._ensure_guard(agent.name)
         self._current = agent.name
         return None  # never short-circuit the agent itself
 
-    async def after_agent_callback(
-        self, *, agent: BaseAgent, callback_context: CallbackContext
-    ) -> None:
+    def _after_agent_sync(self, agent: Any, callback_context: Any) -> None:
         """The agent's run returned to its caller: lifecycle end on the ledger (informational)."""
         g = self._guards.get(agent.name)
         if g is not None and g is not self._root:
@@ -538,9 +545,8 @@ class DelegationGuardPlugin(BasePlugin):
         return None
 
     # ---- hook 2: an agent is about to invoke a tool ---------------------
-    async def before_tool_callback(
-        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext
-    ) -> Optional[dict[str, Any]]:
+    def _before_tool_sync(self, tool: Any, tool_args: Mapping[str, Any],
+                          tool_context: Any) -> Optional[dict[str, Any]]:
         agent_name = tool_context.agent_name
         guard = self._ensure_guard(agent_name)
         self._current = agent_name
@@ -601,19 +607,42 @@ class DelegationGuardPlugin(BasePlugin):
         )
 
     # ---- hook 2b/2c: the tool body has finished (0.9.0 execution binding) -----
-    async def after_tool_callback(
-        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
-        result: dict[str, Any],
-    ) -> Optional[dict[str, Any]]:
+    def _after_tool_sync(self, tool: Any, tool_args: Mapping[str, Any], tool_context: Any,
+                         result: Any) -> Optional[dict[str, Any]]:
         self._close_outcome(tool_context, _body_state_for(tool, result))
         return None  # never override the result -- purely observational
 
-    async def on_tool_error_callback(
-        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
-        error: Exception,
-    ) -> Optional[dict[str, Any]]:
+    def _on_tool_error_sync(self, tool: Any, tool_args: Mapping[str, Any], tool_context: Any,
+                            error: BaseException) -> Optional[dict[str, Any]]:
         self._close_outcome(tool_context, BodyState.RAISED, error_code=type(error).__name__)
         return None  # never swallow the error -- it must propagate exactly as it would without us
+
+    # ---- the plugin API's async surface -------------------------------------
+    # Every hook's real work is SYNCHRONOUS (the guard core is), and lives in the `_*_sync`
+    # methods above. These five exist because ADK's plugin API declares its callbacks async;
+    # they add nothing but the coroutine. One implementation, two call shapes -- and it is what
+    # lets `attach()` bind PLAIN FUNCTIONS on a build whose callbacks are never awaited.
+    async def before_agent_callback(self, *, agent: BaseAgent,
+                                    callback_context: CallbackContext) -> None:
+        return self._before_agent_sync(agent, callback_context)
+
+    async def after_agent_callback(self, *, agent: BaseAgent,
+                                   callback_context: CallbackContext) -> None:
+        return self._after_agent_sync(agent, callback_context)
+
+    async def before_tool_callback(self, *, tool: BaseTool, tool_args: dict[str, Any],
+                                   tool_context: ToolContext) -> Optional[dict[str, Any]]:
+        return self._before_tool_sync(tool, tool_args, tool_context)
+
+    async def after_tool_callback(self, *, tool: BaseTool, tool_args: dict[str, Any],
+                                  tool_context: ToolContext,
+                                  result: dict[str, Any]) -> Optional[dict[str, Any]]:
+        return self._after_tool_sync(tool, tool_args, tool_context, result)
+
+    async def on_tool_error_callback(self, *, tool: BaseTool, tool_args: dict[str, Any],
+                                     tool_context: ToolContext,
+                                     error: Exception) -> Optional[dict[str, Any]]:
+        return self._on_tool_error_sync(tool, tool_args, tool_context, error)
 
     def _close_outcome(
         self, tool_context: ToolContext, body_state: str, *, error_code: Optional[str] = None,
