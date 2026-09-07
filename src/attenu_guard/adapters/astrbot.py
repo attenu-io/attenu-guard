@@ -386,7 +386,7 @@ class GuardedDelegation:
         for index, tool in enumerate(list(getattr(tool_manager, "func_list", []))):
             if isinstance(tool, GuardedTool) or _is_handoff(tool):
                 continue
-            tool_manager.func_list[index] = GuardedTool(tool, self)
+            tool_manager.func_list[index] = GuardedTool(_with_witness(tool), self)
             self._installed.append((tool_manager, index, tool))
             names.append(tool.name)
         return names
@@ -462,7 +462,7 @@ class GuardedDelegation:
             try:
                 # `_BodyWitness` goes innermost, so the outcome can say whether AstrBot's own
                 # permission check let the call reach the tool at all — see `_record_inner_refusal`.
-                rebuilt = type(tool)(_BodyWitness(inner.wrapped), tool_manager)
+                rebuilt = type(tool)(_with_witness(inner.wrapped), tool_manager)
                 items[index] = GuardedTool(rebuilt, self)              # ... and ours outside it
             except Exception:
                 continue                       # a shape this does not know: better nested than broken
@@ -498,7 +498,8 @@ class GuardedDelegation:
 
     def guard_tools(self, tools: Sequence[Any]) -> list[Any]:
         """Wrap already-built tool objects. Returns new objects; idempotent."""
-        return [t if (isinstance(t, GuardedTool) or _is_handoff(t)) else GuardedTool(t, self)
+        return [t if (isinstance(t, GuardedTool) or _is_handoff(t))
+                else GuardedTool(_with_witness(t), self)
                 for t in tools]
 
     def executor_class(self) -> Any:
@@ -850,6 +851,18 @@ class _BodyWitness:
 
     def __getattr__(self, item: str) -> Any:
         return getattr(self.__dict__["_wrapped"], item)
+
+
+def _with_witness(tool: Any) -> Any:
+    """`tool` with a `_BodyWitness` innermost, unless it already has one.
+
+    Installed on EVERY path this adapter guards a tool on — the eager sweep, `guard_tools()`, and
+    the re-nested `get_full_tool_set()` branch — not only the last of those. The witness is what
+    lets an `allow` say whether the body was actually reached, and any layer that ends up between
+    this gate and the tool can refuse: AstrBot's `_PermissionGuardedTool` does it on the main
+    agent's path too, which is how `ledger-astrbot-direct.jsonl` came to record an allow for a
+    call whose body never ran. Whoever refuses in between, the receipt is written."""
+    return tool if _find_witness(tool) is not None else _BodyWitness(tool)
 
 
 def _find_witness(tool: Any, depth: int = 6) -> Optional["_BodyWitness"]:

@@ -41,6 +41,31 @@ from attenu_guard.reasons import Disposition, ReasonCode
 __all__ = ["evaluate"]
 
 
+def _resolved(guard: Any) -> Any:
+    """The Guard itself, from whatever handle the adapter had.
+
+    Several adapters hold a late-bound reference rather than a `Guard` — smolagents' and camel's
+    `GuardRef`, which `DelegatedAgent` re-points on every handoff so already-constructed tools see
+    the fresh child. Passing that reference here instead of the resolved Guard made
+    `record_denial` an `AttributeError`, so the refusal was lost exactly on the delegated node,
+    which is the node that matters most. The call sites pass the resolved Guard; this is the
+    second line of defence, because the failure mode is silence and a caller cannot see it.
+
+    Anything that already answers to `record_denial` is returned untouched. A reference is
+    resolved through `resolve()`. Anything else is returned as-is, so the caller gets a loud,
+    accurate error rather than a fabricated ledger row.
+    """
+    if guard is None or hasattr(guard, "record_denial"):
+        return guard
+    resolve = getattr(guard, "resolve", None)
+    if callable(resolve):
+        try:
+            return resolve()
+        except Exception:
+            return guard
+    return guard
+
+
 def evaluate(guard: Any, compute: Optional[Callable[..., Mapping[str, Any]]], *args: Any,
              tool: Optional[str] = None, scope: Optional[str] = None,
              **kwargs: Any) -> Mapping[str, Any]:
@@ -53,6 +78,7 @@ def evaluate(guard: Any, compute: Optional[Callable[..., Mapping[str, Any]]], *a
 
     Raises `AuthorityDenied` with the recorded `Decision` when the callable raises.
     """
+    guard = _resolved(guard)
     if compute is None:
         return {}
     if not callable(compute):

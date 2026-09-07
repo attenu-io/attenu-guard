@@ -848,3 +848,44 @@ def test_v2_a_tool_returning_a_concurrent_futures_future_records_a_deferred_outc
     entries = child.audit_log().entries
     outcome = next(e for e in entries if e["event"] == "outcome")
     assert outcome["body_state"] == BodyState.DEFERRED
+
+
+def test_a_raising_context_fn_is_recorded_on_the_delegated_child_node():
+    """B15: the Guard the helper is handed must be the RESOLVED one.
+
+    `DelegatedAgent` wires every delegated child through a `GuardRef`, and a `GuardRef` has no
+    `record_denial`. Passing it instead of the resolved Guard made a raising context function an
+    `AttributeError` with nothing written — so the B4 fix held only where the Guard was bound
+    directly, and was silent on exactly the delegated node the whole library is about.
+    """
+    from attenu_guard import AuthorityDenied
+    from attenu_guard.reasons import Disposition, ReasonCode
+
+    root = Guard.issue("orchestrator", ORCHESTRATOR_AUTHORITY, task="Q3")
+    child = root.delegate("summarizer", SUMMARIZER_AUTHORITY, task="summarise")
+
+    class Boom(Tool):
+        name = "crm_query"
+        description = "query"
+        inputs = {"rows": {"type": "integer", "description": "rows"}}
+        output_type = "string"
+
+        def forward(self, rows: int):
+            return "ran"
+
+    guarded = GuardedTool(Boom(), GuardRef(child), "crm.read",
+                          context_fn=lambda rows: 1 / 0)
+    try:
+        guarded(rows=10)
+    except AuthorityDenied:
+        pass
+    except AttributeError as exc:                      # the bug, named so a regression is obvious
+        raise AssertionError(f"the refusal was lost on the delegated node: {exc}") from exc
+    else:
+        raise AssertionError("a raising context function did not refuse the call")
+
+    entry = child.audit_log().entries[-1]
+    assert entry["event"] == "deny", entry
+    assert entry["reason"] == ReasonCode.NO_AUTHORITY, entry
+    assert entry["disposition"] == Disposition.UNRESOLVED, entry
+    assert entry["node"] == child.node_id, entry

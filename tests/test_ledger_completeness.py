@@ -813,5 +813,112 @@ class InnerRefusalIsOnTheEntry(unittest.TestCase):
         self.assertEqual(g.audit_log().entries[-1]["event"], "allow")
 
 
+class ContextHelperGetsTheResolvedGuard(unittest.TestCase):
+    """B15. `self.guard` may be a late-bound reference; only the resolved Guard can record."""
+
+    def test_no_adapter_hands_the_helper_an_unresolved_reference(self):
+        offenders = []
+        for path in sorted(ADAPTERS.glob("*.py")):
+            if path.name.startswith("_"):
+                continue
+            for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                if "_safe_context(self." in line:
+                    offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+        self.assertEqual(offenders, [], "a reference, not the resolved Guard, reaches the helper")
+
+    def test_the_helper_resolves_a_reference_it_is_handed_anyway(self):
+        # Second line of defence: the failure mode is silence, so the helper does not depend on
+        # every call site being right forever. `_Ref` is the shape smolagents' and camel's
+        # `GuardRef` present — a `resolve()` and no `record_denial` — driven here because neither
+        # framework is installed in the stdlib CI job (the real classes are exercised in
+        # tests/integrations/).
+        from attenu_guard.adapters import _context
+
+        g = _root()
+        child = g.delegate("child", Authority(scopes={"repo.read"}, ttl=60), task="t")
+        with self.assertRaises(AuthorityDenied):
+            _context.evaluate(_Ref(child), lambda *a: 1 / 0, {}, tool="t", scope="repo.read")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"], entry["node"]),
+                         ("deny", ReasonCode.NO_AUTHORITY, child.node_id),
+                         "the refusal was lost on the delegated node")
+
+    def test_something_that_is_not_a_guard_at_all_fails_loudly(self):
+        from attenu_guard.adapters import _context
+
+        with self.assertRaises(AttributeError):
+            _context.evaluate(object(), lambda *a: 1 / 0, {}, tool="t", scope="s")
+
+
+class _Ref:
+    """The late-bound handle shape: `resolve()`, and deliberately no `record_denial`."""
+
+    def __init__(self, guard):
+        self._guard = guard
+
+    def resolve(self):
+        return self._guard
+
+
+class WitnessOnEveryPath(unittest.TestCase):
+    """B16. The receipt was written on one path; the rule is every path this gate covers."""
+
+    def _gd(self, g):
+        from attenu_guard.adapters import astrbot as ab
+        return ab.GuardedDelegation(g, tools={}, allow_unlisted=True)
+
+    def _guard(self):
+        return Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600),
+                           chain_id="c", schema_version=2)
+
+    def test_the_eager_sweep_installs_a_witness(self):
+        from attenu_guard.adapters import astrbot as ab
+        g = self._guard()
+        gd = self._gd(g)
+        mgr = _Manager([_Tool("secret_delete_all")])
+        with mock.patch.object(ab, "GuardedTool", _FakeGuarded):
+            gd._sweep(mgr)
+        self.assertIsInstance(mgr.func_list[0]._wrapped, ab._BodyWitness,
+                              "a swept tool has no witness, so its allow cannot say what happened")
+
+    def test_guard_tools_installs_a_witness(self):
+        from attenu_guard.adapters import astrbot as ab
+        gd = self._gd(self._guard())
+        with mock.patch.object(ab, "GuardedTool", _FakeGuarded):
+            wrapped = gd.guard_tools([_Tool("echo_note")])
+        self.assertIsInstance(wrapped[0]._wrapped, ab._BodyWitness)
+
+    def test_a_witness_is_never_installed_twice(self):
+        from attenu_guard.adapters import astrbot as ab
+        once = ab._with_witness(_Tool("t"))
+        self.assertIs(ab._with_witness(once), once)
+        self.assertIs(ab._with_witness(_PermissionLike(once, None))._wrapped, once)
+
+    def test_the_main_agent_path_records_the_receipt_when_the_body_is_refused(self):
+        # No _PermissionGuardedTool in sight: the witness is directly inside our gate, which is
+        # the shape the eager sweep produces (main agent, observe mode, named-tools branch).
+        from attenu_guard.adapters import astrbot as ab
+        g = self._guard()
+        gd = self._gd(g)
+        witness = ab._BodyWitness(_Tool("secret_delete_all"))
+        result = asyncio.run(gd.call("secret_delete_all", {}, None,
+                                     lambda: "error: Permission denied.", tool=witness))
+        self.assertEqual(result, "error: Permission denied.")
+        allow, outcome = g.audit_log().entries[-2:]
+        self.assertEqual((allow["event"], outcome["event"]), ("allow", "outcome"))
+        self.assertEqual(outcome["receipt"]["type"], "framework_refusal")
+
+    def test_a_declared_tool_denied_by_our_own_gate_writes_no_receipt(self):
+        # Our own deny is not an inner refusal: the body never ran because WE stopped it.
+        from attenu_guard.adapters import astrbot as ab
+        g = self._guard()
+        gd = ab.GuardedDelegation(g, tools={"wipe": ab.ToolPolicy("admin.delete")})
+        witness = ab._BodyWitness(_Tool("wipe"))
+        asyncio.run(gd.call("wipe", {}, None, lambda: "ran", tool=witness))
+        events = [e["event"] for e in g.audit_log().entries]
+        self.assertEqual(events[-1], "deny")
+        self.assertNotIn("outcome", events)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

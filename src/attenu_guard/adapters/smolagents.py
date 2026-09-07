@@ -297,7 +297,10 @@ class GuardedTool(Tool):
 
     def forward(self, *args: Any, **kwargs: Any) -> Any:
         guard = _resolve(self.guard)
-        context: Mapping = _safe_context(self.guard, self.context_fn, *args,
+        # `guard`, never `self.guard`: on a delegated child `self.guard` is a `GuardRef`, which
+        # has no `record_denial`, so a raising context function died with an AttributeError and
+        # wrote NOTHING — B4 silently held only where the Guard was bound directly.
+        context: Mapping = _safe_context(guard, self.context_fn, *args,
                                          tool=self.name, scope=self.scope, **kwargs)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None

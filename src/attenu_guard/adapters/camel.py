@@ -325,7 +325,8 @@ class GuardedFunctionTool(FunctionTool):
         `async_call` is authorizing.
         """
         guard = _resolve(self.guard)
-        context: Mapping = _safe_context(self.guard, self.context_fn, *args,
+        # `guard`, never `self.guard`: a `GuardRef` has no `record_denial` (see smolagents).
+        context: Mapping = _safe_context(guard, self.context_fn, *args,
                                          tool=self.tool_name, scope=self.scope, **kwargs)
         v2 = guard.schema_version == 2
         snapshot = _snapshot_params(args, kwargs) if v2 else None
