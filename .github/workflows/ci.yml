@@ -247,6 +247,7 @@ jobs:
           - { fw: a2a,             pkgs: "a2a-sdk==1.1.2" }
           - { fw: omnigent,        pkgs: "omnigent==0.11.0" }
           - { fw: claude_code,     pkgs: "" }
+          - { fw: openhands,       pkgs: "openhands-sdk==1.44.1 openhands-tools==1.44.1" }
     name: integration (${{ matrix.fw }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,6 +270,33 @@ jobs:
           for d in examples/integrations/${{ matrix.fw }}/demo.py examples/integrations/${{ matrix.fw }}/deepagents_demo.py examples/integrations/${{ matrix.fw }}/*/demo.py; do
             if [ -f "$d" ]; then echo "== $d"; python "$d"; fi
           done
+  integration-astrbot:
+    # AstrBot is an APPLICATION, not a library: nothing to `pip install` by name, so the job
+    # checks the project out at a pinned commit and puts it on PYTHONPATH, which is exactly how
+    # a deployment runs it. Kept out of the matrix above for that reason alone.
+    #
+    # Cost, measured before adding it: `pip install -r requirements.txt` is ~40s and ~560MB, and
+    # the whole file installs cleanly — so this is a normal job, not a special case. Its 63
+    # dependencies are declared `>=`, so the resolved set moves under us; a failure here is more
+    # likely to be upstream drift than an adapter regression, and the message says so.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with: { python-version: "3.12" }
+      - name: Check AstrBot out at a pinned commit
+        run: |
+          git clone --filter=blob:none https://github.com/AstrBotDevs/AstrBot.git "$RUNNER_TEMP/astrbot"
+          git -C "$RUNNER_TEMP/astrbot" checkout --detach 84bc70cbb
+      - name: Install attenu-guard + AstrBot's own requirements
+        run: |
+          python -m pip install -q --require-hashes -r .github/workflows/requirements-pip.txt
+          pip install -q -e . pytest
+          pip install -q -r "$RUNNER_TEMP/astrbot/requirements.txt"
+      - name: Run the AstrBot integration test
+        # AstrBot is imported from the checkout, not from site-packages.
+        run: PYTHONPATH="$RUNNER_TEMP/astrbot" python -m pytest -q tests/integrations/test_astrbot.py
+
   integrations-latest:
     # Weekly upstream-drift canary: same tests, UNPINNED latest framework
     # versions. Allowed to fail (continue-on-error) — it is a signal, not a gate.

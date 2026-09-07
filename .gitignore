@@ -16,3 +16,6 @@ venv/
 .venv-*/
 attenu-omnigent-bundle.json
 attenu-commerce-bundle.json
+
+# AstrBot writes its runtime data dir into the CWD on import (tests/integrations/test_astrbot.py).
+/data/
