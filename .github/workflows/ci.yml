@@ -284,10 +284,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with: { python-version: "3.12" }
-      - name: Check AstrBot out at a pinned commit
+      - name: Check AstrBot out at a pinned upstream commit
+        # UPSTREAM master as of 2026-09-07. Pin only commits reachable from origin/master: an
+        # earlier revision of this job pinned a SHA that turned out to be one of OUR OWN local
+        # candidate-fix commits in a scratch checkout, which no runner could ever have fetched.
+        # Verify with `git branch -r --contains <sha>` before changing it.
         run: |
           git clone --filter=blob:none https://github.com/AstrBotDevs/AstrBot.git "$RUNNER_TEMP/astrbot"
-          git -C "$RUNNER_TEMP/astrbot" checkout --detach 84bc70cbb
+          git -C "$RUNNER_TEMP/astrbot" checkout --detach 2f504d3235b6e415ea23087fee0ec15f475f4f7b
       - name: Install attenu-guard + AstrBot's own requirements
         run: |
           python -m pip install -q --require-hashes -r .github/workflows/requirements-pip.txt
