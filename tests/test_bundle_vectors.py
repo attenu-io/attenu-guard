@@ -75,7 +75,7 @@ class TestBundleVectors(unittest.TestCase):
         # an implementation that scored bundle_vectors_v1 still scores it. `revision` is the
         # additive counter that does move, so a reader can name the corpus they ran.
         self.assertEqual(self.document["version"], "bundle_vectors_v1")
-        self.assertEqual(self.document["revision"], "bundle_vectors_v1.2")
+        self.assertEqual(self.document["revision"], "bundle_vectors_v1.3")
         self.assertEqual([c["name"] for c in self.document["cases"]], [
             "valid_bundle_v2",
             "reject_params_mismatch",
@@ -99,6 +99,11 @@ class TestBundleVectors(unittest.TestCase):
             "reject_loosened_ceiling_literal",
             "reject_null_ttl_literal",
             "reject_omitted_ceiling_literal",
+            # revision v1.3 — an `allow` the chain never authorized (a `policy="unlisted"`
+            # passthrough). The only accepting row whose point is a report counter: a verifier
+            # that runs it through containment rejects an honest bundle, one that drops it
+            # silently understates the run.
+            "valid_bundle_v2_ungated_allow",
         ])
 
     def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
@@ -260,7 +265,7 @@ class TestBundleVectors(unittest.TestCase):
         self.assertEqual(vectors.read_bundle_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_bundle_vectors()
         self.assertEqual(loaded["version"], "bundle_vectors_v1")
-        self.assertEqual(loaded["revision"], "bundle_vectors_v1.2")
+        self.assertEqual(loaded["revision"], "bundle_vectors_v1.3")
         self.assertEqual([c["name"] for c in loaded["cases"]],
                          [c["name"] for c in self.document["cases"]])
 

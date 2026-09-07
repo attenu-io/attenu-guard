@@ -61,7 +61,7 @@ VECTORS_VERSION = "bundle_vectors_v1"
 # contract and stays put: an implementation that scored `bundle_vectors_v1` still scores it.
 # `revision` is the additive counter — it moves whenever a case is appended, so a reader can
 # tell which corpus they ran without diffing case lists.
-VECTORS_REVISION = "bundle_vectors_v1.2"
+VECTORS_REVISION = "bundle_vectors_v1.3"
 
 VECTORS_DIR = Path(__file__).resolve().parent / BUNDLES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -128,6 +128,28 @@ class _fixed_entropy:
         return False
 
 
+class _fixed_version:
+    """Pin the version `Guard` stamps into the `adapter` it supplies itself, for the duration of
+    the `with` block. Every allow this generator writes through an ADAPTER the caller passes
+    carries the fixed `ADAPTER` constant above, for the reason stated there — the vectors must
+    not change when the package version does. `Guard.record_passthrough()` builds its own adapter
+    identity from the installed version instead, so this pins that one value the same way. Used
+    ONLY by this generator, never by the library."""
+
+    VERSION = "1.0.0"
+
+    def __enter__(self):
+        from attenu_guard import guard as _guard_mod
+        self._mod = _guard_mod
+        self._real = _guard_mod._package_version
+        _guard_mod._package_version = lambda: self.VERSION
+        return self
+
+    def __exit__(self, *exc):
+        self._mod._package_version = self._real
+        return False
+
+
 # =========================================================================
 # The chain every case is derived from
 # =========================================================================
@@ -188,6 +210,57 @@ def _valid_bundle(root_scopes: frozenset = ROOT_SCOPES) -> dict:
         return evidence.export_bundle(root.audit_log(), _signer(), ts=ANCHOR_TS)
 
 
+def _ungated_bundle() -> dict:
+    """valid_bundle_v2 plus ONE entry: an un-gated call, recorded but never authorized.
+
+    A shim running in incremental-rollout mode (`allow_unlisted=True`) lets a tool with no
+    declared policy run WITHOUT an authorization check. The call happened, so it is on the
+    ledger; the chain never authorized it, so its `allow` carries `"policy": "unlisted"` and its
+    `scope` is a label rather than a claim of held authority. Eight entries as in
+    valid_bundle_v2's nine entries, with the passthrough inserted on the summarizer at seq 6:
+
+        0 root      orchestrator            {crm.*, mail.send}, max_rows 100000
+        1 spawn     summarizer              {crm.read}, max_rows 5000   (child subset of parent)
+        2 allow     orchestrator mail.send  call A, authorized_params_hash
+        3 outcome   orchestrator            call A, invoked_params_hash == authorized
+        4 allow     summarizer   crm.read   call B, authorized_params_hash
+        5 deny      summarizer   crm.export (over-reach, out_of_authority)
+        6 allow     summarizer   legacy.sync   policy=unlisted, capture pre_hook_only  <- UNGATED
+        7 outcome   summarizer              call B, invoked_params_hash == authorized
+        8 done      summarizer
+        9 done      orchestrator
+
+    `legacy.sync` is nowhere in the summarizer's authority ({crm.read}), and that is the point
+    of the row: the entry asserts no authority, so there is nothing to contain.
+    """
+    with _fixed_entropy(), _fixed_version():
+        root = Guard.issue("orchestrator",
+                           Authority(scopes=set(ROOT_SCOPES), ceilings=[RowLimit(100_000)], ttl=3600),
+                           chain_id=CHAIN_ID, schema_version=2)
+        child = root.delegate("summarizer",
+                              Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900),
+                              task="summarize Q3 pipeline")
+
+        mail_params = {"to": "cfo@example.com", "subject": "Q3 pipeline"}
+        d_mail = root.check("mail.send", tool="mail.send", authorized_params=mail_params,
+                            capture=Capture.WRAPPER_SYNC, adapter=ADAPTER)
+        root.record_outcome(d_mail.call_id, BodyState.RETURNED, invoked_params=mail_params,
+                            duration_ms=12)
+
+        read_params = {"limit": 120, "query": "pipeline"}
+        d_read = child.check("crm.read", tool="crm.read", context={"rows": 120},
+                             authorized_params=read_params,
+                             capture=Capture.WRAPPER_SYNC, adapter=ADAPTER)
+        child.check("crm.export", tool="crm.export", context={"rows": 120})   # denied: over-reach
+        child.record_passthrough("legacy.sync")                       # un-gated, never checked
+        child.record_outcome(d_read.call_id, BodyState.RETURNED, invoked_params=read_params,
+                             duration_ms=7)
+
+        child.complete()
+        root.complete()
+        return evidence.export_bundle(root.audit_log(), _signer(), ts=ANCHOR_TS)
+
+
 # =========================================================================
 # Mutation helpers — every rejecting case is ONE change to the valid bundle
 # =========================================================================
@@ -233,8 +306,8 @@ def _mutate(base: dict, mutate, *, rehash: bool = True, reanchor: bool = True) -
 
 
 def _case(name: str, description: str, bundle: dict, *, expect: str,
-          expect_failures: list | None = None) -> dict:
-    return {
+          expect_failures: list | None = None, expect_report: dict | None = None) -> dict:
+    case = {
         "name": name,
         "description": description,
         "signer": {"alg": "HS256", "kid": KID, "secret_hex": SECRET.hex()},
@@ -242,6 +315,12 @@ def _case(name: str, description: str, bundle: dict, *, expect: str,
         "expect": expect,
         "expect_failures": expect_failures or [],
     }
+    if expect_report:
+        # Optional, and emitted only where a case declares it, so every earlier row's bytes are
+        # unchanged. Named report counters a conformant verifier MUST reproduce exactly — for
+        # rows where accept/reject alone would not distinguish two behaviours.
+        case["expect_report"] = expect_report
+    return case
 
 
 def _fail(reason: str, seq, node) -> dict:
@@ -532,6 +611,29 @@ def gen_cases() -> list:
         _mutate(literal, _omit_granted_ceiling),
         expect="reject", expect_failures=[_fail("monotonicity", 1, n1)]))
 
+    # Revision v1.3. An `allow` the chain never authorized. Nothing above tells an implementer
+    # what to do with one, and the wrong answer is the natural one: run it through containment,
+    # find `legacy.sync` outside the summarizer's {crm.read}, and reject an honest bundle. The
+    # other wrong answer is to drop it silently, which understates the run without saying so.
+    cases.append(_case(
+        "valid_bundle_v2_ungated_allow",
+        "valid_bundle_v2 plus one entry: at seq 6 the summarizer calls `legacy.sync`, a tool "
+        "with no declared policy, under a shim running in incremental-rollout mode. The call "
+        "was NOT authorized — no check was made — and the entry says so by carrying "
+        "\"policy\": \"unlisted\"; its `scope` is a label, not a claim of held authority, and "
+        "`capture` is pre_hook_only with no outcome, because nothing observed the body. The "
+        "bundle MUST verify: every hash reproduces against the signed anchor, the delegation is "
+        "still a subset of its parent, and every allow that DOES claim authority is inside it. "
+        "A verifier MUST NOT test a policy-marked allow for containment — `legacy.sync` is "
+        "outside the summarizer's {crm.read} and the entry asserts nothing to contain, so "
+        "testing it rejects an honest bundle. It MUST NOT ignore it either: report it, so a "
+        "reader can see how much of the run was measured. This build reports "
+        "actions_checked=2 (the two authorized calls) and ungated=1, which `expect_report` "
+        "pins; an implementation that names those counters differently maps them and says so. "
+        "`policy` is allow-only: on a v2 chain a deny carrying it is invalid.",
+        _ungated_bundle(), expect="accept",
+        expect_report={"actions_checked": 2, "ungated": 1}))
+
     return cases
 
 
@@ -590,8 +692,14 @@ def check_case(case: dict) -> tuple[bool, str]:
     if missing:
         return False, f"expected={case['expect']} got={got} but MISSING {missing} (reported {seen})"
     extra = [f for f in seen if f not in case["expect_failures"]]
+    wrong = {k: (v, report.get(k)) for k, v in (case.get("expect_report") or {}).items()
+             if report.get(k) != v}
+    if wrong:
+        return False, f"expected={case['expect']} got={got} but report counters differ (expected, got): {wrong}"
     note = f" (+{len(extra)} further reported)" if extra else ""
-    return True, f"expected={case['expect']} got={got}, {len(case['expect_failures'])} required failure(s) present{note}"
+    counters = f", report {case['expect_report']} reproduced" if case.get("expect_report") else ""
+    return True, (f"expected={case['expect']} got={got}, {len(case['expect_failures'])} "
+                  f"required failure(s) present{note}{counters}")
 
 
 def _self_check(document: dict) -> bool:

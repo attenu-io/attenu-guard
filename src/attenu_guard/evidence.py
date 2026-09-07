@@ -301,20 +301,33 @@ def delegation_graph(bundle: dict) -> dict:
 
 
 def denials(bundle: dict) -> list[dict]:
-    """Deny events grouped by (node, tool, scope, disposition) — the rows a Decisions queue renders: "should this
-    agent be allowed to <tool>?" with how often it asked and why it was refused. A pure fold over the ledger; no
-    engine, no state. Ordered by first occurrence."""
+    """Every refusal on the ledger, grouped by (node, tool, scope, disposition, requested) — the rows a
+    Decisions queue renders: "should this agent be allowed to <tool>?" with how often it asked and why it
+    was refused. A pure fold over the ledger; no engine, no state. Ordered by first occurrence.
+
+    Two events are refusals, and both are folded here. A `deny` is a refused ACTION: it carries the tool
+    and scope, and `requested` is None. A `spawn_denied` is a refused DELEGATION — the chain would not
+    mint the child (revoked/expired parent, depth/fanout overflow) — recorded once, by `Guard.delegate()`,
+    on the PARENT node that asked; its `requested` names the sub-agent that was refused, and it has no
+    tool or scope because no action was ever authorized. An operator's queue that folded only `deny` would
+    show a refused tool call and miss a refused hand-off, which is the larger event of the two."""
     entries = bundle.get("entries") or []
     agent_of = {e.get("node"): e.get("agent") for e in entries if e.get("event") in ("root", "spawn")}
     rows: dict[tuple, dict] = {}
     for e in entries:
-        if e.get("event") != "deny":
+        ev = e.get("event")
+        if ev not in ("deny", "spawn_denied"):
             continue
-        key = (e.get("node"), e.get("tool"), e.get("scope"), e.get("disposition"))
+        # `spawn_denied` names the acting node in `parent` (there is no child node to name — that is
+        # what was refused), so it is folded onto the node that asked.
+        node = e.get("parent") if ev == "spawn_denied" else e.get("node")
+        requested = e.get("agent") if ev == "spawn_denied" else None
+        key = (node, e.get("tool"), e.get("scope"), e.get("disposition"), requested)
         r = rows.get(key)
         if r is None:
-            rows[key] = {"node": e.get("node"), "agent": agent_of.get(e.get("node")), "tool": e.get("tool"),
+            rows[key] = {"node": node, "agent": agent_of.get(node), "tool": e.get("tool"),
                          "scope": e.get("scope"), "disposition": e.get("disposition"), "reason": e.get("reason"),
+                         "event": ev, "requested": requested,
                          "count": 1, "first_seq": e.get("seq"), "last_seq": e.get("seq")}
         else:
             r["count"] += 1; r["last_seq"] = e.get("seq")

@@ -10,7 +10,10 @@ Both were found by real runs against an open-source agent (open-swe, 2026-09):
       checking them for containment, and reports the count.
 
   B2  a refused delegation ("this sub-agent has no declared Authority") went straight back to the
-      model with no ledger entry at all. A refusal is a deny.
+      model with no ledger entry at all. It is a `deny` now. Its sibling — a delegation the CHAIN
+      refuses structurally (revoked/expired parent, depth/fanout) — was already recorded, once, as
+      `spawn_denied`; that stays one entry and `denials()` folds it instead of the adapter writing
+      a second. One decision, one entry.
 
 Run: PYTHONPATH=src python3 tests/test_ledger_completeness.py
 """
@@ -22,9 +25,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from attenu_guard import Authority, Guard, Reason  # noqa: E402
+from attenu_guard import Authority, AuthorityError, Guard, Reason  # noqa: E402
 from attenu_guard.wire import HS256TestSigner  # noqa: E402
-from attenu_guard.evidence import LEDGER_FIELDS, export_bundle, verify_bundle  # noqa: E402
+from attenu_guard.evidence import (  # noqa: E402
+    LEDGER_FIELDS, denials, export_bundle, verify_bundle,
+)
 from attenu_guard.reasons import Capture, Disposition, Policy, ReasonCode  # noqa: E402
 
 ADAPTERS = ROOT / "src" / "attenu_guard" / "adapters"
@@ -77,6 +82,19 @@ class RefusedDelegationIsADeny(unittest.TestCase):
     def test_reason_code_is_named(self):
         self.assertEqual(ReasonCode.DELEGATION_REFUSED, "delegation_refused")
 
+    def test_structural_refusal_is_recorded_exactly_once_and_folded(self):
+        g = Guard.issue("orchestrator", Authority(scopes={"repo.read"}, ttl=3600), max_depth=1)
+        child = g.delegate("planner", Authority(scopes={"repo.read"}, ttl=60), task="plan")
+        with self.assertRaises(AuthorityError):
+            child.delegate("writer", Authority(scopes={"repo.read"}, ttl=30), task="write")
+        events = [e["event"] for e in g.audit_log().entries]
+        self.assertEqual(events.count("spawn_denied"), 1)
+        self.assertEqual(events.count("deny"), 0, "a structural refusal must not be recorded twice")
+        signer = HS256TestSigner(secret=b"k", kid="k")
+        rows = denials(export_bundle(g.audit_log(), signer))
+        self.assertEqual([(r["event"], r["requested"], r["node"], r["reason"]) for r in rows],
+                         [("spawn_denied", "writer", child.node_id, "max_depth")])
+
     def test_record_denial_puts_a_refusal_on_the_trail(self):
         g = _root()
         d = g.record_denial(Reason(ReasonCode.DELEGATION_REFUSED, requested="planner"),
@@ -111,6 +129,12 @@ class AdapterSourceContract(unittest.TestCase):
                 bad.append(f"{name}: a refused delegation never reaches the ledger")
             if "ReasonCode.DELEGATION_REFUSED" not in block:
                 bad.append(f"{name}: refusal reason is not the named ReasonCode constant")
+            # ... and exactly one: the AuthorityError branch must NOT write a second entry beside
+            # the `spawn_denied` Guard.delegate() already wrote. One decision, one entry.
+            if block.count("record_denial(") != 1:
+                bad.append(f"{name}: {block.count('record_denial(')} record_denial calls in "
+                           f"_gate_delegation; a structurally refused delegation is already "
+                           f"recorded as spawn_denied")
         self.assertEqual(bad, [])
 
 

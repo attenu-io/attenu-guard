@@ -189,7 +189,7 @@ One JSON object holding every case:
 ```jsonc
 {
   "version": "bundle_vectors_v1",         // compatibility contract; does not move
-  "revision": "bundle_vectors_v1.2",      // additive counter; moves when a case is appended
+  "revision": "bundle_vectors_v1.3",      // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -200,7 +200,8 @@ One JSON object holding every case:
       "expect": "reject",                       // or "accept"
       "expect_failures": [                       // [] for an accepting case
         {"reason": "params_mismatch", "seq": 3, "node": "vectors:n0"}
-      ]
+      ],
+      "expect_report": {"ungated": 1}            // OPTIONAL; present on one case (see below)
     }
   ]
 }
@@ -236,8 +237,14 @@ rejecting case declares `expect_failures`: the **minimal set** of
   position and declared minimal set are stable for life. So `version` is the
   compatibility contract and stays `bundle_vectors_v1` — an implementation that
   scored the file before still scores it — while `revision` moves with each
-  addition, which is what a report should name (`bundle_vectors_v1.2`,
-  seventeen cases). Iterate `cases`; do not assume a length.
+  addition, which is what a report should name (`bundle_vectors_v1.3`,
+  eighteen cases). Iterate `cases`; do not assume a length.
+- A case MAY also declare **`expect_report`**: named counters from the verifier's own report
+  that a conformant implementation MUST reproduce exactly. It exists for a rule that
+  accept/reject cannot distinguish — where two different behaviours both accept, and only the
+  number separates them. One case uses it today (`valid_bundle_v2_ungated_allow`). A case
+  without the key asserts nothing about counters. If your report names these counters
+  differently, map them and say which is which.
 
 Score yourself with nothing but `pip install attenu-guard`:
 
@@ -431,8 +438,22 @@ actually report are the same set, so a new check cannot be added without a row h
   omission. Derived from `valid_bundle_v2_literal`. Required: `monotonicity`
   on the spawn. (Added in revision v1.2.)
 
+- `valid_bundle_v2_ungated_allow` — `valid_bundle_v2` plus one entry: at `seq` 6 the
+  summarizer calls `legacy.sync`, a tool with no declared policy, under a shim in
+  incremental-rollout mode. The call was never authorized — no check was made — and the
+  `allow` says so by carrying `"policy": "unlisted"`; its `scope` is a label, not a claim of
+  held authority, and `capture` is `pre_hook_only` with no `outcome`, because nothing observed
+  the body. **`"expect": "accept"`**, with `"expect_report": {"actions_checked": 2,
+  "ungated": 1}`. A verifier MUST NOT test a `policy`-marked allow for containment:
+  `legacy.sync` is outside the summarizer's `{crm.read}`, and running it through containment
+  rejects an honest bundle for a claim the entry never made. It MUST NOT ignore it either —
+  report the count, so a reader can see how much of the run was actually measured. `policy` is
+  an allow-only field; on a v2 chain a `deny` carrying it is invalid, and `unlisted` is the
+  only value v1 defines. (Added in revision v1.3.)
+
 None of the four v1.1 cases or the four v1.2 rejecting cases has a permitted
-extra: each fails exactly one check and reports exactly one failure.
+extra: each fails exactly one check and reports exactly one failure. The v1.3 case has no
+failures at all — it is an accepting row whose whole content is a report counter.
 
 Attenuation is a lattice relation over three dimensions, not a scope list, so
 the v1.1 ttl and ceiling cases add no scope at all. A verifier that compares

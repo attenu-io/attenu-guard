@@ -512,12 +512,12 @@ class GuardedDelegation:
             child = guard.delegate(subagent, requested, task=task)
         except AuthorityError as exc:
             # A structural failure (revoked/expired parent, depth/fanout overflow).
-            # attenu-guard already wrote a `spawn_denied` chain-lifecycle entry; record the
-            # DECISION too, so a refused delegation is a deny on the trail whichever way it was
-            # refused (`spawn_denied` is not folded by `denials()`; `deny` is).
-            return self._Gate(denial=guard.record_denial(
+            # attenu-guard already wrote a `spawn_denied` audit entry — one refusal, one entry, so
+            # nothing is recorded twice here; `denials()` folds `spawn_denied` alongside `deny`.
+            # Surface the same reason to the caller.
+            return self._Gate(denial=Decision.deny(
                 Reason(exc.reason, requested=subagent, message=str(exc)),
-                tool=subagent, disposition=Disposition.UNRESOLVED))
+                node=guard.node_id))
         self.children[subagent] = child
         return self._Gate(child=child)
 
