@@ -684,11 +684,17 @@ class AsyncNodeAuthorizesEagerly(unittest.TestCase):
 class ContextFailureIsRecordedEverywhere(unittest.TestCase):
     """B4, across every adapter. One helper, so no adapter can forget."""
 
-    #: adapters that call an operator context callable at gate time. openhands and astrbot
-    #: return a denial in their own idiom instead of raising, and are covered by their own tests.
+    #: adapters that call an operator context callable at gate time and route it through the
+    #: shared helper. google_adk was missed on the first pass and is listed here so it cannot be
+    #: missed again; it catches `AuthorityDenied` and hands ADK a denial dict, which is that
+    #: framework's contract, but the LEDGER ROW is the helper's.
     ADAPTERS = ("a2a", "ag2", "agent_framework", "agno", "autogen", "camel", "claude_sdk",
-                "crewai", "haystack", "langchain", "langgraph", "llama_index", "openai_agents",
-                "pydantic_ai", "semantic_kernel", "smolagents")
+                "crewai", "google_adk", "haystack", "langchain", "langgraph", "llama_index",
+                "openai_agents", "pydantic_ai", "semantic_kernel", "smolagents")
+    #: the two that record the same deny inline, in their own idiom, because they return a
+    #: denial to the model rather than raising. They are held to the same OUTCOME, not the same
+    #: mechanism — see GateErrorIsRecorded.
+    OWN_IDIOM = ("openhands", "astrbot")
 
     def test_every_such_adapter_routes_its_context_call_through_the_helper(self):
         bad = []
@@ -699,6 +705,27 @@ class ContextFailureIsRecordedEverywhere(unittest.TestCase):
             if "from ._context import" not in src:
                 bad.append(f"{name}: does not import the shared helper")
         self.assertEqual(bad, [])
+
+    def test_every_adapter_with_a_context_callable_is_accounted_for(self):
+        # The gap this closes: google_adk called an operator context function and was on neither
+        # list, so B4 simply was not applied there and nothing said so. Any adapter that calls a
+        # context callable at gate time must be in one list or the other.
+        unaccounted = []
+        for path in sorted(ADAPTERS.glob("*.py")):
+            name = path.stem
+            if name.startswith("_") or name in self.ADAPTERS or name in self.OWN_IDIOM:
+                continue
+            src = path.read_text()
+            if re.search(r"(?:policy\.)?context(?:_fn|_for)?\(", src):
+                unaccounted.append(f"{name}: calls a context callable but is on neither list")
+        self.assertEqual(unaccounted, [])
+
+    def test_the_two_own_idiom_adapters_record_the_same_deny(self):
+        for name in self.OWN_IDIOM:
+            src = (ADAPTERS / f"{name}.py").read_text()
+            self.assertIn('constraint="context"', src, f"{name}: no context-failure deny")
+            self.assertIn("ReasonCode.NO_AUTHORITY", src, f"{name}: wrong reason")
+            self.assertIn("Disposition.UNRESOLVED", src, f"{name}: wrong disposition")
 
     def test_no_adapter_calls_a_context_callable_bare(self):
         # The shapes the bug had: `policy.context(...)`, `context_fn(...)`, `.context_for(...)`

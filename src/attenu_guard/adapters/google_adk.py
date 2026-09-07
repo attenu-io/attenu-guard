@@ -237,6 +237,7 @@ except ImportError:                     # pragma: no cover - older layouts
     ToolContext = Any                   # type: ignore[assignment,misc]
 
 from attenu_guard import Authority, AuthorityDenied, Decision, Guard, __version__
+from ._context import evaluate as _safe_context
 from attenu_guard.reasons import BodyState, Capture, Disposition, ReasonCode
 
 _ADAPTER_INFO = {
@@ -392,6 +393,10 @@ class DelegationGuardPlugin(BasePlugin):
         self._delegations = dict(delegations)
         self._tools = dict(tools)
         self._exempt = set(exempt_tools) | {TRANSFER_TOOL_NAME}
+        # agent -> (parent agent name, the Authority it requested), so a later turn can
+        # re-spawn the agent in the same place in the tree with the same ceiling.
+        self._lineage: dict[str, tuple[str, Optional[Authority]]] = {}
+        self._turns: dict[str, int] = {}
         # Delegation, not action: recorded as spawns, so never also as a passthrough.
         self._delegation_exempt = {TRANSFER_TOOL_NAME}
         self._delegation_scope = delegation_scope
@@ -595,9 +600,18 @@ class DelegationGuardPlugin(BasePlugin):
         if declared is None and self._default_tool_authority is not None:
             declared = self._default_tool_authority(tool.name or "<unnamed>")
         scope = declared.scope if declared else (tool.name or "<unnamed>")
-        context: Mapping[str, Any] = {}
-        if declared is not None and declared.context is not None:
-            context = declared.context(tool_args)
+        try:
+            context: Mapping[str, Any] = _safe_context(
+                guard, declared.context if declared is not None else None, tool_args,
+                tool=tool.name or "<unnamed>", scope=scope)
+        except AuthorityDenied as exc:
+            # The refusal is already on the ledger (`deny`, `no_authority`, `unresolved`); this
+            # adapter's contract is to hand ADK a denial dict rather than raise, unless the
+            # caller asked for raising.
+            if self._raise:
+                raise
+            return self._denial_response(exc.decision, guard, agent_name,
+                                         tool.name or "<unnamed>", scope, Disposition.UNRESOLVED)
         metered = declared.metered if declared else False
         # undeclared tool: no authority is known for it at all -> "unresolved"
         disposition = declared.disposition if declared is not None else Disposition.UNRESOLVED
@@ -670,11 +684,23 @@ class DelegationGuardPlugin(BasePlugin):
         return None
 
     def _ensure_guard(self, agent_name: str) -> Guard:
-        """Mint (once) the Guard for `agent_name`, attenuated from whichever
-        agent was last active — i.e. the one that actually handed over."""
+        """The Guard for `agent_name`, minting one if this is the first time it has run.
+
+        A node whose work was marked finished (`complete()`, which `after_agent_callback` does
+        when an agent's run returns) is NOT reused: a second user turn in the same ADK session
+        gets a FRESH node for that agent, under the same parent and with the same requested
+        authority. See `_respawn` for why."""
         existing = self._guards.get(agent_name)
-        if existing is not None:
+        if existing is not None and not existing.is_complete:
             return existing
+        if existing is not None:
+            # REVOKED is not FINISHED. A revoked node must keep answering as revoked: re-spawning
+            # it would hand the agent a fresh, live node and undo the revocation — the one thing
+            # this library must never do. `revoke()` marks the subtree complete as well, so
+            # without this check a cascade-revoked agent came back on its next turn.
+            if existing.is_revoked:
+                return existing
+            return self._respawn(agent_name, existing)
 
         if not self._guards:
             # First agent ADK runs and no explicit root_agent_name: it is root.
@@ -682,7 +708,8 @@ class DelegationGuardPlugin(BasePlugin):
             return self._root
 
         issuer = self._pending_parent.pop(agent_name, None)
-        parent = self._guards.get(issuer or self._current or "", self._root)
+        parent_name = issuer or self._current or ""
+        parent = self._guards.get(parent_name, self._root)
         request = self._delegations.get(agent_name)
         if request is None and self._default_delegation is not None:
             request = self._default_delegation(agent_name)
@@ -691,6 +718,53 @@ class DelegationGuardPlugin(BasePlugin):
         task = self._pending_tasks.pop(agent_name, None) or f"delegated to {agent_name}"
         child = parent.delegate(agent_name, request, task=task)
         self._guards[agent_name] = child
+        # Remembered so a later turn can re-spawn this agent in the same place in the tree.
+        self._lineage[agent_name] = (parent_name, request)
+        return child
+
+    def _respawn(self, agent_name: str, finalized: Guard) -> Guard:
+        """A new turn reaching a finalized node gets a NEW node, not a refusal.
+
+        ADK keeps one session across user turns, and `after_agent_callback` marks each agent
+        done when its run returns — correctly: that run did finish. On the next turn the app
+        rebuilds the tree and the same agent runs again, and every call on it was refused with
+        `node_finalized`, so the whole turn produced no work. Two things were wrong with that.
+        In observe mode the instrument must never change the run it is watching, and a recorder
+        that starts refusing calls has changed it. In enforce mode a second turn is a new
+        delegation under the same parent, not a call on a dead node — refusing it protects
+        nothing, because the authority is unchanged and the parent could delegate again anyway.
+
+        So the agent is re-spawned: same parent, same requested Authority, therefore the same
+        `meet` and the same ceiling, recorded as a normal `spawn` on the ledger. The turn runs,
+        the attenuation still holds, and the trail shows one node per turn — which is what
+        actually happened. The parent is resolved through `_ensure_guard`, so a parent that was
+        finalized too is re-spawned first and the new child hangs under the new parent.
+
+        This is NOT the resume seam: nothing here re-binds a turn to its ORIGINAL node, which
+        needs a core API (`Guard.resume`) and stays a product item. A per-turn node is the
+        honest adapter-level answer — it neither loses the ceiling nor claims continuity it
+        cannot prove.
+        """
+        parent_name, request = self._lineage.get(agent_name, ("", None))
+        parent = self._root
+        if parent_name and parent_name != agent_name:
+            parent = self._ensure_guard(parent_name)
+        if request is None:
+            request = self._delegations.get(agent_name)
+            if request is None and self._default_delegation is not None:
+                request = self._default_delegation(agent_name)
+            if request is None:
+                request = Authority()
+        # Nothing to hang a new node under: the root itself, an unrecorded lineage, or a parent
+        # that is revoked (whose subtree must stay dead).
+        if parent.is_complete or parent.is_revoked:
+            return finalized
+        turn = self._turns.get(agent_name, 1) + 1
+        task = self._pending_tasks.pop(agent_name, None) or f"{agent_name}: turn {turn}"
+        child = parent.delegate(agent_name, request, task=task)
+        self._guards[agent_name] = child
+        self._lineage[agent_name] = (parent_name, request)
+        self._turns[agent_name] = turn
         return child
 
     def _authorize(

@@ -30,8 +30,8 @@ except ImportError:                                  # pragma: no cover - ADK no
     DelegationGuardPlugin = None
 
 
-def _root(**kw):
-    return Guard.issue("root_agent", Authority(scopes={"orders.read"}, ttl=3600),
+def _root(scopes=("orders.read",), **kw):
+    return Guard.issue("root_agent", Authority(scopes=set(scopes), ttl=3600),
                        chain_id="adk", **kw)
 
 
@@ -243,6 +243,124 @@ class CallbackFallback(unittest.TestCase):
         first = root.before_tool_callback
         self.assertEqual(plugin.attach(root), [], "a second attach re-bound the same agent")
         self.assertIs(root.before_tool_callback, first)
+
+
+@unittest.skipIf(DelegationGuardPlugin is None, "google-adk is not installed")
+class SecondTurnGetsANewNode(unittest.TestCase):
+    """B17. One ADK session, two user turns. The second one has to be able to work."""
+
+    #: `complete()` only refuses on a schema_version=2 chain (on v1 it is an informational
+    #: marker), and that is what the evo-ai battery runs — so these turns run on v2 or they
+    #: would not reproduce the defect at all.
+    def _guard(self, scopes):
+        return _root(scopes=scopes, schema_version=2)
+
+    def _plugin(self, guard, **kw):
+        return DelegationGuardPlugin(
+            guard,
+            delegations={"billing": Authority(scopes={"orders.read"}, ttl=600)},
+            tools={"lookup_order": ToolAuthority("orders.read"),
+                   "refund": ToolAuthority("payments.write")},
+            root_agent_name="root_agent", **kw)
+
+    def _turn(self, plugin):
+        """What ADK does for one user turn: root runs, hands off, the child runs and returns."""
+        run = asyncio.run
+        run(plugin.before_agent_callback(agent=_agent("root_agent"),
+                                         callback_context=_tool_context("root_agent")))
+        run(plugin.before_tool_callback(tool=_tool("transfer_to_agent"),
+                                        tool_args={"agent_name": "billing"},
+                                        tool_context=_tool_context("root_agent")))
+        run(plugin.before_agent_callback(agent=_agent("billing"),
+                                         callback_context=_tool_context("billing")))
+        out = run(plugin.before_tool_callback(tool=_tool("lookup_order"), tool_args={},
+                                              tool_context=_tool_context("billing")))
+        # `after_agent_callback` is what finalizes the node — correctly: that run did finish.
+        run(plugin.after_agent_callback(agent=_agent("billing"),
+                                        callback_context=_tool_context("billing")))
+        return out
+
+    def test_the_second_turn_spawns_a_new_node_and_its_calls_land_there(self):
+        g = self._guard({"orders.read", "delegate.billing"})
+        plugin = self._plugin(g)
+        self.assertIsNone(self._turn(plugin), "turn 1 was refused")
+        self.assertIsNone(self._turn(plugin), "turn 2 was refused")
+
+        events = [(e["event"], e.get("node"), e.get("tool"), e.get("reason"))
+                  for e in g.audit_log().entries]
+        self.assertNotIn("node_finalized", [e[3] for e in events],
+                         "a second turn was refused on a dead node")
+        spawns = [e[1] for e in events if e[0] == "spawn"]
+        self.assertEqual(len(spawns), 2, "the second turn did not get its own node")
+        self.assertNotEqual(spawns[0], spawns[1])
+
+        allows = [(e[1], e[2]) for e in events if e[0] == "allow"]
+        self.assertEqual(allows, [(spawns[0], "lookup_order"), (spawns[1], "lookup_order")],
+                         "the second turn's call was not recorded on the second turn's node")
+
+    def test_the_ceiling_still_holds_on_the_new_node(self):
+        # A re-spawn must not widen anything: same parent, same requested Authority, same meet.
+        g = self._guard({"orders.read", "delegate.billing"})
+        plugin = self._plugin(g)
+        self._turn(plugin)                                   # turn 1, node finalized at its end
+        # Turn 2, mid-run: the child is on its fresh node and reaches past its grant.
+        asyncio.run(plugin.before_agent_callback(agent=_agent("root_agent"),
+                                                 callback_context=_tool_context("root_agent")))
+        asyncio.run(plugin.before_tool_callback(tool=_tool("transfer_to_agent"),
+                                                tool_args={"agent_name": "billing"},
+                                                tool_context=_tool_context("root_agent")))
+        asyncio.run(plugin.before_agent_callback(agent=_agent("billing"),
+                                                 callback_context=_tool_context("billing")))
+        denied = asyncio.run(plugin.before_tool_callback(
+            tool=_tool("refund"), tool_args={}, tool_context=_tool_context("billing")))
+
+        self.assertIsInstance(denied, dict, "an over-reach was allowed on the re-spawned node")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual((entry["event"], entry["reason"]), ("deny", "scope_not_granted"))
+        last_spawn = [e for e in g.audit_log().entries if e["event"] == "spawn"][-1]
+        self.assertEqual(entry["node"], last_spawn["node"],
+                         "the over-reach was not recorded on the turn's own node")
+
+    def test_a_revoked_agent_is_never_re_spawned(self):
+        # The regression this nearly shipped with: `revoke()` marks the subtree complete too, so
+        # a cascade-revoked agent looked exactly like a finished one and came back on its next
+        # turn with a live node. Revoked is not finished.
+        g = self._guard({"orders.read", "delegate.billing"})
+        plugin = self._plugin(g)
+        self._turn(plugin)
+        child = plugin.guard_for("billing")
+        g.revoke(child.node_id)
+
+        asyncio.run(plugin.before_agent_callback(agent=_agent("billing"),
+                                                 callback_context=_tool_context("billing")))
+        denied = asyncio.run(plugin.before_tool_callback(
+            tool=_tool("lookup_order"), tool_args={}, tool_context=_tool_context("billing")))
+        self.assertIsInstance(denied, dict, "a revoked agent was allowed to act again")
+        entry = g.audit_log().entries[-1]
+        self.assertEqual(entry["event"], "deny")
+        # `check()` reports `node_finalized` before it looks at revocation — a core ordering
+        # detail, not this adapter's contract. What this test owns is that the call is REFUSED
+        # and the node was not replaced with a live one.
+        self.assertIn(entry["reason"], ("revoked", "node_finalized"), entry)
+        self.assertIs(plugin.guard_for("billing"), child, "the revoked node was re-spawned")
+        spawns = [e for e in g.audit_log().entries if e["event"] == "spawn"]
+        self.assertEqual(len(spawns), 1, "a new node was minted for a revoked agent")
+
+    def test_observe_mode_refuses_nothing_across_turns(self):
+        # The instrument must not change the run it is watching.
+        g = self._guard({"orders.*", "delegate.*", "payments.*"})
+        plugin = self._plugin(
+            g,
+            default_delegation=lambda name: Authority(scopes={"orders.*", "payments.*"}, ttl=600),
+            default_tool_authority=lambda name: ToolAuthority(f"orders.{name}"))
+        for _ in range(3):
+            self._turn(plugin)
+        denies = [e for e in g.audit_log().entries if e["event"] == "deny"]
+        self.assertEqual(denies, [], "observe mode refused a call")
+
+
+def _agent(name):
+    return SimpleNamespace(name=name)
 
 
 class ImportsWithoutThePluginApi(unittest.TestCase):
