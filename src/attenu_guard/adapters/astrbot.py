@@ -347,15 +347,43 @@ class GuardedDelegation:
         `executor_class()`.
 
         Returns the tool names now guarded. Idempotent.
+
+        LIMIT, measured 2026-09-07 against the AstrBot battery. This covers the tools on the
+        manager AT THIS CALL. AstrBot keeps adding to it afterwards — `add_func()` appends a
+        plugin's tool, and the MCP paths rebuild `func_list` wholesale (three `self.func_list =
+        [...]` sites in `func_tool_manager.py`) — and such a tool runs un-gated and un-ledgered
+        (battery H12, on both the plugin and the stdio-MCP route). **Call `install()` again after
+        registering tools**; that is a full re-sweep and it closes the gap.
+
+        Doing that sweep automatically was tried and is NOT shipped yet. Re-sweeping from
+        `get_func()` + `get_full_tool_set()` — the two methods an agent gets its tools through —
+        does fix H12 on both routes, and left every other battery case identical to unpatched
+        code except `h17-alias-native`, where an MCP tool the rule had DENIED came back as an
+        un-gated `allow` and the push went through. Re-wrapping an `MCPTool` after AstrBot has
+        rewritten its name plausibly moves which spelling the policy is keyed against, which
+        would be exactly that. It could not be confirmed: `h17-alias-native` flips between
+        `deny` and `allow` across runs on UNPATCHED code too, so the one case that would show
+        the interaction cannot currently settle it. Until it can, this adapter does not trade a
+        possible denial-to-passthrough for coverage that has a working workaround. The OpenHands
+        adapter's registry seam has no such interaction and IS armed automatically.
         """
         names: list[str] = []
         with self._lock:
-            for index, tool in enumerate(list(getattr(tool_manager, "func_list", []))):
-                if isinstance(tool, GuardedTool) or _is_handoff(tool):
-                    continue
-                tool_manager.func_list[index] = GuardedTool(tool, self)
-                self._installed.append((tool_manager, index, tool))
-                names.append(tool.name)
+            names = self._sweep(tool_manager)
+        return names
+
+    def _sweep(self, tool_manager: Any) -> list[str]:
+        """Guard every currently-unguarded entry of `tool_manager.func_list`, in place.
+
+        Caller holds `self._lock`. Returns the names newly guarded (idempotent: an entry that
+        is already a `GuardedTool`, and every handoff tool, is left exactly as it is)."""
+        names: list[str] = []
+        for index, tool in enumerate(list(getattr(tool_manager, "func_list", []))):
+            if isinstance(tool, GuardedTool) or _is_handoff(tool):
+                continue
+            tool_manager.func_list[index] = GuardedTool(tool, self)
+            self._installed.append((tool_manager, index, tool))
+            names.append(tool.name)
         return names
 
     def uninstall(self) -> list[str]:
@@ -475,6 +503,20 @@ class GuardedDelegation:
                 tool=name, disposition=Disposition.UNRESOLVED))
 
         caller = dict(self.caller_context(run_context) or {})
+        try:
+            context = policy.context_for(args, caller)
+        except Exception as exc:
+            # The operator's own context function raised: no context, so no ceiling can be
+            # evaluated. The body must not run (it does not) — and the refusal is RECORDED,
+            # because a refusal nobody can see is exactly the class of defect this adapter has
+            # been fixed for twice. `NO_AUTHORITY` is the existing vocabulary for an
+            # adapter-level refusal upstream of scope/ceiling evaluation.
+            return self._Gate(denial=guard.record_denial(
+                Reason(ReasonCode.NO_AUTHORITY, constraint="context", requested=name,
+                       message=f"context function for tool {name!r} raised "
+                               f"{type(exc).__name__}: {exc}"),
+                scope=policy.scope, tool=name, disposition=Disposition.UNRESOLVED))
+
         v2 = self.strict_single_hook and guard.schema_version == 2
         snapshot = _freeze(dict(args)) if v2 else None
         extra = (
@@ -485,7 +527,7 @@ class GuardedDelegation:
         )
         decision = guard.check(
             policy.scope,
-            context=policy.context_for(args, caller),
+            context=context,
             metered=policy.metered,
             tool=name,
             disposition=policy.disposition,

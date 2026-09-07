@@ -316,6 +316,8 @@ class GuardedDelegation:
         self._lock = threading.Lock()
         self._installed: dict[str, Any] = {}          # tool name -> the class we displaced
         self._resolver_classes: dict[Any, Any] = {}   # original class -> guarded resolver class
+        self._registry_module: Any = None             # the SDK registry module, while armed
+        self._registry_original: Any = None           # its original `_REG` mapping
 
     # -- introspection ------------------------------------------------------
     def active_guard(self) -> Guard:
@@ -366,17 +368,77 @@ class GuardedDelegation:
                 self._installed.setdefault(name, cls)
                 register_tool(name, resolver)
                 names.append(name)
+            self._arm_registry()
         return names
+
+    def _arm_registry(self) -> None:
+        """Cover tools registered AFTER this call, too. Caller holds `self._lock`.
+
+        `install(*classes)` guards the classes it is handed, at the moment it is handed them.
+        That is every tool a project names up front — and none of the tools it registers later.
+        `register_tool()` is a runtime API: a sub-agent's own definition can name a tool nobody
+        registered when the parent conversation was built, and such a tool ran, un-gated and
+        un-ledgered, on the child's node (found by the OpenHands battery, H12).
+
+        The SDK exposes no hook on registration, so the adapter installs one: the registry's
+        `_REG` mapping is replaced by a `dict` subclass whose `__setitem__` wraps the incoming
+        resolver. `register_tool()` writes through that mapping under its own lock, inside its
+        own module, whatever the caller imported or when — so this covers every registration,
+        including one made by SDK code the project never calls itself. `uninstall()` restores
+        the original mapping and every original resolver.
+
+        `_REG` is private to the SDK. There is no public equivalent, and the alternatives are
+        worse: guarding on the read side means patching the `resolve_tool` name already bound
+        into `openhands.sdk.agent.base`, and guarding nothing means a whole class of tool runs
+        unrecorded. Narrow, reversible, and one seam.
+        """
+        from openhands.sdk.tool import registry as _registry
+
+        if isinstance(getattr(_registry, "_REG", None), _GuardingRegistry):
+            return                                             # already armed (idempotent)
+        current = _registry._REG
+        armed = _GuardingRegistry(self)
+        self._registry_module = _registry
+        self._registry_original = current
+        # Existing entries are wrapped on the way in, so a tool registered BEFORE install()
+        # but never passed to it is covered from here on as well.
+        for name, resolver in current.items():
+            armed[name] = resolver
+        _registry._REG = armed
+
+    def _guard_resolver(self, resolver: Any) -> Any:
+        """Wrap one registry resolver so the tools it produces come back guarded."""
+        if getattr(resolver, "_attenu_guarded_by", None) is self:
+            return resolver
+
+        def guarded(params, conv_state):
+            return [self._guard_tool(t) for t in resolver(params, conv_state)]
+
+        guarded._attenu_guarded_by = self          # idempotence, and what uninstall() unwraps
+        guarded._attenu_original = resolver
+        return guarded
 
     def uninstall(self) -> list[str]:
         """Put the original registrations back. Returns the names restored."""
-        from openhands.sdk.tool.registry import register_tool
-
         with self._lock:
             names = sorted(self._installed)
-            for name, cls in self._installed.items():
-                register_tool(name, cls)
-            self._installed.clear()
+            if self._installed:
+                from openhands.sdk.tool.registry import register_tool
+
+                for name, cls in self._installed.items():
+                    register_tool(name, cls)
+                self._installed.clear()
+            module, original = self._registry_module, self._registry_original
+            if module is not None:
+                # Restore the plain mapping, carrying across every entry made while armed —
+                # unwrapped, so nothing keeps a reference to this Guard after uninstall().
+                live = module._REG
+                restored = original if isinstance(original, dict) else {}
+                restored.clear()
+                for name, resolver in live.items():
+                    restored[name] = getattr(resolver, "_attenu_original", resolver)
+                module._REG = restored
+                self._registry_module = self._registry_original = None
         return names
 
     def guard_tools(self, tools: Sequence[Any]) -> list[Any]:
@@ -495,9 +557,24 @@ class GuardedDelegation:
                  authorized_params=snapshot)
             if v2 else {}
         )
+        try:
+            context = policy.context_for(args)
+        except Exception as exc:
+            # The operator's own context function raised, so no context can be derived and no
+            # ceiling can be evaluated. The body must not run (it does not) — and the refusal
+            # goes on the ledger, because a refusal nobody can see is the defect this adapter
+            # was fixed for twice already. `NO_AUTHORITY` is the existing vocabulary for an
+            # adapter-level refusal upstream of scope/ceiling evaluation (its own docstring
+            # names unparseable arguments); `unresolved` says no authority could be determined.
+            return self._Gate(denial=guard.record_denial(
+                Reason(ReasonCode.NO_AUTHORITY, constraint="context", requested=name,
+                       message=f"context function for tool {name!r} raised "
+                               f"{type(exc).__name__}: {exc}"),
+                scope=policy.scope, tool=name, disposition=Disposition.UNRESOLVED))
+
         decision = guard.check(
             policy.scope,
-            context=policy.context_for(args),
+            context=context,
             metered=policy.metered,
             tool=name,
             disposition=policy.disposition,
@@ -507,8 +584,42 @@ class GuardedDelegation:
             return self._Gate(denial=decision)
         return self._Gate(decision=decision if v2 else None, guard=guard, snapshot=snapshot)
 
+    def _canonical_subagent(self, subagent: Any) -> Any:
+        """The name the SDK will actually run, for a name the model actually asked for.
+
+        `default` is an SDK alias for `general-purpose` (`subagent/registry.py`
+        `_DEPRECATED_NAMES`), and there are three more. A gate keyed on the raw string missed
+        every one of them: observe minted a child under `default` while `general-purpose` ran,
+        and enforce refused a sub-agent the operator HAD declared (safe direction, wrong
+        reason). Resolution is the SDK's own — `get_agent_factory()` returns the factory whose
+        `definition.name` is the canonical name — so the declared name covers its aliases
+        without this adapter keeping a copy of a table that is not ours.
+
+        An absent or empty selector is NOT resolved. The SDK maps it to the default agent;
+        doing that here would silently mint a child for a call that named no sub-agent at all,
+        turning a refusal (`delegation_refused`) into a spawn. Unknown names are returned
+        unchanged, to be refused by the caller as before."""
+        if not subagent or not isinstance(subagent, str):
+            return subagent
+        try:
+            from openhands.sdk.subagent.registry import get_agent_factory
+        except Exception:
+            return subagent                                   # older SDK: no registry to ask
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                # Resolving an alias is not the caller deprecating anything; the SDK's own
+                # warning fires when the model uses one, and it fires again where the SDK runs it.
+                warnings.simplefilter("ignore")
+                factory = get_agent_factory(subagent)
+        except Exception:
+            return subagent                                   # unknown name: refuse it, as before
+        canonical = getattr(getattr(factory, "definition", None), "name", None)
+        return canonical or subagent
+
     def _gate_delegation(self, guard: Guard, args: Mapping[str, Any]) -> "GuardedDelegation._Gate":
-        subagent = args.get(self.subagent_arg)
+        asked = args.get(self.subagent_arg)
+        subagent = self._canonical_subagent(asked)
         requested = self.subagents.get(subagent)
         if requested is None and self.default_subagent_authority is not None and subagent is not None:
             requested = self.default_subagent_authority(str(subagent))
@@ -522,9 +633,13 @@ class GuardedDelegation:
                        requested=subagent,
                        message=f"sub-agent {subagent!r} has no declared Authority"),
                 tool=self.delegation_tool, disposition=Disposition.UNRESOLVED))
+        task = str(args.get(self.task_arg, ""))
+        if asked != subagent:
+            # The ledger names the agent that ran; the task text keeps what was asked for, so a
+            # reader can see the alias without a second field in the published audit schema.
+            task = f"{task} [requested as {asked!r}]" if task else f"[requested as {asked!r}]"
         try:
-            child = guard.delegate(
-                str(subagent), requested, task=str(args.get(self.task_arg, "")))
+            child = guard.delegate(str(subagent), requested, task=task)
         except AuthorityError as exc:
             # A structural failure (revoked/expired parent, depth/fanout overflow).
             # attenu-guard already wrote a `spawn_denied` audit entry — one refusal, one entry, so
@@ -542,6 +657,23 @@ class GuardedDelegation:
         # `Agent._execute_action_event` catches ValueError from a tool and emits an
         # AgentErrorEvent, so the model sees the denial and can choose another action.
         raise ValueError(f"AuthorityDenied: {decision.explain()}")
+
+
+class _GuardingRegistry(dict):
+    """The SDK tool registry's `_REG` mapping, with a gate on the way in.
+
+    Installed by `GuardedDelegation._arm_registry()` and removed by `uninstall()`. Every
+    `register_tool()` call — whenever it happens, whatever imported it — writes here, so a tool
+    registered long after `install()` is guarded on the node that runs it, exactly like one the
+    project named up front. Reads are a plain dict lookup; nothing else about the registry
+    changes."""
+
+    def __init__(self, owner: "GuardedDelegation") -> None:
+        super().__init__()
+        self._owner = owner
+
+    def __setitem__(self, name, resolver):
+        super().__setitem__(name, self._owner._guard_resolver(resolver))
 
 
 class _GuardedExecutor:
