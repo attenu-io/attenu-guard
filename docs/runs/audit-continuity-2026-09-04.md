@@ -38,7 +38,7 @@ only version a reader can check.
 That rebuild was validated against the write-up rather than against memory: all
 **122 lines** the piece quotes reproduce, in order, in the run each one names.
 
-**Correction, DEPLOY-DATE.** The CrewAI runner stored each model call's message list
+**Correction, 2026-09-17.** The CrewAI runner stored each model call's message list
 by reference. CrewAI passes one list object to every call and keeps appending to it,
 so every recorded call printed the list as it stood at the end of the run. That made
 orchestrator call 0 read "4 in the list", end with the tool-result prompt, and

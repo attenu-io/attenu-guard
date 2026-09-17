@@ -49,8 +49,8 @@ denied: scope_not_granted requested=crm.export: scope 'crm.export' not covered b
 nothing. The export is refused because the sub-agent never held that permission, so an injected
 instruction has nothing to widen.
 
-Adapters for 18 frameworks and protocols, each integrated **unmodified**, each with an offline
-demo and tests ([matrix](docs/INTEGRATIONS.md)); install one with
+Adapters for 19 frameworks and the A2A protocol, each integrated **unmodified**, each with offline
+tests, and all but OpenHands and AstrBot with an offline demo ([matrix](docs/INTEGRATIONS.md)); install one with
 `pip install 'attenu-guard[<extra>]'`. MCP is a recipe rather than an adapter: a server that
 verifies the delegation chain before it runs a tool
 ([server verifier](examples/integrations/mcp/server_verifier/README.md)).
@@ -67,9 +67,9 @@ rather than third-party apps, a bound
 > [auditor's walkthrough](examples/verify/README.md) has three sample bundles (clean, tampered,
 > widened) and takes a minute.
 
-> **Just want to see it run?** From the repo root, no install needed, the examples bootstrap the
-> `src/` path themselves: `python examples/poisoned_summarizer.py`, and
-> `python tests/run_properties.py` for the invariants.
+> **Just want to see it run?** Clone the repo (`git clone https://github.com/attenu-io/attenu-guard && cd attenu-guard`);
+> no install needed, the examples bootstrap the `src/` path themselves: `python3 examples/poisoned_summarizer.py`, and
+> `python3 tests/run_properties.py` for the invariants.
 
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
@@ -106,7 +106,7 @@ invariant — in your framework, in your process — no proxy, and no network ca
 - **Hash-chained audit log** — an open, versioned [schema](schema/agent-audit.schema.json); `attenu-guard view log.jsonl` renders the tree and verifies it; tampering is provable offline. Every `deny` says **why** (`disposition`: `held_pending_grant` — waiting on a human · `withheld_tier2` · `unresolved` — no authority known for the tool · `out_of_authority` — real over-reach), so "held" never reads as "denied"; `evidence.export_bundle` / `verify_bundle` / `delegation_graph` / `denials` give an auditor an **offline-verifiable** bundle and the folds a console renders. The bundle proves authorization and lifecycle, not execution or outcome — see [what the evidence does not prove](docs/THREAT-MODEL.md#what-the-evidence-does-not-prove). `AuditLog(sinks=…)` copies entries to local **sinks** after the write (never the network) — `sinks.SpoolSink` is a bounded, fsync'd, resumable write-ahead spool carrying the ingest idempotency key `(boot_id, chain_id, seq, hash)`; [`attenu_guard.identity`](src/attenu_guard/identity.py) gives a product an identity before it has a key (`.attenu/product.json`, per-process `boot_id`, assigned chain ids).
 - **Wire format** ([`attenu_guard.wire`](src/attenu_guard/wire.py)) — `serialize`/`load` the delegation chain as signed **Delegation Tokens** and verify child ⊆ parent **offline**, across services, with no authorization server in the path. This is the reference implementation of the current working Internet-Draft in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-01.md); 20 interop test vectors live in [`tests/vectors/`](tests/vectors/) and ship inside the installed package as `attenu_guard.vectors`, so an implementation in any language can score its own verifier with nothing but `pip install attenu-guard`.
 - **Scenario harness** — declarative JSON/YAML authorization tests (`attenu-guard scenarios file.json`); see [`scenarios/`](scenarios/).
-- **Adapters** — shipped, tested integrations for the major agent frameworks as [`attenu_guard.adapters.<name>`](src/attenu_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Microsoft Agent Framework, AG2, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno, Haystack, CAMEL-AI, OpenHands, AstrBot — and, for the **A2A** protocol, a client interceptor plus a guarded `AgentExecutor` that carries the attenuated chain across a hop between processes. Each has an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'attenu-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
+- **Adapters** — shipped, tested integrations for the major agent frameworks as [`attenu_guard.adapters.<name>`](src/attenu_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Microsoft Agent Framework, AG2, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno, Haystack, CAMEL-AI, OpenHands, AstrBot — and, for the **A2A** protocol, a client interceptor plus a guarded `AgentExecutor` that carries the attenuated chain across a hop between processes. Each has offline tests, and all but OpenHands and AstrBot have an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'attenu-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
 ## Canonicalization and compatibility
 
@@ -152,7 +152,7 @@ The protocol is designed to be IETF-acceptable: it reuses the OAuth/JOSE stack
 (JWT, RFC 9396 authorization_details, DPoP, Token Status List) and invents only
 the one missing piece — cryptographically-linked, subsumption-enforced, offline
 multi-hop attenuation. See [`docs/STANDARDS-ALIGNMENT.md`](docs/STANDARDS-ALIGNMENT.md)
-and the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-00`, individual submission, WIMSE; working `-01` source in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-01.md)).
+and the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-01`, individual submission, WIMSE; source in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-01.md)).
 
 ## What this is *not*
 

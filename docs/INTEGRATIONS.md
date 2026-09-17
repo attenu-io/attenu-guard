@@ -5,7 +5,7 @@ package as `attenu_guard.adapters.<framework>` (enable its framework with
 `pip install 'attenu-guard[<extra>]'`; the core stays zero-dependency — a framework is
 imported only when you import its adapter), a runnable `demo.py` under
 [`examples/integrations/<framework>/`](../examples/integrations/) that tells the
-poisoned-summariser story end to end, and a pytest under
+poisoned-summariser story end to end (every row except OpenHands and AstrBot, which have tests only), and a pytest under
 [`tests/integrations/`](../tests/integrations/) that runs **offline** — every
 framework's own mock/scripted model, no LLM API key — and is skipped when the
 framework isn't installed. CI runs each one against the exact version listed
@@ -45,7 +45,7 @@ Versions and file:line references are as of **August 2026**; they will drift.
 | **AstrBot** (pinned upstream master; an application, not a package) | sub-agent handoff — `FunctionToolExecutor._build_handoff_toolset` | the handoff itself; the child Guard rides a `ContextVar` for the sub-agent's run | a `FunctionTool` subclass with `handler=None` and an overriding `call()` — AstrBot's own `_PermissionGuardedTool` uses exactly that contract, and `FunctionToolExecutor._execute_local` resolves `handler` → `call` → `run`, so the gate is on every invocation path. Installed on the REGISTRY (`FunctionToolManager.func_list` + a `get_func` wrapper), not on a toolset, because the two handoff branches disagree about wrapping | a scripted provider replaying tool calls | its `tool_permissions` are per-tool and static (admin / everyone), not parent-relative; the named-tools handoff branch returns the raw tool, so a tool marked `admin` runs for a non-admin when a sub-agent names it | 4 |
 | **A2A** (Agent2Agent protocol) — `a2a-sdk` 1.1.2 | the HOP itself: `message:send` to a remote agent in another process (A2A has no in-process sub-agent primitive) | client side — `ClientCallInterceptor.before` (`a2a/client/interceptors.py:46`, run by `BaseClient._intercept_before` `base_client.py:460`) mints the child with `parent.delegate(...)` and puts the signed Delegation Chain on the message as an A2A **extension** (`Message.extensions` + `Message.metadata[<uri>]`, spec §4.6.2, plus the `A2A-Extensions` header §4.6.1) | server side — `GuardedAgentExecutor` wraps `AgentExecutor.execute` (`a2a/server/agent_execution/agent_executor.py:15`), verifies the chain offline (`wire.load`) and mints the served `Guard` from the leaf; `guarded_tool(fn, scope=…)` checks before each tool body via a `ContextVar` | no model needed: the remote agent's plan is scripted; both halves run over `InProcessTransport`, an implementation of the SDK's public `ClientTransport` ABC — and over real HTTP in `live_smoke.py` (Starlette + uvicorn, verified) | nothing: **§7.6.4 says so explicitly** — "the A2A protocol does not define the scope, representation, validity, or revocation semantics of the authorization decision or credential"; §7.6.3 notes in-band credentials are exposed to every agent in a chain. Per-hop authentication and the Agent Card are real and this stands on them | 5 |
 
-*Fit = how well the framework's official hooks carry an authorization decision (1–5). Eighteen entries (LangGraph through A2A); `tests/integrations/` holds 30 offline suites covering them and the two recipes below. The Claude Agent SDK integration was additionally verified live against a real session, and the A2A one over a real HTTP hop.*
+*Fit = how well the framework's official hooks carry an authorization decision (1–5). Twenty entries (LangGraph through A2A: nineteen frameworks and the A2A protocol); `tests/integrations/` holds 30 offline suites covering them and the two recipes below. The Claude Agent SDK integration was additionally verified live against a real session, and the A2A one over a real HTTP hop.*
 
 Beyond the matrix, three recipes rather than adapters: a **Langflow** custom component
 (`examples/integrations/langflow/`, 25 offline tests) — Langflow is a visual builder, so the unit
@@ -56,7 +56,7 @@ clone and CI does not carry it, and **MCP** (`examples/integrations/mcp/server_v
 tests), a server that verifies the delegation chain before it runs a tool body. The first two have
 their own sections below; the MCP recipe keeps its evidence manifest in its own README.
 
-## Why these eighteen
+## Why these twenty
 
 Selection criteria (August 2026): (1) a Python framework with an **explicit delegation /
 handoff / sub-agent primitive** — the moment attenu-guard exists to guard; (2) coverage of
