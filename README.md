@@ -165,7 +165,7 @@ enforcement shim and the open schema; it is useful entirely on its own, forever,
 no account and no network. Attenu also has a console for denials and decisions. It is not
 public yet, and it is never in the deny path.
 
-It only sees calls that go through its hook. A tool called some other way is neither refused
+attenu-guard only sees calls that go through its hook. A tool called some other way is neither refused
 nor logged, and an `allow` means authorized, not executed. See
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) and the documented limitations in
 [docs/RED-TEAM.md](docs/RED-TEAM.md).

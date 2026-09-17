@@ -686,17 +686,6 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   discriminates nothing beyond row 19, so it is recorded here as checked and not proposed. His stated
   boundary: independent reproduction of the released corpus at that pin; not verifier completeness,
   runtime correctness or certification.
-- **`witness-signed`**: an envelope exists whose `subject` matches the entry
-  recomputed from the bundle, and whose signature verifies under the trusted key
-  its `witness.kid` names. A signature that verifies under some *other* trusted
-  key is not witness-signed. The state says where the signature came from and
-  nothing about authority: the witness is whoever holds that key, and nothing in
-  the envelope makes that the delegation parent.
-- **`process-asserted`**: no envelope, or one that does not verify. This covers
-  two facts a bundle does not separate — a hop nobody undertook to cover, and a
-  hop a witness undertook to cover and never did. v1 takes the weaker reading
-  and stops there.
-
 ## Observer envelope vectors
 
 `envelopes/envelope_vectors_v1.json` is the third suite, and the narrowest.
@@ -719,6 +708,17 @@ as the chain-level checks and the bundle rejects.
 Per entry — the entry, not the node, because a node carries several entries and
 an `allow` never creates a node of its own — a verifier reports one of two
 states:
+
+- **`witness-signed`**: an envelope exists whose `subject` matches the entry
+  recomputed from the bundle, and whose signature verifies under the trusted key
+  its `witness.kid` names. A signature that verifies under some *other* trusted
+  key is not witness-signed. The state says where the signature came from and
+  nothing about authority: the witness is whoever holds that key, and nothing in
+  the envelope makes that the delegation parent.
+- **`process-asserted`**: no envelope, or one that does not verify. This covers
+  two facts a bundle does not separate — a hop nobody undertook to cover, and a
+  hop a witness undertook to cover and never did. v1 takes the weaker reading
+  and stops there.
 
 
 `observed.result` never changes the state. A verifying envelope is

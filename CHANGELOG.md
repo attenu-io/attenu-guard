@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-09-17
+
 ### Fixed
 - **README and docs said more than the code does.** The opening line said a child "normally keeps everything" the parent could do, which the matrix contradicts (most frameworks give the child its own list); it now says the frameworks we tested do not check the child's permissions against the parent's. "Every decision lands on the log" now says every `check()`, since `would_allow()` writes nothing. The Microsoft Entra row matches `docs/SUB-AGENT-PERMISSIONS.md`. "What this is not" states the hook boundary: a call that skips the hook is neither refused nor logged. The console line no longer reads as something a visitor can use. The framework count is nineteen frameworks and the A2A protocol everywhere, OpenHands and AstrBot are marked as having tests but no demo, the published draft revision is `-01`, and the command blocks start from a clone and use `python3`. `docs/INTEGRATIONS.md` counts 33 integration test files and three recipes. The vectors README records two third-party runs of the token vectors, not one, and says `invalid_policy` is the v1 reason while a v2 chain reports `invalid_allow`
 - **`attenu-guard demo` text:** "SOC" is now "the security team", and a marketing phrase is gone from the closing line. The demo's behaviour is unchanged
