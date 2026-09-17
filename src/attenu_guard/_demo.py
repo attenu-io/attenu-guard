@@ -74,8 +74,8 @@ def main():
     print(f"\n[6] Dry-run probe (would_allow, no audit entry written): "
           f"{'allowed' if probe else 'denied — ' + probe.explain()}")
 
-    # Suppose the SOC decides to kill the whole task mid-run.
-    print("\n[7] SOC hits the revoke switch on the root task ...")
+    # Suppose the security team decides to kill the whole task mid-run.
+    print("\n[7] The security team hits the revoke switch on the root task ...")
     revoked = orchestrator.revoke()
     print(f"    cascade-revoked {len(revoked)} node(s): {revoked}")
     decision = summarizer.check("crm.read", context={"rows": 1}, tool="crm.query")
@@ -99,7 +99,7 @@ def main():
     print("    every REAL decision above — allow, block, revoke — is provable")
     print("    offline, with no vendor in the loop; the dry-run probe left no trace.")
     print("\n" + "=" * 68)
-    print("  Same attack, two outcomes. No CVE required — this is default")
+    print("  Same attack, two outcomes. This is default")
     print("  behaviour once authority is attenuated at the handoff.")
     print("=" * 68)
 

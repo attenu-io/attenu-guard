@@ -1,10 +1,10 @@
 # attenu-guard
 
-When one AI agent hands work to another, the second one normally keeps everything the first
-could do. attenu-guard gives it the permissions you declare for its task, never more than the
+When one AI agent hands work to another, the frameworks we tested don't check the second one's
+permissions against the first one's. attenu-guard gives it the permissions you declare for its task, never more than the
 parent holds, and refuses the rest,
-inside your process, with no network call in the deny path. Every decision lands on a
-hash-chained log you can verify offline.
+inside your process, with no network call in the deny path. Every `check()`, allowed or denied,
+lands on a hash-chained log you can verify offline.
 
 It is for people building agents that hand work to other agents.
 
@@ -58,9 +58,9 @@ verifies the delegation chain before it runs a tool
 Enforced live on Google's published `adk-samples` customer-service and financial-advisor apps,
 denying a real model mid-run
 ([evidence](https://github.com/attenu-io/attenu-derive/blob/main/docs/LIVE-ENFORCE.md)). The same
-adapters run on CrewAI and LangGraph, on crews and graphs configured for a travel-booking domain
-rather than third-party apps, a bound
-[A3](https://github.com/attenu-io/attenu-derive/blob/main/docs/A3-FRAMEWORKS.md) states itself.
+adapters run live on CrewAI and LangGraph, on crews and graphs we built for a travel-booking domain
+rather than on third-party apps.
+[A3](https://github.com/attenu-io/attenu-derive/blob/main/docs/A3-FRAMEWORKS.md) states that limit.
 
 > **Have a bundle to check?** `pipx run attenu-guard verify bundle.json` checks integrity,
 > child ⊆ parent and containment from the file alone, no account, no network. The
@@ -73,7 +73,7 @@ rather than third-party apps, a bound
 
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
-An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08 (cascading failures)](https://genai.owasp.org/download/52117/): delegated authority stays inside the parent's limits, and every decision the guard makes remains verifiable offline.
+An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08 (cascading failures)](https://genai.owasp.org/download/52117/): delegated authority stays inside the parent's limits, and every check the guard records stays verifiable offline.
 
 ## What happens at a handoff today
 
@@ -83,14 +83,14 @@ cannot be written down, and policy checks fire when a tool is invoked rather tha
 at the moment permissions are passed down. Verified against released code, and
 pinned by tests that fail the day the behaviour changes:
 
-| System | What it does at a handoff (verified against the released code — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)) |
+| System | What it does at a handoff (framework rows verified against the released code — see [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md); the identity and protocol rows are from their published specs) |
 |---|---|
 | OpenAI Agents SDK 0.22 | passes the **entire** conversation to the sub-agent (`Handoff.input_filter=None` by default: *"the new agent sees the entire conversation history"*); no parent/child relation exists, so nothing checks child ⊆ parent |
 | LangChain `deepagents` 0.7 | a sub-agent's `permissions` **replace** the parent's rules entirely (`graph.py`) — a child can be granted what its parent is denied |
 | Google ADK 2.7.1 | `disallow_transfer_to_peers` is enforced on the legacy `llm_flows` path since 2.7.1 ([#3850](https://github.com/google/adk-python/issues/3850), fix `fa18d26a`) — but the 2.x default workflow path (`workflow/utils/_transfer_utils.py`, sibling case) still carries no check: on 2.7.1 the peer transfer goes through (pinned by `tests/integrations/test_google_adk.py`, which fails the day it stops). Either way ADK checks *who may transfer*; it does not check *what authority passes*, and no record exists to verify afterwards |
 | CrewAI 1.15 | a delegated coworker runs with its **own full tool list**; the tool-hook dispatcher swallows exceptions and runs the tool (**fail-open**) unless you raise its one blessed exception |
 | AutoGen 0.7 | `Handoff` carries target/description/message only; the receiver offers the model its own full tool list |
-| Microsoft Entra | child agent **inherits** the parent's scopes |
+| Microsoft Entra | the parent→child construct has two settings, *all allowed* or *none*; it cannot express child ⊆ parent ([details](docs/SUB-AGENT-PERMISSIONS.md)) |
 | MCP | scope flow is **accumulation**-biased (step-up unions); the request carries no agent authority at all: `CallToolRequestParams` has `name`, `arguments`, `meta`, `task` and nothing that says which agent is calling with how much of it. Shipped here as a recipe rather than an adapter, a server that verifies the chain before it runs a tool ([`server_verifier`](examples/integrations/mcp/server_verifier/README.md)) |
 | A2A | authenticates the hop, carries **no** delegated authority |
 
@@ -126,10 +126,11 @@ required bytes and rejection reasons.
 ## Prove the safety claims yourself
 
 ```bash
-python tests/run_properties.py      # 4,000 random delegation trees per invariant, zero deps
-python tests/red_team.py            # 17 adversarial attacks, black- & white-box; 0 must break
-python examples/poisoned_summarizer.py
-attenu-guard demo
+git clone https://github.com/attenu-io/attenu-guard && cd attenu-guard
+python3 tests/run_properties.py      # 4,000 random delegation trees per invariant, zero deps
+python3 tests/red_team.py            # 17 adversarial attacks, black- & white-box; 0 must break
+python3 examples/poisoned_summarizer.py
+attenu-guard demo                    # needs pip install attenu-guard
 ```
 
 The property suite asserts — over thousands of random chains — that attenuation
@@ -161,8 +162,13 @@ each delegation — or you let [`attenu-derive`](https://github.com/attenu-io/at
 the open engine, compute it from your app's declared structure (agents, roster, tools,
 what each task calls) and approve it before it is enforced. The library is the
 enforcement shim and the open schema; it is useful entirely on its own, forever, with
-no account and no network. The [Attenu console](https://attenu.io) is optional: a
-place to see denials, decide, and verify — never in the deny path.
+no account and no network. Attenu also has a console for denials and decisions. It is not
+public yet, and it is never in the deny path.
+
+It only sees calls that go through its hook. A tool called some other way is neither refused
+nor logged, and an `allow` means authorized, not executed. See
+[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) and the documented limitations in
+[docs/RED-TEAM.md](docs/RED-TEAM.md).
 
 ## License
 
