@@ -18,9 +18,8 @@ Offline: the model is the recipe's scripted ``BaseLlm``. No API key, no network.
 from __future__ import annotations
 
 import asyncio
-import importlib.metadata
+import importlib.metadata as md
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -30,10 +29,13 @@ from google.adk.runners import Runner
 from google.adk.sessions.in_memory_session_service import InMemorySessionService
 from google.genai import types
 
-from attenu_guard import Guard, evidence
+from attenu_guard import Guard
 from attenu_guard.adapters.google_adk import DelegationGuardPlugin
-from attenu_guard.wire import HS256TestSigner
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _report as report  # noqa: E402
+
+FW = "google adk"
 REPO = Path(__file__).resolve().parents[3]
 RECIPE = REPO / "examples" / "integrations" / "google_adk" / "demo.py"
 
@@ -53,7 +55,7 @@ def _describe(part) -> str | None:
     return None
 
 
-async def run() -> None:
+async def run() -> bool:
     bodies: list = []
 
     model = recipe.ScriptedLlm(script={
@@ -90,11 +92,11 @@ async def run() -> None:
                     session_service=sessions)
     session = await sessions.create_session(app_name="dg-adk-continuity", user_id="demo-user")
 
-    print(f"versions: google-adk {importlib.metadata.version('google-adk')}")
-    print()
-    print("--- google adk: the SESSION event stream the Runner yielded — ADK's own "
-          "record. The orchestrator and the summarizer share one session, so this is "
-          "what the parent side sees, with each event's author ---")
+    print(f"versions: google-adk {md.version('google-adk')}")
+
+    report.head(FW, "the SESSION event stream the Runner yielded — ADK's own "
+                    "record. The orchestrator and the summarizer share one session, "
+                    "so this is what the parent side sees, with each event's author")
     async for event in runner.run_async(
         user_id=session.user_id, session_id=session.id,
         new_message=types.Content(role="user",
@@ -105,36 +107,10 @@ async def run() -> None:
             if line:
                 print(f"  author={event.author:<14}{line}")
 
-    print()
-    print("--- google adk: tool bodies that actually ran ---")
-    print(f"  {bodies}")
-
-    print()
-    print("--- google adk: the node map the audit log carries ---")
-    graph = root.graph()
-    text = graph if isinstance(graph, str) else json.dumps(graph, indent=2, ensure_ascii=False)
-    print("\n".join(f"  {ln}" for ln in text.splitlines()))
-
-    signer = HS256TestSigner(b"demo-key", kid="demo")
-    bundle = evidence.export_bundle(root.audit_log(), signer)
-
-    print()
-    print("--- google adk: bundle entries (seq node event scope; tool added, it is "
-          "what names the call) ---")
-    for e in bundle["entries"]:
-        line = (f"{e['seq']:>5}  {e.get('node') or '-':<16}{e['event']:<10}"
-                f"{e.get('scope') or '-':<18}tool={e.get('tool') or '-'}")
-        if e.get("reason"):
-            line += f"  reason={e['reason']}"
-        print(line)
-
-    report = evidence.verify_bundle(bundle, signer)
-    print()
-    print("--- google adk: verify_bundle ---")
-    print(f"  checks={report['checks']}")
-    print(f"  ok={report['ok']}")
+    report.print_bodies(FW, bodies)
+    report.print_child_guards(FW, root)
+    return report.tail(FW, root)
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
-    sys.exit(0)
+    sys.exit(0 if asyncio.run(run()) else 1)
