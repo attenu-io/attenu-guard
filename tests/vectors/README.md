@@ -30,9 +30,9 @@ needing this repository's Python or any of its code.
 steps 1 to 5 of the draft's verification procedure (draft-asor-wimse-agent-delegation-chain-01 §6)
 with one signer for the whole chain, the simplifying trust model its module docstring states. Step 6,
 the `cnf`/DPoP holder-binding proof, and step 7, the Token Status List check, are documented as not
-checked. An independent run of these twenty files therefore scores steps 1 to 5. One public
-third-party run exists, from another delegation protocol's own conformance harness (see Independent
-runs below); no run from a general-purpose verifier has been pinned yet.
+checked. An independent run of these twenty files therefore scores steps 1 to 5. Two public third-party
+runs are pinned under Independent runs below: one from another delegation protocol's own conformance
+harness, and one from a general-purpose verifier.
 
 ### Getting them without cloning this repository
 
