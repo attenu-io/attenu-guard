@@ -99,8 +99,8 @@ def main():
     print("    every REAL decision above — allow, block, revoke — is provable")
     print("    offline, with no vendor in the loop; the dry-run probe left no trace.")
     print("\n" + "=" * 68)
-    print("  Same attack, two outcomes. This is default")
-    print("  behaviour once authority is attenuated at the handoff.")
+    print("  The read went through and the exfiltration did not, because")
+    print("  authority was attenuated at the handoff. No rule was written for it.")
     print("=" * 68)
 
 

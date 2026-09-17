@@ -90,7 +90,7 @@ pinned by tests that fail the day the behaviour changes:
 | Google ADK 2.7.1 | `disallow_transfer_to_peers` is enforced on the legacy `llm_flows` path since 2.7.1 ([#3850](https://github.com/google/adk-python/issues/3850), fix `fa18d26a`) — but the 2.x default workflow path (`workflow/utils/_transfer_utils.py`, sibling case) still carries no check: on 2.7.1 the peer transfer goes through (pinned by `tests/integrations/test_google_adk.py`, which fails the day it stops). Either way ADK checks *who may transfer*; it does not check *what authority passes*, and no record exists to verify afterwards |
 | CrewAI 1.15 | a delegated coworker runs with its **own full tool list**; the tool-hook dispatcher swallows exceptions and runs the tool (**fail-open**) unless you raise its one blessed exception |
 | AutoGen 0.7 | `Handoff` carries target/description/message only; the receiver offers the model its own full tool list |
-| Microsoft Entra | the parent→child construct has two settings, *all allowed* or *none*; it cannot express child ⊆ parent ([details](docs/SUB-AGENT-PERMISSIONS.md)) |
+| Microsoft Entra | the parent→child construct has two settings, *all allowed* or *none*; it cannot express child ⊆ parent ([details](https://github.com/attenu-io/attenu-guard/blob/main/docs/SUB-AGENT-PERMISSIONS.md)) |
 | MCP | scope flow is **accumulation**-biased (step-up unions); the request carries no agent authority at all: `CallToolRequestParams` has `name`, `arguments`, `meta`, `task` and nothing that says which agent is calling with how much of it. Shipped here as a recipe rather than an adapter, a server that verifies the chain before it runs a tool ([`server_verifier`](examples/integrations/mcp/server_verifier/README.md)) |
 | A2A | authenticates the hop, carries **no** delegated authority |
 
@@ -153,7 +153,7 @@ The protocol is designed to be IETF-acceptable: it reuses the OAuth/JOSE stack
 (JWT, RFC 9396 authorization_details, DPoP, Token Status List) and invents only
 the one missing piece — cryptographically-linked, subsumption-enforced, offline
 multi-hop attenuation. See [`docs/STANDARDS-ALIGNMENT.md`](docs/STANDARDS-ALIGNMENT.md)
-and the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-01`, individual submission, WIMSE; source in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-01.md)).
+and the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-01`, individual submission, targeting the WIMSE working group; source in [`docs/`](docs/draft-asor-wimse-agent-delegation-chain-01.md)).
 
 ## What this is *not*
 
@@ -167,8 +167,8 @@ public yet, and it is never in the deny path.
 
 attenu-guard only sees calls that go through its hook. A tool called some other way is neither refused
 nor logged, and an `allow` means authorized, not executed. See
-[docs/THREAT-MODEL.md](docs/THREAT-MODEL.md) and the documented limitations in
-[docs/RED-TEAM.md](docs/RED-TEAM.md).
+[docs/THREAT-MODEL.md](https://github.com/attenu-io/attenu-guard/blob/main/docs/THREAT-MODEL.md) and the documented limitations in
+[docs/RED-TEAM.md](https://github.com/attenu-io/attenu-guard/blob/main/docs/RED-TEAM.md).
 
 ## License
 

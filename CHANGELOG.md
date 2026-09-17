@@ -6,6 +6,12 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **The commerce-agents recipe README said every other integration installs its framework from PyPI.** AstrBot does not: CI clones it at a pinned commit (`ci.yml`). The sentence now says what is actually true of this recipe, that commerce-agents is on no index and it needs four editable installs from two clones
+- **Three doc links in the README were relative, so they were dead on the PyPI page,** which renders the same README. They are absolute now
+- **"individual submission, WIMSE" read as though the draft were adopted by the working group.** It is an individual submission targeting WIMSE
+- **The demo's closing line claimed a comparison the run does not show** ("Same attack, two outcomes") — the demo runs one guarded chain. It now states what the reader saw. The README hero GIF is re-rendered from it
+
 ## [0.16.1] - 2026-09-17
 
 ### Fixed

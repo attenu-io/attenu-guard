@@ -43,8 +43,8 @@ python -m pytest -q attenu-guard/tests/integrations/test_commerce_agents.py
 ```
 
 They skip, rather than fail, where commerce-agents is not importable — which is why this recipe is
-not in attenu-guard's own CI matrix: every other integration installs its framework from PyPI, and
-this one cannot.
+not in attenu-guard's own CI matrix: commerce-agents is on no index. AstrBot is also absent from
+PyPI and is tested from a pinned checkout; this recipe needs four editable installs from two clones.
 
 ## The contract, and what holds it today
 
