@@ -2,8 +2,26 @@
 
 *Verified against primary IETF sources, August 17, 2026. This document decides
 what we reuse, what we invent, where we take it, and how we get it adopted.
-Companion to the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-00`, posted 2026-08-27; current working revision source `draft-asor-wimse-agent-delegation-chain-01.md`)
+Companion to the Internet-Draft [draft-asor-wimse-agent-delegation-chain](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) (published revision `-01`, posted 2026-09-03)
 and the DevX review (`DEVX-REVIEW.md`).*
+
+## Implementation status — read this before the claims below
+
+**This document is about the design and its alignment with the standards. It is not a statement of what
+`attenu-guard` implements today.** Two gaps are open, both found on 2026-09-17 and both fixed in the `-02`
+and its test vectors:
+
+- **Holder binding is specified but not implemented.** Sections 3 and 7 of the draft require a `cnf` claim on
+  every Delegation Token, and Section 6 step 6 verifies possession against it. `attenu-guard` neither mints
+  nor checks `cnf` (`src/attenu_guard/wire.py` records this), and none of the tokens in the published vector
+  corpus carries one. Every `cnf`/DPoP answer below therefore describes the specified design, not shipped
+  behaviour, and the replay defences that rest on it are not in force in the reference implementation.
+- **Section 3's claim list is incomplete.** It enumerates RFC 9068's required claims as
+  (`iss`, `exp`, `aud`, `sub`, `iat`, `jti`); RFC 9068 Section 2.2 also marks `client_id` REQUIRED. Our tokens
+  do not carry it.
+
+Where this document says the system does something, read it as what the draft specifies. Anything the
+reference implementation does not do is listed here.
 
 ## The one thing to internalize
 
@@ -29,7 +47,7 @@ work. So we invent exactly **one** thing and profile everything else.
 | Token container | JWT + JWS; parallel CWT/COSE binding via a CDDL model | RFC 7519 / 7515; 8392 / 9052 / 8949 / 8610 |
 | Access-token profile | `at+jwt` claim discipline (`iss`,`exp`,`aud`,`sub`,`iat`,`jti`) | RFC 9068 |
 | Authority representation | `authorization_details` as a top-level claim | RFC 9396 (Rich Authorization Requests) |
-| Holder binding / PoP | `cnf` confirmation claim + DPoP proof; mTLS optional | RFC 7800 / 8747; 9449; 8705 |
+| Holder binding / PoP (specified, not yet implemented) | `cnf` confirmation claim + DPoP proof; mTLS optional | RFC 7800 / 8747; 9449; 8705 |
 | Delegation *identity/history* | `act` / `may_act` / `actor_token` | RFC 8693 (Token Exchange) |
 | Cross-**org** hop | Identity Chaining (Token Exchange + JWT assertion) | draft-ietf-oauth-identity-chaining (RFC-Ed queue) |
 | Revocation at scale | Token Status List + short TTL; RFC 7009 endpoint optional | draft-ietf-oauth-status-list; RFC 7009 |
@@ -97,12 +115,13 @@ the exact bar. Our Security Considerations pre-empt every point:
    invalidate the parent; a holder of the parent still has the parent. We
    address it three ways: (a) parent tokens are short-TTL and holder-bound
    (`cnf`), so a leaked parent is both time-boxed and non-replayable without the
-   key; (b) chain **byte-commitment** (child commits to the parent's exact bytes)
+   key (specified; not implemented, see Implementation status); (b) chain **byte-commitment** (child commits to the parent's exact bytes)
    makes splicing a different parent detectable; (c) Token Status List lets an
    issuer revoke a parent (and, by policy, its subtree) early.
 3. **Intermediate-token replay / PoP gaps.** — every hop is `cnf`-bound and
    requires a per-request DPoP proof; a captured intermediate token is unusable
-   without its bound key.
+   without its bound key. **Specified, not implemented** — see Implementation
+   status above; this defence is not in force in `attenu-guard` today.
 4. **RFC 2693 (SDSI/SPKI) precedent.** — we cite it as the standards-track
    ancestor and explain what we reuse from the modern stack instead.
 
