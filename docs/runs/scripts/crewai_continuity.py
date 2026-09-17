@@ -16,6 +16,7 @@ Offline: the recipe's scripted ``BaseLLM``. No API key, no network.
 """
 from __future__ import annotations
 
+import copy
 import importlib.metadata as md
 import importlib.util
 import sys
@@ -43,7 +44,9 @@ def record_calls(llm, seen: list) -> None:
     inner = llm.call
 
     def call(messages, *a, **kw):
-        seen.append((getattr(kw.get("from_agent"), "role", "?"), messages))
+        # CrewAI passes the same list object to every call and keeps appending to it, so store a copy:
+        # a reference would print every call with the list as it stood at the end of the run.
+        seen.append((getattr(kw.get("from_agent"), "role", "?"), copy.deepcopy(messages)))
         return inner(messages, *a, **kw)
 
     llm.call = call

@@ -38,6 +38,16 @@ only version a reader can check.
 That rebuild was validated against the write-up rather than against memory: all
 **122 lines** the piece quotes reproduce, in order, in the run each one names.
 
+**Correction, DEPLOY-DATE.** The CrewAI runner stored each model call's message list
+by reference. CrewAI passes one list object to every call and keeps appending to it,
+so every recorded call printed the list as it stood at the end of the run. That made
+orchestrator call 0 read "4 in the list", end with the tool-result prompt, and
+"carry" the coworker's final answer, which it could not have yet: call 0 is the call
+that delegates. The runner now stores a copy per call, and both CrewAI blocks below
+were regenerated (crewai 1.15.18 and 1.15.22). Three lines changed in each block;
+call 0 now shows 2 messages, the task prompt, and `False`. Nothing else changed, and
+the verdict does not: neither orchestrator call names the coworker's tools.
+
 ## The PyPI-latest re-run
 
 Every runner was then re-run against the newest release of its framework on
@@ -182,12 +192,12 @@ versions: crewai 1.15.18
 
 --- crewai: the ORCHESTRATOR's own view — every model call CrewAI made for it ---
   CrewAI made 2 model call(s) for the orchestrator and 4 for the summarizer
-  [orchestrator model call 0] LAST message only, 4 in the list, role=user:
-    'Analyze the tool result. If requirements are met, provide the Final Answer. Otherwise, call the next tool. Deliver only the answer without meta-commentary.'
+  [orchestrator model call 0] LAST message only, 2 in the list, role=user:
+    '\nCurrent Task: Produce a Q3 pipeline summary.\n\nThis is the expected criteria for your final answer: A short summary.\nyou MUST return the actual complete content as the final answer, not a summary.\n\nBegin! This is VERY important to you, use the tools available and give your best Final Answer, your job depends on it!\n\nThought:'
   [orchestrator model call 1] LAST message only, 4 in the list, role=user:
     'Analyze the tool result. If requirements are met, provide the Final Answer. Otherwise, call the next tool. Deliver only the answer without meta-commentary.'
   (each block above is the LAST message of that call, not the whole list — the earlier ones are the system/task prompt)
-  [orchestrator model call 0] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): True
+  [orchestrator model call 0] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): False
   [orchestrator model call 1] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): True
 
 --- crewai: the child guards ---
@@ -228,12 +238,12 @@ versions: crewai 1.15.22
 
 --- crewai: the ORCHESTRATOR's own view — every model call CrewAI made for it ---
   CrewAI made 2 model call(s) for the orchestrator and 4 for the summarizer
-  [orchestrator model call 0] LAST message only, 4 in the list, role=user:
-    'Analyze the tool result. If requirements are met, provide the Final Answer. Otherwise, call the next tool. Deliver only the answer without meta-commentary.'
+  [orchestrator model call 0] LAST message only, 2 in the list, role=user:
+    '\nCurrent Task: Produce a Q3 pipeline summary.\n\nThis is the expected criteria for your final answer: A short summary.\nyou MUST return the actual complete content as the final answer, not a summary.\n\nBegin! This is VERY important to you, use the tools available and give your best Final Answer, your job depends on it!\n\nThought:'
   [orchestrator model call 1] LAST message only, 4 in the list, role=user:
     'Analyze the tool result. If requirements are met, provide the Final Answer. Otherwise, call the next tool. Deliver only the answer without meta-commentary.'
   (each block above is the LAST message of that call, not the whole list — the earlier ones are the system/task prompt)
-  [orchestrator model call 0] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): True
+  [orchestrator model call 0] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): False
   [orchestrator model call 1] mentions 'crm_query': False · mentions 'crm_export': False · carries the coworker's final answer ('summary of 4200 Q3 pipeline rows'): True
 
 --- crewai: the child guards ---
