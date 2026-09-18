@@ -313,6 +313,7 @@ class WireReasonCode:
     NON_FINITE = "non_finite"
     DUPLICATE_MEMBER = "duplicate_member"
     NON_CANONICAL = "non_canonical"
+    PRINCIPAL_ALTERED = "principal_altered"
     EXPIRED = ReasonCode.EXPIRED  # "expired" — reuse, don't reinvent
 
 
@@ -402,7 +403,8 @@ def _resolve(guard_or_node):
 # =========================================================================
 
 def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
-                  del_max_depth: int | None, par_hash: str | None) -> str:
+                  del_max_depth: int | None, par_hash: str | None,
+                  principal: str | None = None) -> str:
     authority = node.authority
     if authority.ttl is None:
         raise WireError(
@@ -416,9 +418,16 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
         "kid": getattr(signer, "kid", None),
         "c14n": "JCS",
     }
+    # RFC 9068 Section 2.2 assigns `sub` a meaning: the resource owner where one
+    # exists, otherwise the client application. Once a delegation chain has an
+    # accountable principal, the agent id is the wrong occupant (draft -02, and
+    # draft-ietf-wimse-aims Section 10.3, which puts the agent in `client_id`).
+    # `principal=None` keeps the -01 shape so tokens minted before this change,
+    # and the frozen -01 vector set, still verify unchanged.
+    subject = node.agent_id if principal is None else principal
     payload = {
         "iss": iss,
-        "sub": node.agent_id,
+        "sub": subject,
         "aud": aud,
         "iat": iat,
         "exp": iat + authority.ttl,
@@ -426,6 +435,9 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
         "authorization_details": [_authority_detail(authority)],
         "del_depth": node.depth,
     }
+    if principal is not None:
+        # The agent that acted at THIS hop. Varies per hop; `sub` does not.
+        payload["client_id"] = node.agent_id
     if del_max_depth is not None:
         payload["del_max_depth"] = del_max_depth
     if par_hash is not None:
@@ -440,7 +452,7 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
 
 def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
               aud=None, jti: str | None = None, iat: int = 0,
-              max_depth: int | None = None) -> str:
+              max_depth: int | None = None, principal: str | None = None) -> str:
     """Emit ONE Delegation Token for `guard_or_node` (a `Guard`, or a bare
     `chain.Node`) as a compact JWT: `b64url(header).b64url(payload).b64url(sig)`.
 
@@ -475,7 +487,8 @@ def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
                 "root token (depth 0) requires del_max_depth; pass a Guard "
                 "(reads chain.max_depth) or serialize(..., max_depth=N)")
     return _build_token(node, signer, iss=iss, aud=aud, jti=jti, iat=iat,
-                        del_max_depth=del_max_depth, par_hash=None)
+                        del_max_depth=del_max_depth, par_hash=None,
+                        principal=principal)
 
 
 # =========================================================================
@@ -496,6 +509,7 @@ def _root_to_leaf_path(chain, leaf_node_id: str) -> list:
 
 
 def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "attenu-guard",
+                    principal: str | None = None,
                     aud=None, iat: int = 0) -> list[str]:
     """Serialize every node from root to `leaf_guard`, inclusive, as a
     Delegation Chain: `[DT_0, DT_1, ..., DT_n]` (draft {{chain-linkage}}).
@@ -535,7 +549,7 @@ def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "attenu-guard",
         if n.depth != 0:
             par_hash = b64url_encode(hashlib.sha256(prev_signing_input).digest())
         token = _build_token(n, signer, iss=iss, aud=aud, jti=None, iat=iat,
-                             del_max_depth=del_max_depth, par_hash=par_hash)
+                             del_max_depth=del_max_depth, par_hash=par_hash, principal=principal)
         header_b64, payload_b64, _sig_b64 = token.split(".")
         prev_signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
         tokens.append(token)
@@ -682,6 +696,33 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
         if not signer.verify(signing_input, sig, kid):
             raise WireError(WireReasonCode.SIGNATURE_INVALID,
                             f"token[{i}] signature does not verify")
+
+    # ---- principal invariance (draft -02) ---------------------------------
+    # R5 of draft-reece-wimse-cross-org-delegation asks for two things: convey
+    # the on-behalf-of principal along the chain, AND let a relying party verify
+    # that intermediaries did not alter it. par_hash already makes a child
+    # unable to re-parent onto a different token, but nothing stopped a child
+    # from carrying a DIFFERENT `sub` than its parent, so the second half of R5
+    # was not met. It is met here.
+    #
+    # A chain is -02 shaped when any token carries `client_id` (the claim that
+    # moved the agent id out of `sub`). Chains minted before that, and the
+    # frozen -01 vector set, carry no `client_id` and keep the -01 meaning of
+    # `sub`, so they are not subject to this check and still verify.
+    if any("client_id" in payload for _h, payload, _s, _si in parsed):
+        root_sub = parsed[0][1].get("sub")
+        if not isinstance(root_sub, str) or not root_sub:
+            raise WireError(
+                WireReasonCode.MALFORMED,
+                "chain carries client_id (draft -02 claim layout) so DT_0 MUST "
+                "carry a non-empty 'sub' naming the accountable principal")
+        for i, (_h, payload, _s, _si) in enumerate(parsed):
+            if payload.get("sub") != root_sub:
+                raise WireError(
+                    WireReasonCode.PRINCIPAL_ALTERED,
+                    f"token[{i}] sub {payload.get('sub')!r} != DT_0 sub "
+                    f"{root_sub!r}; the accountable principal MUST be identical "
+                    f"in every token of the chain")
 
     # ---- step 2: par_hash byte-commitment (constant-time, over hex) -------
     if "par_hash" in parsed[0][1]:
