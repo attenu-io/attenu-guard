@@ -108,6 +108,56 @@ invariant — in your framework, in your process — no proxy, and no network ca
 - **Scenario harness** — declarative JSON/YAML authorization tests (`attenu-guard scenarios file.json`); see [`scenarios/`](scenarios/).
 - **Adapters** — shipped, tested integrations for the major agent frameworks as [`attenu_guard.adapters.<name>`](src/attenu_guard/adapters/): LangGraph, LangChain `create_agent` / deepagents, OpenAI Agents SDK, Google ADK, Pydantic AI, CrewAI, AutoGen, Microsoft Agent Framework, AG2, Claude Agent SDK, smolagents, AWS Strands, LlamaIndex, Semantic Kernel, Agno, Haystack, CAMEL-AI, OpenHands, AstrBot — and, for the **A2A** protocol, a client interceptor plus a guarded `AgentExecutor` that carries the attenuated chain across a hop between processes. Each has offline tests, and all but OpenHands and AstrBot have an offline demo under [`examples/integrations/`](examples/integrations/); install one with `pip install 'attenu-guard[<extra>]'`. Hooks, versions and what each framework enforces itself: [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
+## Observe mode: record first, gate later
+
+You do not have to decide a policy to get value out of this. Point it at agents that
+already exist, let every call through, and read what they did. Nothing is refused, so
+there is nothing to get wrong.
+
+```python
+from attenu_guard import Authority, Guard
+
+# Wide on purpose: you are watching, not gating.
+# Note the scope grammar: "*" is only valid as the final segment, so list the
+# families your app uses. A bare "*" is rejected.
+WIDE = Authority(scopes={"crm.*", "mail.*", "fs.*"}, ceilings=[], ttl=3600)
+
+root  = Guard.issue("orchestrator", WIDE, max_depth=4)
+child = root.delegate("summarizer", WIDE, task="summarize")
+
+child.check("mail.send")          # allowed, and recorded
+
+for e in root.audit_log().entries:
+    print(e.get("event"), e.get("node"), e.get("scope"))
+```
+
+```
+root    chain:n0  None
+spawn   chain:n1  None
+allow   chain:n0  crm.read
+allow   chain:n1  crm.read
+allow   chain:n1  mail.send
+```
+
+Every hand-off and every call is on the hash-chained log, with the parent each child
+came from. Read it, and you can see whether a child ever made a call its parent would
+not have been allowed to make. Then narrow the authorities and the same code starts
+refusing.
+
+**On somebody else's app**, you will not know the tool names in advance. The adapters
+take two hooks for exactly this: `default_policy(tool_name) -> ToolPolicy` and
+`default_subagent_authority(name) -> Authority`. When nothing was declared for a tool
+or a sub-agent, the hook's result is used as if it had been, so the call is authorized
+and **recorded with a generated scope** instead of denied. `default_policy` takes
+precedence over `allow_unlisted`, which silently passes unlisted tools without
+recording a scope for them.
+
+**What this does not do.** A wide authority is a choice you are making, not a magic
+pass: a tool that *is* listed and falls outside the authority still denies. Observe
+mode changes what you declare, not how `check()` decides. And a call that never
+reaches the hook is neither recorded nor refused — see
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
+
 ## Canonicalization and compatibility
 
 Versions 0.7 and later use [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) for every
