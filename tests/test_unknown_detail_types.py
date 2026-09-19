@@ -170,6 +170,42 @@ class MembersInsideAConstraint(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._auth({"key": "max_rows", "max": 100, "bogus": 1})
 
+    def test_normalising_ceilings_are_not_rejected(self):
+        """The false positive that nearly shipped, and the gap that hid it.
+
+        A first version of this rule compared whole VALUES: parse the
+        constraint, re-emit it, refuse if the result was not the input. That
+        cannot tell "we ignored a member" from "we normalised a value", and
+        three built-ins legitimately normalise -- `Allow`/`Deny` emit `one_of` /
+        `not_one_of` sorted and hold them as frozensets, and `to_wire` omits
+        `field` when it equals `key`.
+
+        RFC 8785 canonicalises object member ORDER and never reorders array
+        elements, and the draft puts no ordering or uniqueness requirement on
+        `one_of`. So every case below is a conformant constraint a third-party
+        issuer may legitimately send, and value equality called all four
+        malformed. On a release whose subject is reading tokens correctly,
+        refusing correct tokens is the worse failure.
+
+        These cases exist because NO vector or fixture in either repo carries an
+        `allow`, `deny` or `prefix` constraint -- the "all 116 constraint
+        objects round-trip exactly" regression check only ever exercised the
+        four ceilings that emit what they read, so it passed vacuously.
+        """
+        for label, c in (
+            ("one_of unsorted", {"key": "region", "type": "allow",
+                                 "one_of": ["us-west", "us-east"]}),
+            ("not_one_of unsorted", {"key": "region", "type": "deny",
+                                     "not_one_of": ["b", "a"]}),
+            ("one_of with a duplicate", {"key": "region", "type": "allow",
+                                         "one_of": ["a", "a"]}),
+            ("explicit field equal to key", {"key": "region", "type": "allow",
+                                             "one_of": ["us"], "field": "region"}),
+        ):
+            with self.subTest(case=label):
+                auth = self._auth(c)          # must not raise
+                self.assertEqual(len(auth.ceilings), 1)
+
     def test_an_unknown_constraint_TYPE_still_fails_closed_not_parse_error(self):
         """The distinction worth keeping.
 

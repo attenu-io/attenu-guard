@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import Ceiling, ceiling_from_wire
+from .ceilings import Ceiling, ceiling_from_wire, ctx_field_of
 from .reasons import Decision, Reason, ReasonCode
 
 
@@ -44,9 +44,9 @@ _SCOPE_RE = re.compile(
 def _ceiling_from_wire_whole(c):
     """`ceiling_from_wire`, but refusing a constraint we would only partly read.
 
-    Every built-in reads a fixed set of members and re-emits exactly those, so a
-    round-trip that does not reproduce the input means this build ignored
-    something the issuer signed. That was live and silent:
+    The test is a MEMBER difference, not value equality. Parse the constraint,
+    re-emit it, and refuse if the input carried a member the re-emission does
+    not — that member is one this build did not read. That was live and silent:
 
         {"key": "max_rows", "max": 100, "min": 9999}  ->  {"key": "max_rows", "max": 100}
 
@@ -57,23 +57,40 @@ def _ceiling_from_wire_whole(c):
     malformed -- it must be refused, never silently resolved to whichever one
     this build happens to read first.
 
+    Comparing whole VALUES instead was tried and reverted before release: it
+    could not tell "we ignored a member" from "we normalised a value", and
+    several built-ins legitimately normalise. `Allow.to_wire` emits its
+    `one_of` sorted and `from_wire` holds it as a frozenset, and `to_wire`
+    omits `field` when it equals `key`. RFC 8785 canonicalises object member
+    ORDER and never reorders array elements, and the draft puts no ordering or
+    uniqueness requirement on `one_of` -- so `["us-west", "us-east"]` is a
+    perfectly conformant constraint from a third-party issuer, and value
+    equality called it malformed. On a release whose whole subject is reading
+    tokens correctly, refusing correct tokens is the worse failure.
+
     An unrecognised constraint TYPE is a different case and is deliberately not
-    caught here: `_UnknownCeiling` preserves its whole dict, so it round-trips
-    and still routes to the fail-closed path the draft requires ("a verifier
-    that encounters an unknown constraint type MUST treat the action as denied
-    ... never as unconstrained"). Rejecting those here would turn a deny into a
-    parse error and lose that distinction.
+    caught here: `_UnknownCeiling` preserves its whole dict, so nothing looks
+    dropped, and it still routes to the fail-closed path the draft requires ("a
+    verifier that encounters an unknown constraint type MUST treat the action
+    as denied ... never as unconstrained"). Rejecting those here would turn a
+    deny into a parse error and lose that distinction. Its denial is
+    unconditional, so arbitrary payload riding inside an unknown-typed
+    constraint is inert rather than ignored.
     """
     ceiling = ceiling_from_wire(c)
     if isinstance(c, Mapping):
-        emitted = ceiling.to_wire()
-        if emitted != dict(c):
-            dropped = sorted(set(c) - set(emitted))
+        dropped = set(c) - set(ceiling.to_wire())
+        # `field` is read and then not re-emitted when it equals `key`, because
+        # at that point it is redundant (`Allow.to_wire`). Absent from the
+        # emission does not mean unread here, so confirm the ceiling actually
+        # resolved to it rather than assuming either way.
+        if "field" in dropped and ctx_field_of(ceiling) == c.get("field"):
+            dropped.discard("field")
+        dropped = sorted(dropped)
+        if dropped:
             raise ValueError(
-                f"constraint {dict(c)!r} carries "
-                + (f"members this build does not evaluate and will not ignore: "
-                   f"{', '.join(map(repr, dropped))}" if dropped
-                   else "a value this build rewrites rather than reads verbatim"))
+                f"constraint {dict(c)!r} carries members this build does not "
+                f"evaluate and will not ignore: {', '.join(map(repr, dropped))}")
     return ceiling
 
 
