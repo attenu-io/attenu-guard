@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import Ceiling, ceiling_from_wire, ctx_field_of
+from .ceilings import Ceiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
 
 
@@ -79,12 +79,30 @@ def _ceiling_from_wire_whole(c):
     """
     ceiling = ceiling_from_wire(c)
     if isinstance(c, Mapping):
-        dropped = set(c) - set(ceiling.to_wire())
+        emitted = ceiling.to_wire()
+        # `key` is the one member whose VALUE is load-bearing: subsumption pairs
+        # ceilings by it, so a rewritten key is a different dimension, not a
+        # cosmetic difference. `CallLimit` rewrites it ("max_calls" ->
+        # "max_calls[fs.write]" when `applies_to` is present), which the member
+        # test cannot see because the member set is unchanged. Checked on its
+        # own rather than by returning to whole-value equality, which is what
+        # broke conformant tokens a revision ago.
+        if emitted.get("key") != c.get("key"):
+            raise ValueError(
+                f"constraint {dict(c)!r} names dimension {c.get('key')!r} but this "
+                f"build reads it as {emitted.get('key')!r}; refusing rather than "
+                "silently changing which dimension is bounded")
+        dropped = set(c) - set(emitted)
         # `field` is read and then not re-emitted when it equals `key`, because
         # at that point it is redundant (`Allow.to_wire`). Absent from the
-        # emission does not mean unread here, so confirm the ceiling actually
-        # resolved to it rather than assuming either way.
-        if "field" in dropped and ctx_field_of(ceiling) == c.get("field"):
+        # emission does not mean unread, so exempt it only on EVIDENCE that this
+        # ceiling parsed it: the attribute the constructor actually populated.
+        # `ctx_field_of` is not that evidence — it falls back to a hardcoded
+        # `ctx_field` and then to `key`, so it returns the input's value by
+        # coincidence for the metered built-ins (which never read `field` at
+        # all) and unconditionally for a custom ceiling deriving `ctx_field`
+        # from its own input, letting `field` ride through unread.
+        if "field" in dropped and getattr(ceiling, "field", None) == c.get("field"):
             dropped.discard("field")
         dropped = sorted(dropped)
         if dropped:

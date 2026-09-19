@@ -206,6 +206,52 @@ class MembersInsideAConstraint(unittest.TestCase):
                 auth = self._auth(c)          # must not raise
                 self.assertEqual(len(auth.ceilings), 1)
 
+    def test_a_rewritten_key_is_refused(self):
+        """`key` is the one member whose VALUE is load-bearing.
+
+        Subsumption pairs ceilings by `key`, so a rewritten key is a different
+        dimension, not a cosmetic difference. `CallLimit` rewrites it when
+        `applies_to` is present -- "max_calls" becomes "max_calls[fs.write]" --
+        and the member test cannot see that, because the member set is
+        unchanged. On a root token, which has no parent to be subsumed against,
+        the issuer wrote `max_calls: 5` and got a ceiling that bounds only
+        `fs.write`.
+
+        Checked on its own rather than by returning to whole-value equality,
+        which is what rejected conformant tokens a revision ago.
+        """
+        with self.assertRaises(ValueError):
+            self._auth({"key": "max_calls", "type": "max_calls",
+                        "max": 5, "applies_to": "fs.write"})
+
+    def test_our_own_call_limit_emission_still_loads(self):
+        """The other half of the rule above: it must not refuse what we emit."""
+        from attenu_guard.ceilings import CallLimit
+        wire = CallLimit(5, applies_to="fs.write").to_wire()
+        self.assertEqual(wire["key"], "max_calls[fs.write]")
+        self.assertEqual(len(self._auth(wire).ceilings), 1)
+
+    def test_field_is_exempt_only_on_evidence_it_was_parsed(self):
+        """The exemption must fire on evidence, not coincidence.
+
+        `ctx_field_of` falls back to a hardcoded `ctx_field` and then to `key`,
+        so for the metered built-ins -- which never read `field` in `from_wire`
+        at all -- it returns the input's value by coincidence, and `field` rode
+        through unread. A custom ceiling deriving `ctx_field` from its own input
+        made it fire unconditionally.
+
+        The test is now the attribute the constructor actually populated.
+        Allow/Deny/Prefix carry `field` as a real parsed attribute; the metered
+        built-ins do not, so they fall through to the refusal.
+        """
+        for c in ({"key": "max_rows", "max": 5, "field": "rows"},
+                  {"key": "max_spend", "max": 5, "field": "spend"},
+                  {"key": "max_calls", "max": 5, "field": "calls"},
+                  {"key": "egress", "rank": "none", "field": "egress"}):
+            with self.subTest(constraint=c):
+                with self.assertRaises(ValueError):
+                    self._auth(c)
+
     def test_an_unknown_constraint_TYPE_still_fails_closed_not_parse_error(self):
         """The distinction worth keeping.
 
