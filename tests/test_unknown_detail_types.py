@@ -102,6 +102,87 @@ class UnknownDetailTypesRejected(unittest.TestCase):
         self.assertIn("wes_enterprise_policy", cm.exception.message)
 
 
+class MembersInsideASingleDetail(unittest.TestCase):
+    """The half that bites, and the half the first fix missed.
+
+    The cardinality rule above only sees a SECOND entry. A single
+    `agent_delegation` object carrying extra members sailed through it, because
+    the loader cherry-picked `scopes` and `constraints` and discarded the rest.
+
+    This is not shape-hunting. RFC 9396 section 2 gives every authorization
+    detail object a set of common members -- `actions`, `locations`,
+    `datatypes`, `identifier`, `privileges` -- and the draft's token format says
+    "An array of authorization detail objects {{RFC9396}}", so an issuer
+    expressing a restriction that way is doing the sanctioned thing and having
+    it silently dropped.
+    """
+
+    def test_rfc9396_common_members_are_refused(self):
+        for member, value in (
+            ("actions", ["read"]),
+            ("locations", ["https://api.example.com"]),
+            ("datatypes", ["contacts"]),
+            ("identifier", "acct-1"),
+            ("privileges", ["read"]),
+        ):
+            with self.subTest(member=member):
+                with self.assertRaises(WireError) as cm:
+                    wire._authority_from_payload(_payload([dict(OURS, **{member: value})]))
+                self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_a_restricting_member_is_refused_rather_than_dropped(self):
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([dict(OURS, deny_scopes=["crm.read"])]))
+        self.assertIn("deny_scopes", cm.exception.message)
+
+    def test_critical_is_refused(self):
+        """`critical: true` means "do not ignore me". Ignoring it was the worst case."""
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([dict(OURS, critical=True)]))
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+
+class MembersInsideAConstraint(unittest.TestCase):
+    """One level deeper again, in the draft's own constraint vocabulary."""
+
+    def _auth(self, constraint):
+        from attenu_guard.authority import Authority
+        return Authority.from_wire(
+            {"scopes": ["crm.read"], "constraints": [constraint], "ttl": 10})
+
+    def test_one_typed_value_still_loads(self):
+        self.assertEqual(len(self._auth({"key": "max_rows", "max": 100}).ceilings), 1)
+
+    def test_a_second_typed_value_is_refused_not_resolved(self):
+        """`min` alongside `max` used to keep the max and drop the floor.
+
+        The result was byte-identical to a constraint that never carried a
+        floor, so nothing downstream could tell the difference. `min` is a
+        first-class type in the draft's vocabulary, and the draft allows one
+        typed value per object, which makes two malformed rather than a thing to
+        silently resolve.
+        """
+        with self.assertRaises(ValueError) as cm:
+            self._auth({"key": "max_rows", "max": 100, "min": 9999})
+        self.assertIn("min", str(cm.exception))
+
+    def test_an_unknown_member_inside_a_known_constraint_is_refused(self):
+        with self.assertRaises(ValueError):
+            self._auth({"key": "max_rows", "max": 100, "bogus": 1})
+
+    def test_an_unknown_constraint_TYPE_still_fails_closed_not_parse_error(self):
+        """The distinction worth keeping.
+
+        The draft requires an unknown constraint type to DENY the action, never
+        to be treated as unconstrained. `_UnknownCeiling` does that, and it
+        preserves its whole dict, so it round-trips and must not be turned into
+        a parse error by the rule above -- that would lose the deny.
+        """
+        auth = self._auth({"key": "max_widgets", "max": 5})
+        self.assertEqual(len(auth.ceilings), 1)
+        self.assertFalse(auth.permits("crm.read", {}).allowed)
+
+
 class EndToEndOnTheReleasedVector(unittest.TestCase):
     """The regression that matters: the published chain, re-signed, full `load()`.
 
@@ -156,6 +237,34 @@ class EndToEndOnTheReleasedVector(unittest.TestCase):
     def test_appended_foreign_detail_is_refused_not_ignored(self):
         """The regression. This chain used to verify clean and permit crm.read."""
         tokens = self._leaf_with([FOREIGN])
+        with self.assertRaises(WireError) as cm:
+            wire.load(tokens, self.signer, now=self.vector["now"])
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def _leaf_mutating_detail(self, **members):
+        """Rebuild the leaf with `members` merged INTO its single detail."""
+        hdr, payload_b64, _ = self.vector["tokens"][-1].split(".")
+        payload = json.loads(_unb64u(payload_b64))
+        payload["authorization_details"][0].update(members)
+        return list(self.vector["tokens"][:-1]) + [self._resign(hdr, payload)]
+
+    def test_a_member_inside_the_single_detail_is_refused(self):
+        """The regression the first fix missed.
+
+        This chain carries ONE authorization detail, so the cardinality rule
+        never fires. Before the member check it verified clean and still
+        permitted crm.read while `deny_scopes` said not to.
+        """
+        tokens = self._leaf_mutating_detail(deny_scopes=["crm.read"])
+        with self.assertRaises(WireError) as cm:
+            wire.load(tokens, self.signer, now=self.vector["now"])
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_a_member_inside_a_constraint_is_refused(self):
+        hdr, payload_b64, _ = self.vector["tokens"][-1].split(".")
+        payload = json.loads(_unb64u(payload_b64))
+        payload["authorization_details"][0]["constraints"][0]["min"] = 9999
+        tokens = list(self.vector["tokens"][:-1]) + [self._resign(hdr, payload)]
         with self.assertRaises(WireError) as cm:
             wire.load(tokens, self.signer, now=self.vector["now"])
         self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)

@@ -41,6 +41,42 @@ _SCOPE_RE = re.compile(
 )
 
 
+def _ceiling_from_wire_whole(c):
+    """`ceiling_from_wire`, but refusing a constraint we would only partly read.
+
+    Every built-in reads a fixed set of members and re-emits exactly those, so a
+    round-trip that does not reproduce the input means this build ignored
+    something the issuer signed. That was live and silent:
+
+        {"key": "max_rows", "max": 100, "min": 9999}  ->  {"key": "max_rows", "max": 100}
+
+    byte-identical to a constraint that never carried a floor. `min` is a
+    first-class type in the draft's constraint vocabulary ("the value MUST NOT
+    be less than it"), so this dropped a signed, spec-defined, *restricting*
+    term. The draft allows one typed value per object, which makes two
+    malformed -- it must be refused, never silently resolved to whichever one
+    this build happens to read first.
+
+    An unrecognised constraint TYPE is a different case and is deliberately not
+    caught here: `_UnknownCeiling` preserves its whole dict, so it round-trips
+    and still routes to the fail-closed path the draft requires ("a verifier
+    that encounters an unknown constraint type MUST treat the action as denied
+    ... never as unconstrained"). Rejecting those here would turn a deny into a
+    parse error and lose that distinction.
+    """
+    ceiling = ceiling_from_wire(c)
+    if isinstance(c, Mapping):
+        emitted = ceiling.to_wire()
+        if emitted != dict(c):
+            dropped = sorted(set(c) - set(emitted))
+            raise ValueError(
+                f"constraint {dict(c)!r} carries "
+                + (f"members this build does not evaluate and will not ignore: "
+                   f"{', '.join(map(repr, dropped))}" if dropped
+                   else "a value this build rewrites rather than reads verbatim"))
+    return ceiling
+
+
 def _validate_scope(scope: str) -> None:
     """Validate the agent_delegation scope grammar defined by the I-D."""
     if not isinstance(scope, str) or _SCOPE_RE.fullmatch(scope) is None:
@@ -265,7 +301,7 @@ class Authority:
     def from_wire(cls, d: Mapping) -> "Authority":
         scopes = d.get("scopes", ())
         constraints = d.get("constraints", ())
-        ceilings = tuple(ceiling_from_wire(c) for c in constraints)
+        ceilings = tuple(_ceiling_from_wire_whole(c) for c in constraints)
         return cls(frozenset(scopes), ceilings, d.get("ttl"))
 
     # continuity aliases (v0.1 called these to_dict/from_dict)

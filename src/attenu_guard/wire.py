@@ -391,6 +391,24 @@ def _authority_from_payload(payload: Mapping) -> Authority:
             "authorization_details carries entries this verifier cannot "
             "evaluate and will not ignore: "
             + ", ".join(repr(t) for t in unevaluated))
+    # The same rule one level down, and this is the half that bites. RFC 9396
+    # section 2 gives EVERY authorization detail object a set of common members
+    # -- `actions`, `locations`, `datatypes`, `identifier`, `privileges` -- and
+    # the draft's token format says "An array of authorization detail objects
+    # {{RFC9396}}", so an issuer expressing a restriction that way is doing the
+    # sanctioned thing. We read `scopes` and `constraints` and nothing else, so
+    # every one of those members was being dropped in silence, inside a single
+    # `agent_delegation` entry that the cardinality check above never sees.
+    # Verified before the fix: a leaf carrying `deny_scopes`, or `actions` plus
+    # `locations`, or `critical: true`, verified clean and still permitted the
+    # scope the extra member was there to restrict.
+    unknown_members = sorted(set(d0) - {"type", "scopes", "constraints"})
+    if unknown_members:
+        raise WireError(
+            WireReasonCode.MALFORMED,
+            "the agent_delegation authorization detail carries members this "
+            "verifier cannot evaluate and will not ignore: "
+            + ", ".join(repr(m) for m in unknown_members))
     iat, exp = payload.get("iat"), payload.get("exp")
     if not _is_json_number(iat) or not _is_json_number(exp):
         raise WireError(WireReasonCode.MALFORMED, "iat/exp missing or not numeric")
