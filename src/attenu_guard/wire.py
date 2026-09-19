@@ -363,6 +363,34 @@ def _authority_from_payload(payload: Mapping) -> Authority:
     if not isinstance(d0, Mapping) or d0.get("type") != "agent_delegation":
         raise WireError(WireReasonCode.MALFORMED,
                          "authorization_details[0].type must be 'agent_delegation'")
+    # Everything past the first entry used to go unread: a token carrying a
+    # second detail verified clean while that detail was silently discarded.
+    # Fail-open in exactly one direction, and it is the dangerous one -- an
+    # ignored entry that RESTRICTS authority is lost, while one that GRANTS
+    # extra authority is harmless because ignoring it leaves us more
+    # restrictive. Demonstrated on the released `valid_chain` vector: a trailing
+    # detail carrying deny_scopes ["crm.read"] was dropped and the chain still
+    # permitted crm.read.
+    #
+    # So refuse what this verifier cannot evaluate, which is the same rule the
+    # draft already states for an invalid scope ("A verifier that encounters one
+    # MUST reject the Delegation Token as malformed before evaluating
+    # subsumption"). Two `agent_delegation` entries are refused for a second
+    # reason: the draft says Authority is expressed by "an" authorization detail
+    # of that type and never says which element to take, so picking the first
+    # silently nominated a winner the document does not.
+    #
+    # Refusing is also the loosenable direction. If a later revision defines
+    # ignorable/critical marking (RFC 9396's posture), accepting more is a
+    # compatible change; starting permissive and tightening later would not be.
+    if len(details) > 1:
+        unevaluated = [d.get("type") if isinstance(d, Mapping) else None
+                       for d in details[1:]]
+        raise WireError(
+            WireReasonCode.MALFORMED,
+            "authorization_details carries entries this verifier cannot "
+            "evaluate and will not ignore: "
+            + ", ".join(repr(t) for t in unevaluated))
     iat, exp = payload.get("iat"), payload.get("exp")
     if not _is_json_number(iat) or not _is_json_number(exp):
         raise WireError(WireReasonCode.MALFORMED, "iat/exp missing or not numeric")

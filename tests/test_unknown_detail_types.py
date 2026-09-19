@@ -1,0 +1,179 @@
+"""A verifier must not report success on a token it did not fully read.
+
+Ops #109. Found while answering an IETF list reviewer who asked whether scope
+evaluation could stay pluggable. The draft's answer is that a deployment with its
+own policy vocabulary registers its own `authorization_details` type rather than
+forking the verifier -- see the last paragraph of "Scope Syntax and Wildcards":
+
+    This wildcard-covering rule applies only to the "scopes" member of the
+    "agent_delegation" authorization detail type defined in {{authority}}; other
+    authorization detail types, if defined, specify their own scope semantics.
+
+Before this change, that route failed open. `_authority_from_payload` read
+`details[0]` and never looked at the rest, so a token carrying `agent_delegation`
+first and a second detail after it verified clean while the second detail was
+discarded without a signal. Demonstrated end-to-end on the released
+`valid_chain` vector: a trailing detail carrying `deny_scopes: ["crm.read"]` was
+dropped and `permits("crm.read")` still returned allowed -- the verifier
+permitted the action the issuer's own detail forbade.
+
+The failure was silent in exactly one direction, which is the dangerous one: an
+ignored detail that RESTRICTS authority is lost, while one that GRANTS extra
+authority is harmless because ignoring it leaves the chain more restrictive.
+
+The rule taken here is the same shape and the same place as the draft's existing
+MUST for invalid scopes ("A verifier that encounters one MUST reject the
+Delegation Token as malformed before evaluating subsumption"): reject what we
+cannot evaluate, rather than ignore it. Rejecting is also the loosenable
+direction -- if a future revision defines ignorable/critical marking per RFC 9396,
+accepting more is a compatible change, whereas starting permissive and tightening
+later would break deployments.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from attenu_guard import canonical, wire  # noqa: E402
+from attenu_guard.wire import WireError, WireReasonCode  # noqa: E402
+
+
+def _b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _unb64u(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+OURS = {"type": "agent_delegation", "scopes": ["crm.read"], "constraints": []}
+FOREIGN = {"type": "wes_enterprise_policy", "deny_scopes": ["crm.read"]}
+
+
+def _payload(details):
+    return {"iat": 0, "exp": 100, "authorization_details": details}
+
+
+class UnknownDetailTypesRejected(unittest.TestCase):
+    """The unit-level rule, on every ordering."""
+
+    def test_single_known_detail_still_loads(self):
+        a = wire._authority_from_payload(_payload([OURS]))
+        self.assertEqual(sorted(a.scopes), ["crm.read"])
+
+    def test_known_first_then_foreign_is_rejected(self):
+        """The ordering that used to verify clean while dropping the foreign entry."""
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([OURS, FOREIGN]))
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_foreign_first_still_rejected(self):
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([FOREIGN, OURS]))
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_foreign_alone_still_rejected(self):
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([FOREIGN]))
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_two_agent_delegation_details_are_rejected(self):
+        """Ambiguous rather than foreign: which one is the Authority?
+
+        The draft says Authority is expressed by "an" authorization detail whose
+        type is agent_delegation, and never says which element to take when
+        several are present. Taking the first silently picked a winner the
+        document never nominated.
+        """
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([OURS, dict(OURS, scopes=["crm.write"])]))
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_message_names_the_offending_entry(self):
+        """A denial a deployer cannot act on is only half a fix."""
+        with self.assertRaises(WireError) as cm:
+            wire._authority_from_payload(_payload([OURS, FOREIGN]))
+        self.assertIn("wes_enterprise_policy", cm.exception.message)
+
+
+class EndToEndOnTheReleasedVector(unittest.TestCase):
+    """The regression that matters: the published chain, re-signed, full `load()`.
+
+    A unit call on `_authority_from_payload` would pass even if `load()` reached
+    the authority by some other path, so this drives the real entry point over
+    the bytes we actually ship.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        here = os.path.dirname(__file__)
+        path = os.path.join(here, "..", "src", "attenu_guard", "vectors", "valid_chain.json")
+        with open(path) as fh:
+            cls.vector = json.load(fh)
+        cls.secret = bytes.fromhex(cls.vector["signer"]["secret_hex"])
+        cls.signer = wire.HS256TestSigner(cls.secret, kid=cls.vector["signer"]["kid"])
+
+    def _resign(self, hdr_b64: str, payload_obj) -> str:
+        raw = canonical.dumps(payload_obj)
+        if isinstance(raw, str):
+            raw = raw.encode()
+        p = _b64u(raw)
+        sig = hmac.new(self.secret, f"{hdr_b64}.{p}".encode(), hashlib.sha256).digest()
+        return f"{hdr_b64}.{p}.{_b64u(sig)}"
+
+    def _leaf_with(self, extra_details):
+        """Rebuild the leaf with `extra_details` appended.
+
+        The LEAF is mutated on purpose: no child commits to it through `par_hash`,
+        so the only difference from the published chain is the inserted entry.
+        """
+        hdr, payload_b64, _ = self.vector["tokens"][-1].split(".")
+        payload = json.loads(_unb64u(payload_b64))
+        payload["authorization_details"].extend(extra_details)
+        return list(self.vector["tokens"][:-1]) + [self._resign(hdr, payload)]
+
+    def test_control_resigned_unchanged_still_verifies(self):
+        """Proves the re-signing method itself is sound.
+
+        Without this, a rejection below could just mean the test signs badly.
+        """
+        hdr, payload_b64, _ = self.vector["tokens"][-1].split(".")
+        payload = json.loads(_unb64u(payload_b64))
+        tokens = list(self.vector["tokens"][:-1]) + [self._resign(hdr, payload)]
+        chain = wire.load(tokens, self.signer, now=self.vector["now"])
+        self.assertTrue(chain.permits("crm.read").allowed)
+
+    def test_published_vector_unmodified_still_verifies(self):
+        chain = wire.load(self.vector["tokens"], self.signer, now=self.vector["now"])
+        self.assertTrue(chain.permits("crm.read").allowed)
+
+    def test_appended_foreign_detail_is_refused_not_ignored(self):
+        """The regression. This chain used to verify clean and permit crm.read."""
+        tokens = self._leaf_with([FOREIGN])
+        with self.assertRaises(WireError) as cm:
+            wire.load(tokens, self.signer, now=self.vector["now"])
+        self.assertEqual(cm.exception.reason, WireReasonCode.MALFORMED)
+
+    def test_canonicalization_is_not_what_stops_it(self):
+        """JCS must not be mistaken for the protection.
+
+        The first reproduction was rejected `non_canonical` only because the test
+        re-serialized with `json.dumps`. Going through `canonical.dumps` produced
+        a token the verifier accepted, so the guarantee has to come from the
+        detail-type rule and not from canonicalization. This asserts the failure
+        is the rule, never NON_CANONICAL.
+        """
+        tokens = self._leaf_with([FOREIGN])
+        with self.assertRaises(WireError) as cm:
+            wire.load(tokens, self.signer, now=self.vector["now"])
+        self.assertNotEqual(cm.exception.reason, WireReasonCode.NON_CANONICAL)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
