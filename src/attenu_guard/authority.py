@@ -332,8 +332,25 @@ class Authority:
             "ttl": self.ttl,
         }
 
+    _WIRE_MEMBERS = frozenset({"scopes", "constraints", "ttl"})
+
     @classmethod
     def from_wire(cls, d: Mapping) -> "Authority":
+        # Read the authority object WHOLE, for the same reason the constraint
+        # inside it is read whole. The token path was safe only by accident --
+        # `wire._authority_from_payload` builds this dict itself after checking
+        # the detail's members -- but the BUNDLE path hands us the raw untrusted
+        # object straight out of a ledger entry (`evidence`, the `authority` and
+        # `granted` members). Without this, `verify_bundle` reported success on
+        # an authority it had read by projection: a `granted` carrying
+        # `deny_scopes` verified clean with `checks["ledger_fields"]` true,
+        # because that check only covers an entry's TOP-LEVEL keys.
+        if isinstance(d, Mapping):
+            unknown = sorted(set(d) - cls._WIRE_MEMBERS)
+            if unknown:
+                raise ValueError(
+                    f"authority {dict(d)!r} carries members this build does not "
+                    f"evaluate and will not ignore: {', '.join(map(repr, unknown))}")
         scopes = d.get("scopes", ())
         constraints = d.get("constraints", ())
         ceilings = tuple(_ceiling_from_wire_whole(c) for c in constraints)

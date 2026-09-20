@@ -144,5 +144,65 @@ class DetailIsALedgerField(unittest.TestCase):
         r = evidence.redaction_report(root.audit_log().entries)
         self.assertTrue(r["ok"], r["violations"])
 
+
+class AuthorityObjectsAreReadWhole(unittest.TestCase):
+    """The entry-key check covers only an entry's TOP LEVEL.
+
+    A code review found the first version of this release's bundle rule could be
+    stepped around one level in: `authority` and `granted` are wire objects
+    inside an entry, and `Authority.from_wire` read `scopes`/`constraints`/`ttl`
+    and ignored every other member. So a `granted` carrying `deny_scopes`
+    verified clean with `checks["ledger_fields"]` true.
+
+    The token path was safe only by accident -- `wire._authority_from_payload`
+    builds that dict itself after checking the detail's members -- but the
+    bundle path hands `from_wire` the raw untrusted object out of the ledger.
+    """
+
+    def setUp(self):
+        self.signer = HS256TestSigner(b"\x01" * 32, kid="t")
+        wide = Authority(scopes={"crm.*"}, ceilings=[], ttl=3600)
+        root = Guard.issue("orchestrator", wide, max_depth=4)
+        child = root.delegate("worker", wide, task="t")
+        child.check("crm.read")
+        self.bundle = evidence.export_bundle(root.audit_log(), self.signer)
+
+    def _poisoned(self, member):
+        b = copy.deepcopy(self.bundle)
+        target = next(e for e in b["entries"] if e.get(member))
+        target[member]["deny_scopes"] = ["crm.read"]
+        target[member]["critical"] = True
+        _rehash(b["entries"])
+        return b
+
+    def test_a_member_inside_granted_is_refused(self):
+        report = evidence.verify_bundle(self._poisoned("granted"))
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("unreadable granted" in f for f in report["failures"]),
+                        report["failures"])
+
+    def test_a_member_inside_authority_is_refused(self):
+        report = evidence.verify_bundle(self._poisoned("authority"))
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("unreadable authority" in f for f in report["failures"]),
+                        report["failures"])
+
+    def test_a_clean_authority_still_loads(self):
+        self.assertTrue(evidence.verify_bundle(self.bundle)["ok"])
+        Authority.from_wire({"scopes": ["crm.read"], "constraints": [], "ttl": 10})
+
+    def test_context_is_deliberately_out_of_scope(self):
+        """`context` is free-form by contract and redacted for transport.
+
+        Asserted so the boundary is a decision on the record rather than an
+        oversight someone later reads as one.
+        """
+        b = copy.deepcopy(self.bundle)
+        for e in b["entries"]:
+            if e.get("event") == "allow":
+                e.setdefault("context", {})["anything_at_all"] = 1
+        _rehash(b["entries"])
+        self.assertTrue(evidence.verify_bundle(b)["ok"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

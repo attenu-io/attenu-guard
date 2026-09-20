@@ -55,11 +55,19 @@ class ChainVerifier:
             return _denial(tool, scope, "chain_invalid", str(exc))
         decision = vc.permits(scope, ctx_of(args))
         leaf = vc.payloads[-1]
+        # `chain_depth` and `leaf` go in `context`, not at the top level of the
+        # entry. `context` is the free-form member; the top level is a closed
+        # vocabulary (`evidence.LEDGER_FIELDS`) which gates BOTH the custody
+        # check in `export_bundle(strict=True)` and, since 0.17.0, the verifier.
+        # Written at the top level they made this example produce bundles our
+        # own verifier refuses (`unknown_ledger_fields`) and strict export
+        # rejected as a leak. Anything app-specific belongs here.
+        adjunct = {"chain_depth": vc.depth, "leaf": leaf.get("sub")}
         if decision:
-            self._append("allow", tool=tool, scope=scope, chain_depth=vc.depth, leaf=leaf.get("sub"))
+            self._append("allow", tool=tool, scope=scope, context=adjunct)
             return None
         reasons = [r.code for r in decision.reasons]
-        self._append("deny", tool=tool, scope=scope, chain_depth=vc.depth, leaf=leaf.get("sub"),
+        self._append("deny", tool=tool, scope=scope, context=adjunct,
                      reasons=reasons, disposition=Disposition.OUT_OF_AUTHORITY)
         return _denial(tool, scope, "authority_denied", "; ".join(reasons), disposition=Disposition.OUT_OF_AUTHORITY)
 
