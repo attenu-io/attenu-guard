@@ -99,5 +99,50 @@ class UnreadLedgerFieldsAreRefused(unittest.TestCase):
         self.assertTrue(evidence.verify_bundle(self.bundle)["checks"]["ledger_fields"])
 
 
+
+class DetailIsALedgerField(unittest.TestCase):
+    """`detail` is library-written and belongs in the allow-list.
+
+    It was missing, and that was not cosmetic. `LEDGER_FIELDS` gates
+    `export_bundle(strict=True)`, so custody mode raised `EvidenceLeakError` on
+    ANY run that refused a delegation -- max_depth, max_fanout, chain_revoked,
+    agent_banned, integrity, ttl_expired, or an aggregate ceiling -- reporting a
+    field this library wrote as though it were customer data.
+
+    Found by the verify-side check in this release failing on our own omnigent
+    example, which is the one place CI exercises a depth refusal end to end.
+    """
+
+    def test_a_refused_delegation_exports_strict_and_verifies(self):
+        wide = Authority(scopes={"crm.*"}, ceilings=[], ttl=3600)
+        root = Guard.issue("orchestrator", wide, max_depth=1)
+        child = root.delegate("worker", wide, task="t")
+        try:
+            child.delegate("grandchild", wide, task="too deep")
+        except Exception:
+            pass  # the refusal is the point; it writes the spawn_denied entry
+
+        entries = root.audit_log().entries
+        denied = [e for e in entries if e.get("event") == "spawn_denied"]
+        self.assertTrue(denied, "expected a spawn_denied entry from the depth refusal")
+        self.assertIn("detail", denied[0], "the refusal carries a structural detail")
+
+        signer = HS256TestSigner(b"\x01" * 32, kid="t")
+        bundle = evidence.export_bundle(root.audit_log(), signer, strict=True)
+        report = evidence.verify_bundle(bundle, signer)
+        self.assertTrue(report["ok"], report.get("failures"))
+        self.assertTrue(report["checks"]["ledger_fields"])
+
+    def test_redaction_report_accepts_it(self):
+        wide = Authority(scopes={"crm.*"}, ceilings=[], ttl=3600)
+        root = Guard.issue("orchestrator", wide, max_depth=1)
+        child = root.delegate("worker", wide, task="t")
+        try:
+            child.delegate("grandchild", wide, task="too deep")
+        except Exception:
+            pass
+        r = evidence.redaction_report(root.audit_log().entries)
+        self.assertTrue(r["ok"], r["violations"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

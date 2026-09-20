@@ -1303,6 +1303,7 @@ def test_evidence_bundle_verifies_offline():
         "containment": True,
         "anchor": "verified",
         "version": True,
+        "ledger_fields": True,               # 0.17.0: every entry read whole, nothing outside LEDGER_FIELDS
         "chain_id": True,
         "root": True,                        # 0.9.0: exactly-one-root check
         "expected_anchor": "not checked",     # 0.9.0: no expected_anchor/expected_head was given

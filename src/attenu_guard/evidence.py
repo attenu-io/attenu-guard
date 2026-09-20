@@ -56,6 +56,17 @@ LEDGER_FIELDS = frozenset({
     "v", "c14n", "seq", "ts", "event", "prev_hash", "hash", "chain_id", "node", "parent", "agent", "task",
     "scope", "tool", "context", "reason", "reasons", "authority", "requested", "granted", "target",
     "revoked", "strikes", "mode", "disposition",
+    # `detail` is written by the library itself on a refusal (chain.py: max_depth, max_fanout,
+    # chain_revoked, agent_banned, integrity, ttl_expired, and the aggregate-ceiling case), and it
+    # carries only structural values — an agent or parent id, a numeric limit, a ceiling key. Same
+    # class as `node`/`parent`/`agent`, which are already here; never free text, unlike `task`, and
+    # never caller-supplied, unlike `context`.
+    #
+    # Its absence was not cosmetic. `LEDGER_FIELDS` gates `export_bundle(strict=True)`, so custody
+    # mode raised `EvidenceLeakError` on ANY run that refused a delegation — reporting a field this
+    # library wrote as though it were customer data that must not leave the premises. Found when
+    # the verify-side check added in this release failed on our own omnigent example.
+    "detail",
     # 0.9.0 execution binding (schema_version=2 chains): every field named in the spec.
     "call_id", "capture", "adapter", "authorized_params_hash", "params_hash_reason", "params_salt",
     "body_state", "error_code", "invoked_params_hash", "duration_ms", "receipt", "pending_at_kill",
