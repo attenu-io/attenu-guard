@@ -864,14 +864,32 @@ def _same_authority(a: Authority, b: Authority) -> bool:
     return a.is_narrower_than(b) and b.is_narrower_than(a)
 
 
-def _authority_of(bundle: dict, node_id: str) -> "Authority | None":
+def _authority_of(bundle: dict, node_id: str,
+                  failures: "list[str] | None" = None) -> "Authority | None":
+    """The authority a node holds, or None if it is absent OR unreadable.
+
+    `Authority.from_wire` is partial: it refuses a constraint carrying members
+    this build does not read, so a bundle is untrusted input that can make it
+    raise. These functions are documented to return `(bool, failures)`, so an
+    exception here would escape that contract and hand a caller who correctly
+    handles a failure list an exception instead.
+
+    Unreadable is reported distinctly from absent. Both return None and both
+    fail closed at the call site, but "holds None" for a constraint we could not
+    parse would misreport the reason, and the reason is the actionable part.
+    """
     for entry in bundle.get("entries") or []:
         if entry.get("node") != node_id:
             continue
-        if entry.get("event") == "root" and entry.get("authority") is not None:
-            return Authority.from_wire(entry["authority"])
-        if entry.get("event") == "spawn" and entry.get("granted") is not None:
-            return Authority.from_wire(entry["granted"])
+        for event, member in (("root", "authority"), ("spawn", "granted")):
+            if entry.get("event") == event and entry.get(member) is not None:
+                try:
+                    return Authority.from_wire(entry[member])
+                except Exception as exc:  # noqa: BLE001 — untrusted bundle input
+                    if failures is not None:
+                        failures.append(
+                            f"client: node {node_id!r} carries an unreadable {member} ({exc})")
+                    return None
     return None
 
 
@@ -905,7 +923,7 @@ def _check_client(bundle: dict, leaf_jti: str, leaf_sub: str,
         failures.append(
             f"client: node {leaf_jti!r} is agent {node.get('agent')!r}, token says {leaf_sub!r}"
         )
-    held = _authority_of(bundle, leaf_jti)
+    held = _authority_of(bundle, leaf_jti, failures)
     if held is None or not _same_authority(held, leaf_authority):
         failures.append(
             f"client: node {leaf_jti!r} holds {sorted(held.scopes) if held else None}, the "
@@ -934,7 +952,15 @@ def _check_server(bundle: dict, chain_id: str, leaf_sub: str,
         failures.append(
             f"server: continuation root is agent {root.get('agent')!r}, token says {leaf_sub!r}"
         )
-    held = Authority.from_wire(root["authority"])
+    try:
+        # Partial since 0.17.0: refuses a constraint carrying members this build
+        # does not read. A bundle is untrusted input, and this function is
+        # documented to return `(bool, failures)`, so the refusal is reported
+        # rather than raised out of the contract.
+        held = Authority.from_wire(root["authority"])
+    except Exception as exc:  # noqa: BLE001 — untrusted bundle input
+        failures.append(f"server: continuation root carries an unreadable authority ({exc})")
+        return False, failures
     if not _same_authority(held, leaf_authority):
         failures.append(
             f"server: continuation root holds {sorted(held.scopes)}, the token carries "
