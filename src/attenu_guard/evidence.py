@@ -1404,6 +1404,31 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
                 seq=mixed_entries[0].get("seq"), node=mixed_entries[0].get("node"))
     checks["version"] = version_ok
 
+    # (0b2) every entry must be read WHOLE. `LEDGER_FIELDS` was enforced only on the EXPORT path
+    # (`redaction_report`, via `export_bundle(strict=True)`), never on verify, so the verifier read
+    # entries by projection: it picked the fields it knows and never looked at the rest. A producer
+    # could add `deny_scopes` and `critical` to a `spawn` entry, rehash the chain from genesis as
+    # any honest producer does, and `verify_bundle` returned ok=True with zero failures while those
+    # fields stayed invisible in `delegation_graph`.
+    #
+    # That is the same defect as the token-side one this release fixes -- reporting success on
+    # input we did not fully read -- but on the offline-verifiable audit trail, which is the thing
+    # the bundle exists to be. Envelopes (`ENVELOPE_MEMBERS`) and anchors already read whole; this
+    # was the one structure left.
+    #
+    # Reported as a failure rather than raised: `verify_bundle` returns a report, and an unknown
+    # field is a property of the bundle, not an error in the call.
+    unknown_ok = True
+    for e in entries:
+        extra = sorted(f for f in e if f not in LEDGER_FIELDS)
+        if extra:
+            unknown_ok = False
+            log.add("unknown_ledger_fields",
+                    f"unknown_ledger_fields: entry carries fields this verifier does not "
+                    f"evaluate and will not ignore: {', '.join(extra)}",
+                    seq=e.get("seq"), node=e.get("node"))
+    checks["ledger_fields"] = unknown_ok
+
     # (0c) independently retained expected anchor/head: verified against the BUNDLE's actual
     # computed head, never against its own (possibly forged) enclosed anchor.
     if expected_anchor is not None or expected_head is not None:

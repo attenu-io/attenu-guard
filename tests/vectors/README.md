@@ -295,6 +295,7 @@ envelope v1's set, and a v2 declares its own.
 | `anchor_version_mismatch` | the anchor's `v` differs from the bundle's | chain level |
 | `root_version_mismatch` | the root entry's `v` differs from the bundle's | the root entry |
 | `mixed_entry_versions` | some entry declares a `v` other than the bundle's | the first such entry |
+| `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS`, so the verifier would be reporting success on an entry it did not fully read | that entry |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
 | `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
