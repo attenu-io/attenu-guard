@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-20
+
 ### Changed
 - **`Authority.from_wire` is now PARTIAL: it raises on a constraint carrying members this build does not read.** That is the point of the fix below, and on the token path `load()` wraps it into `WireError(MALFORMED)` as before. It matters here because `Authority.from_wire` is public API and a bundle is untrusted input: any caller that treated it as total must now handle a refusal. Every call site in both repos was swept — `evidence` (both ports) and `wire` (both ports) already guarded it; the `a2a` adapter did not, and three sites there are fixed below. If you call it directly on untrusted input, guard it
 
