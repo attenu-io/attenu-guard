@@ -1,7 +1,7 @@
 """A verifier must not report success on a token it did not fully read.
 
-Ops #109. Found while answering an IETF list reviewer who asked whether scope
-evaluation could stay pluggable. The draft's answer is that a deployment with its
+Ops #109. Found while working through how a deployment carries its own policy
+vocabulary alongside ours. The draft's answer is that a deployment with its
 own policy vocabulary registers its own `authorization_details` type rather than
 forking the verifier -- see the last paragraph of "Scope Syntax and Wildcards":
 
@@ -53,7 +53,7 @@ def _unb64u(s: str) -> bytes:
 
 
 OURS = {"type": "agent_delegation", "scopes": ["crm.read"], "constraints": []}
-FOREIGN = {"type": "wes_enterprise_policy", "deny_scopes": ["crm.read"]}
+FOREIGN = {"type": "acme_site_policy", "deny_scopes": ["crm.read"]}
 
 
 def _payload(details):
@@ -99,7 +99,7 @@ class UnknownDetailTypesRejected(unittest.TestCase):
         """A denial a deployer cannot act on is only half a fix."""
         with self.assertRaises(WireError) as cm:
             wire._authority_from_payload(_payload([OURS, FOREIGN]))
-        self.assertIn("wes_enterprise_policy", cm.exception.message)
+        self.assertIn("acme_site_policy", cm.exception.message)
 
 
 class MembersInsideASingleDetail(unittest.TestCase):
