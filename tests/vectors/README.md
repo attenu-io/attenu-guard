@@ -215,6 +215,54 @@ historical exceptions that name a node there instead (`unreadable_authority`,
 `unreadable_granted`) and so state their reason explicitly; neither occurs in
 these vectors.
 
+#### Entry fields
+
+Added 2026-09-26 after a third-party verifier (A2A #1575) reported it could not
+implement `unknown_ledger_fields` or `v2_field_on_v1` from this file because
+neither set was written down. Both are stated here, and they are exact.
+
+There is **one** allow-list of top-level entry fields, applied to every entry
+regardless of its `event`. It is `attenu_guard.evidence.LEDGER_FIELDS`, 39
+names, listed here sorted:
+
+```
+adapter  agent  authority  authorized_params_hash  body_state  c14n  call_id
+capture  chain_id  context  detail  disposition  duration_ms  error_code  event
+granted  hash  invoked_params_hash  mode  node  params_hash_reason  params_salt
+parent  pending_at_kill  policy  prev_hash  reason  reasons  receipt  requested
+revoked  scope  seq  strikes  target  task  tool  ts  v
+```
+
+An entry carrying any other top-level field fails `unknown_ledger_fields`,
+positioned on that entry. There is no per-event-type list: an entry of any
+event type may carry any subset of the 39, and which subset a given event
+writes is a property of the producer, not of this contract.
+
+Twelve of the 39 are **v2-only**. On a `schema_version=1` chain an entry
+carrying any of them fails `v2_field_on_v1`, positioned on that entry. The set
+is `attenu_guard.evidence._V2_ONLY_FIELDS`:
+
+```
+adapter  authorized_params_hash  body_state  call_id  capture  duration_ms
+error_code  invoked_params_hash  params_hash_reason  params_salt
+pending_at_kill  receipt
+```
+
+The other 27 are the canonical `schema_version=1` form:
+
+```
+agent  authority  c14n  chain_id  context  detail  disposition  event  granted
+hash  mode  node  parent  policy  prev_hash  reason  reasons  requested  revoked
+scope  seq  strikes  target  task  tool  ts  v
+```
+
+**The root is not exempt from `mixed_entry_versions`.** When the root entry's
+`v` differs from the bundle's, the verifier emits both `root_version_mismatch`,
+positioned on the root, and `mixed_entry_versions`, positioned on the first
+entry whose `v` disagrees, which is the root in that case. When the root and a
+later entry both disagree, the result is the same two failures, and the one
+`mixed_entry_versions` message lists every disagreeing version.
+
 ### Scoring is different here
 
 A bundle verifier reports a LIST of failures, not one reject reason, so each
@@ -294,8 +342,8 @@ envelope v1's set, and a v2 declares its own.
 | `unsupported_version` | the bundle's `v` is not one this verifier supports | chain level |
 | `anchor_version_mismatch` | the anchor's `v` differs from the bundle's | chain level |
 | `root_version_mismatch` | the root entry's `v` differs from the bundle's | the root entry |
-| `mixed_entry_versions` | some entry declares a `v` other than the bundle's | the first such entry |
-| `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS`, so the verifier would be reporting success on an entry it did not fully read | that entry |
+| `mixed_entry_versions` | some entry declares a `v` other than the bundle's; the root is not exempt (see Entry fields) | the first such entry |
+| `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS` (the 26 names under Entry fields), so the verifier would be reporting success on an entry it did not fully read | that entry |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
 | `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
@@ -335,7 +383,7 @@ written, and it is the outcome that fails to bind to it.
 
 | reason | what it means | positioned on |
 |---|---|---|
-| `v2_field_on_v1` | an entry on a `schema_version=1` chain carries a v2-only field | that entry |
+| `v2_field_on_v1` | an entry on a `schema_version=1` chain carries a v2-only field (the 12 names under Entry fields) | that entry |
 | `invalid_root` | a `root` record does not satisfy the v2 record schema | that entry |
 | `invalid_kill` | a `kill` record does not satisfy it | that entry |
 | `invalid_allow` | an `allow` record does not satisfy it | that entry |
