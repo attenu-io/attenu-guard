@@ -86,7 +86,8 @@ class AuditLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists() and self.path.stat().st_size > 0 and not self.overwrite:
                 raise FileExistsError(
-                    f"{self.path} already has a ledger; pass overwrite=True to replace it "
+                    f"{self.path} already has a ledger; use a new audit_path, or pass "
+                    "audit_overwrite=True to Guard.issue (overwrite=True to AuditLog) to replace it "
                     "(this permanently discards the existing entries)"
                 )
             self.path.write_text("")  # fresh log

@@ -104,6 +104,19 @@ class TestDemo(unittest.TestCase):
         self.assertIn("will not overwrite", out)
 
 
+class TestExistingLedgerMessage(unittest.TestCase):
+    def test_existing_ledger_error_names_the_keyword_guard_issue_accepts(self):
+        # The message used to say "pass overwrite=True"; Guard.issue(overwrite=True) is a TypeError.
+        from attenu_guard import Authority, Guard
+        path = str(Path(tempfile.mkdtemp()) / "log.jsonl")
+        auth = Authority(scopes={"crm.read"}, ceilings=[], ttl=60)
+        Guard.issue("a", auth, audit_path=path)
+        with self.assertRaises(FileExistsError) as cm:
+            Guard.issue("a", auth, audit_path=path)
+        self.assertIn("audit_overwrite=True", str(cm.exception))
+        Guard.issue("a", auth, audit_path=path, audit_overwrite=True)  # the named keyword works
+
+
 class TestReadmeSnippetsPrintWhatTheReadmeShows(unittest.TestCase):
     def test_quickstart_output_and_view_output_match_the_readme(self):
         bs = blocks(README)

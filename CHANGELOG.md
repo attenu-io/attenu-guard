@@ -13,6 +13,7 @@ Versions follow semantic versioning.
 - **An empty ledger verified as OK.** `attenu-guard verify` on a 0-byte (or blank-lines-only) `.jsonl` printed `OK` and exited 0, and `attenu-guard view` printed `verification: OK`. Both now report `EMPTY — no events to verify` and exit 2. A bundle with zero entries was already refused by `verify_bundle` as `missing_root`, and is now pinned by a test. `AuditLog.verify([])` in the library is unchanged
 - **The README observe-mode snippet did not print the output shown under it.** The shown output had two `crm.read` lines the code never produced. The snippet now makes those calls, and the shown output is the snippet's real output
 - **The README quickstart advertised `attenu-guard view log.jsonl` without writing a log.** The quickstart now passes `audit_path="log.jsonl"` and shows the rendered tree. `tests/test_cli_first_minute.py` runs both README snippets and fails if their output drifts from the README
+- **The existing-ledger error named a keyword `Guard.issue` does not take.** It said "pass overwrite=True", and `Guard.issue(overwrite=True)` is a TypeError. It now names `audit_overwrite=True` for `Guard.issue`, `overwrite=True` for `AuditLog`, and suggests a new `audit_path`
 - **The demo's closing banner said "No rule was written for it"** right after the demo declared the summariser's authority by hand. It now says what the output above it shows: the summariser was handed `crm.read` only, so the export and the email were refused
 
 ## [0.17.0] - 2026-09-20
