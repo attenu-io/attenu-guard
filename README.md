@@ -218,14 +218,20 @@ is false; please [tell us](SECURITY.md).
 
 ## Proof
 
-What a stranger can check without taking this README's word for it.
+**Does this happen in shipped code?** Three projects merged native fixes for sub-agent defects we reported:
 
-- LangChain's advisory [GHSA-wpjg-64mw-3qj9](https://github.com/langchain-ai/open-swe/security/advisories/GHSA-wpjg-64mw-3qj9) (published 2026-09-18, CWE-862, no CVE) credits "Reported by Rafael Asor (Attenu)"; reported 2026-09-07, native fix [open-swe#2496](https://github.com/langchain-ai/open-swe/pull/2496) merged the same day.
-- Two more projects merged our native fixes for sub-agent defects we reported: [xerrors/Yuxi#1001](https://github.com/xerrors/Yuxi/pull/1001) and [femto/minion-agent#7](https://github.com/femto/minion-agent/pull/7), both 2026-09-08.
-- [@safal207](https://github.com/safal207/ContractGraph-QA/tree/6893d0fd403f3cca3f1614aa259799250cedc005/proofs/attenu-delegation-20-independent), Node.js verifier: 20 of 20 Delegation Token vectors (HS256 profile, draft steps 1 to 5); 18 of 18 observer-envelope vectors, revision v1.1.
-- [@XuebinMa](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701), Rust verifier: bundle vectors revision v1.4, 17 of 20 on the first run, 20 of 20 after one change.
-- [Kieran Sweeney's Cred harness](https://github.com/cred-ninja/protocol/commit/a4fc76e08a0c0f19e5c53ab5803c0802c8c44878): 17 of 20 Delegation Token vectors, 0 fail, 3 declared gaps.
-- Run 2026-09-28: `tests/red_team.py` 17 attacks, 15 defended, 2 documented limitations, 0 broken; `tests/run_properties.py` 4,000 random trees per invariant, all held.
+1. **LangChain Open SWE.** A sub-agent pushed a workflow file its parent was held on. Advisory [GHSA-wpjg-64mw-3qj9](https://github.com/langchain-ai/open-swe/security/advisories/GHSA-wpjg-64mw-3qj9) (published 2026-09-18, CWE-862, no CVE) credits "Reported by Rafael Asor (Attenu)"; reported 2026-09-07, native fix [open-swe#2496](https://github.com/langchain-ai/open-swe/pull/2496) merged the same day. [The write-up](https://attenu.io/blog/open-swe-sub-agent-pushed-a-workflow-file/).
+2. **Yuxi.** The default approval mode hid the write, edit and execute tools from sub-agents without intercepting them. Native fix [xerrors/Yuxi#1001](https://github.com/xerrors/Yuxi/pull/1001), merged 2026-09-08 with its tests.
+3. **minion-agent.** A managed sub-agent's executor and step-limit configuration was dropped on the way in. Native fix [femto/minion-agent#7](https://github.com/femto/minion-agent/pull/7), merged 2026-09-08 with regression tests.
+4. **And more.** Further reports are inside their disclosure windows; they are listed here when they close.
+
+**Has anyone outside checked the claims?** Three verifiers that share no code with this repository scored the published test vectors:
+
+1. [@safal207](https://github.com/safal207/ContractGraph-QA/tree/6893d0fd403f3cca3f1614aa259799250cedc005/proofs/attenu-delegation-20-independent), Node.js: 20 of 20 Delegation Token vectors (HS256 profile, draft steps 1 to 5). Python, stdlib only: 18 of 18 observer-envelope vectors, revision v1.1.
+2. [@XuebinMa](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701), Rust (agent-guard): 19 of 19 observer-envelope vectors, revision v1.2; bundle vectors revision v1.4, 17 of 20 on the first run, 20 of 20 after one change.
+3. [Kieran Sweeney's Cred harness](https://github.com/cred-ninja/protocol/commit/a4fc76e08a0c0f19e5c53ab5803c0802c8c44878): 17 of 20 Delegation Token vectors, 0 fail, 3 declared gaps, each a stated design choice on his side.
+
+**Does it hold up today?** Run 2026-09-28 on v0.18.0: `tests/red_team.py` 17 attacks, 15 defended, 2 documented limitations, 0 broken; `tests/run_properties.py` 4,000 random trees per invariant, all held.
 
 Each third-party number is the author's reported corpus score at a pin, not completeness, runtime correctness or certification. Pins and boundaries: [`tests/vectors/README.md`](tests/vectors/README.md).
 
