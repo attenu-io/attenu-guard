@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-28
+
 ### Added
 - **`attenu-guard demo --audit-path FILE`** writes the demo's audit log to a file, so `attenu-guard view FILE` has something to render. Without the flag the demo ends by printing those two commands. The demo will not overwrite an existing ledger at that path
 
