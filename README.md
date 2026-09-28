@@ -20,9 +20,10 @@ pip install attenu-guard
 ```python
 from attenu_guard import Authority, Guard, RowLimit, AuthorityDenied
 
-# The orchestrator holds broad authority.
+# The orchestrator holds broad authority. Every decision lands in log.jsonl.
 parent = Guard.issue("orchestrator", Authority(
-    scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600))
+    scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600),
+    audit_path="log.jsonl")
 
 # It delegates a narrow task. The child gets the meet of what the parent held
 # and what the task needs, computed and enforced, not suggested.
@@ -43,6 +44,24 @@ Prints:
 Decision(allowed=True, reasons=(), determining_node='chain:n1', call_id=None)
 denied: scope_not_granted requested=crm.export: scope 'crm.export' not covered by held scopes ['crm.read']
 ```
+
+Then render the log as a delegation tree and verify its hash chain:
+
+```bash
+attenu-guard view log.jsonl
+```
+
+```
+orchestrator  [root]
+    summarizer  «summarize Q3»
+        · crm.read ✓
+        · crm.export ✗ scope_not_granted
+
+audit chain: 4 events · verification: OK
+```
+
+The guard will not overwrite an existing ledger, so delete `log.jsonl` before running the
+snippet again.
 
 `check()` returns a `Decision` with machine-readable reason codes for your audit trail,
 `enforce()` is the hard-stop gate that raises, and `would_allow()` is a dry-run that writes
@@ -125,18 +144,20 @@ WIDE = Authority(scopes={"crm.*", "mail.*", "fs.*"}, ceilings=[], ttl=3600)
 root  = Guard.issue("orchestrator", WIDE, max_depth=4)
 child = root.delegate("summarizer", WIDE, task="summarize")
 
-child.check("mail.send")          # allowed, and recorded
+root.check("crm.read")            # allowed, and recorded
+child.check("crm.read")
+child.check("mail.send")
 
 for e in root.audit_log().entries:
     print(e.get("event"), e.get("node"), e.get("scope"))
 ```
 
 ```
-root    chain:n0  None
-spawn   chain:n1  None
-allow   chain:n0  crm.read
-allow   chain:n1  crm.read
-allow   chain:n1  mail.send
+root chain:n0 None
+spawn chain:n1 None
+allow chain:n0 crm.read
+allow chain:n1 crm.read
+allow chain:n1 mail.send
 ```
 
 Every hand-off and every call is on the hash-chained log, with the parent each child

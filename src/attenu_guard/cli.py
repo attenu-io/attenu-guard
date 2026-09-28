@@ -1,7 +1,8 @@
 """
 attenu-guard — command-line tool.
 
-  attenu-guard demo                  run the poisoned-summariser demo
+  attenu-guard demo [--audit-path F] run the poisoned-summariser demo; --audit-path writes its
+                                     audit log to F, for `attenu-guard view F`
   attenu-guard view <log.jsonl>      render an audit log as a delegation tree + verify it
   attenu-guard verify <log|bundle>   verify a hash-chained audit log, or an evidence bundle
                                      (integrity · child ⊆ parent · containment; --hs256-key/--pubkey checks the anchor;
@@ -16,6 +17,10 @@ import sys
 from pathlib import Path
 
 from .audit import AuditLog
+
+# A ledger with no entries has nothing to verify. Reporting it OK would be a fail-open: a
+# truncated or never-written file would pass the same check as a clean chain.
+EMPTY = "EMPTY — no events to verify"
 
 
 def _scenarios(args: list[str]):
@@ -58,6 +63,9 @@ def _view(path: str):
 
     for r in roots:
         draw(r)
+    if not entries:
+        print(f"audit chain: 0 events · verification: {EMPTY}")
+        return 2
     status = "OK" if ok else f"TAMPERED — {reason}"
     print(f"\naudit chain: {len(entries)} events · verification: {status}")
     return 0 if ok else 2
@@ -89,7 +97,8 @@ def _verify(args: list):
     (child ⊆ parent) and containment from the bundle alone; the signed anchor is verified when a key is given
     and reported as "not checked" otherwise. `--witness-keys FILE` supplies the trusted witness keys for a
     bundle carrying observer envelopes; without it every envelope fails `envelope_unknown_witness`, and the
-    output says which flag to pass. Exit 0 = ok, 2 = a check failed, 1 = usage."""
+    output says which flag to pass. A ledger with zero events is reported EMPTY, not OK. Exit 0 = ok,
+    2 = a check failed or there was nothing to check, 1 = usage."""
     import json
     path, key_hex, pub_hex, kid, witness_path = None, None, None, None, None
     it = iter(args)
@@ -135,6 +144,9 @@ def _verify(args: list):
         print("OK" if rep["ok"] else "FAILED")
         return 0 if rep["ok"] else 2
     entries = AuditLog.load(path)
+    if not entries:
+        print(EMPTY)
+        return 2
     ok, reason = AuditLog.verify(entries)
     print("OK" if ok else f"TAMPERED — {reason}")
     return 0 if ok else 2
@@ -151,8 +163,7 @@ def main(argv=None):
         return 0
     if cmd == "demo":
         from attenu_guard._demo import main as demo_main
-        demo_main()
-        return 0
+        return demo_main(rest)
     if cmd == "view" and rest:
         return _view(rest[0])
     if cmd == "verify" and rest:

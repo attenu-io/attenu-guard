@@ -11,6 +11,8 @@ try/except.
 
 Run:  python examples/poisoned_summarizer.py     (no install needed)
   or: pip install -e .  &&  attenu-guard demo
+Add --audit-path demo.jsonl to write the audit log to a file, then
+`attenu-guard view demo.jsonl` renders it as a tree and verifies it.
 """
 # Make the demo runnable straight from a fresh clone, before any install:
 # add the src/ layout to the path if attenu_guard isn't installed yet.
@@ -18,19 +20,34 @@ from attenu_guard import Authority, Guard, RowLimit, EgressRank
 from attenu_guard.audit import AuditLog
 
 
-def main():
+def main(argv=None):
+    import sys
+    args = list(sys.argv[1:] if argv is None else argv)
+    audit_path = None
+    if "--audit-path" in args:
+        i = args.index("--audit-path")
+        if i + 1 >= len(args):
+            print("usage: attenu-guard demo [--audit-path FILE]")
+            return 1
+        audit_path = args[i + 1]
     print("=" * 68)
     print("  attenu-guard demo — the poisoned summariser")
     print("=" * 68)
 
     # The orchestrator legitimately holds broad authority.
-    orchestrator = Guard.issue(
-        "orchestrator",
-        Authority(scopes={"crm.*", "mail.send"},
-                  ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
-        task="handle quarterly board request",
-        chain_id="board-q3",
-    )
+    try:
+        orchestrator = Guard.issue(
+            "orchestrator",
+            Authority(scopes={"crm.*", "mail.send"},
+                      ceilings=[RowLimit(100_000), EgressRank("any")], ttl=3600),
+            task="handle quarterly board request",
+            chain_id="board-q3",
+            audit_path=audit_path,
+        )
+    except FileExistsError:
+        print(f"\n{audit_path} already holds a ledger; the demo will not overwrite it."
+              " Pick another --audit-path.")
+        return 1
     print("\n[1] Orchestrator authority:")
     print("   ", orchestrator.authority)
 
@@ -99,10 +116,17 @@ def main():
     print("    every REAL decision above — allow, block, revoke — is provable")
     print("    offline, with no vendor in the loop; the dry-run probe left no trace.")
     print("\n" + "=" * 68)
-    print("  The read went through and the exfiltration did not, because")
-    print("  authority was attenuated at the handoff. No rule was written for it.")
+    print("  The read went through; the export and the email did not. The")
+    print("  summariser was handed crm.read only, and nothing its parent held")
+    print("  beyond that reached it.")
     print("=" * 68)
+    if audit_path:
+        print(f"\nAudit log written to {audit_path}. Render it:  attenu-guard view {audit_path}")
+    else:
+        print("\nTo view this run as a tree:  attenu-guard demo --audit-path demo.jsonl")
+        print("                             attenu-guard view demo.jsonl")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

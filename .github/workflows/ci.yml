@@ -51,6 +51,8 @@ jobs:
         run: python tests/test_cross_process_revocation.py
       - name: verify CLI + sample bundles (ledger, bundle, with/without key)
         run: python tests/test_cli_verify.py
+      - name: README first minute (quickstart, view, observe mode, demo) + the empty ledger is not OK
+        run: python tests/test_cli_first_minute.py
       - name: Interop test vectors self-check
         run: python tests/vectors/generate.py
       - name: Bundle-level interop vectors self-check
@@ -126,7 +128,8 @@ jobs:
           python - <<'PY'
           from attenu_guard import Authority, Guard, RowLimit, AuthorityDenied
           parent = Guard.issue("orchestrator", Authority(
-              scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600))
+              scopes={"crm.*", "mail.send"}, ceilings=[RowLimit(100_000)], ttl=3600),
+              audit_path="log.jsonl")
           child = parent.delegate("summarizer", Authority(
               scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900), task="summarize Q3")
           decision = child.check("crm.read", context={"rows": 4_200})
@@ -139,6 +142,9 @@ jobs:
               raise AssertionError("crm.export was not denied")
           print("quickstart OK")
           PY
+          attenu-guard view log.jsonl | tee view.txt
+          grep -q "crm.export ✗ scope_not_granted" view.txt
+          grep -q "verification: OK" view.txt
       - name: The interop vectors ship inside the installed package
         # The claim made publicly: an independent implementation in any language
         # can run these from `pip install attenu-guard`, with no clone. This step

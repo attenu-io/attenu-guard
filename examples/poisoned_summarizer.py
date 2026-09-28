@@ -13,4 +13,4 @@ except ImportError:  # running from a clone without install
 from attenu_guard._demo import main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
