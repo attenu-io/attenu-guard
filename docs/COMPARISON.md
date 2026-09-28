@@ -181,9 +181,9 @@ The closest neighbour, and we say so up front.
 - **Relationship.** The draft its format names is a neighbouring draft we cite and hope to converge with.
   That is the whole of it.
 
-## 7. IETF neighbours, cited and not compared
+## 7. IETF neighbours, not compared
 
-All four are individual submissions, as ours is; none is a working-group document.
+All four are individual submissions, as ours is; none is a working-group document. Our draft cites the first two; the third cites ours.
 
 | Draft | In its own words | What it scopes out, in its own words |
 |---|---|---|
