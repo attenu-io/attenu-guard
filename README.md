@@ -167,7 +167,7 @@ pinned by tests that fail the day the behaviour changes:
 attenu-guard makes child ⊆ parent a computed, enforced, offline-verifiable
 invariant — in your framework, in your process — no proxy, and no network call in the deny path.
 
-## What you get
+## Features in detail
 
 - **`Authority`** — an immutable capability (scopes + a list of typed, extensible `Ceiling` bounds + TTL) with `meet`, the lattice operation that can only ever *shrink*, and `is_narrower_than`, the provable subsumption relation.
 - **`Guard`** — `issue()` a root, `delegate()` a sub-agent with attenuated authority, `check()` → `Decision`, `enforce()` → raises, `would_allow()` → dry-run, `revoke()` a whole subtree.
