@@ -13,8 +13,11 @@ Apache-2.0 · Python 3.9+ · zero runtime dependencies · TypeScript port:
 
 [attenu.io](https://attenu.io) · [Docs](docs/) · [Attenu Derive — what each agent may do, read from your app](https://github.com/attenu-io/attenu-derive) · [Internet-Draft](https://datatracker.ietf.org/doc/draft-asor-wimse-agent-delegation-chain/) · [Changelog](CHANGELOG.md)
 
+Where it came from: a sub-agent in Open SWE pushed a workflow file its parent was held on. Reported, fixed by LangChain the same day, advisory published. [The write-up](https://attenu.io/blog/open-swe-sub-agent-pushed-a-workflow-file/).
+
 ```bash
 pip install attenu-guard
+attenu-guard demo   # one delegation, one poisoned instruction, the export refused, the chain verified
 ```
 
 ```python
