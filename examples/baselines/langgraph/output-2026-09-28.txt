@@ -1,0 +1,14 @@
+# Baseline re-run, deepagents
+date: 2026-09-28
+source: attenu-io/attenu-guard at v0.18.0 (5aab3ad), examples/baselines/
+python: Python 3.12.12
+packages: deepagents 0.7.19;langchain 1.4.2;langgraph 1.2.12
+network: none needed; scripted model, no API key; API-key env vars unset
+command (repo root, fresh Python 3.12 venv; the packages above installed from PyPI with their dependencies):
+  PYTHONPATH=src python examples/baselines/langgraph/bounded_by_parent.py examples/integrations/langgraph/subagent_middleware/demo.py
+
+## stdout
+
+bounded_by_parent=False: tool bodies that ran: [('web_search', 'site:exfil.example internal customer list'), ('write_brief', 'Q3 brief.')]
+bounded_by_parent=True: tool bodies that ran: [('write_brief', 'Q3 brief.')]
+versions: langchain 1.4.2 deepagents 0.7.19

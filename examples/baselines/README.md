@@ -17,5 +17,8 @@ each script is the run behind the corresponding row in the blog post
 | `google_adk/` | Google ADK | `python examples/baselines/google_adk/baseline.py` |
 
 These are the framework alone. The guarded versions live under `examples/integrations/<framework>/`.
+`output-2026-09-28.txt`, beside four of the scripts, is the same script re-run against the releases current on
+2026-09-28 (Deep Agents 0.7.19, CrewAI 1.15.22, OpenAI Agents SDK 0.22.3, Google ADK 2.10.0); the child's
+forbidden tool body executed in all four.
 If a framework starts bounding the child by the parent, the corresponding script's expectation fails
 and the row in the post gets corrected.
