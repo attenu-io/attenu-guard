@@ -8,6 +8,15 @@ lands on a hash-chained log you can verify offline.
 
 It is for people building agents that hand work to other agents.
 
+**What you get**
+
+1. One check on every tool call, inside your process, across 19 Python frameworks and A2A, with a TypeScript port.
+2. Permissions that only narrow at each handoff, down any chain, with typed limits (rows, spend, calls) and cascade revocation.
+3. A hash-chained, signable ledger of every allow and deny, for security audit, verified offline with the vendor absent.
+4. Observe mode records everything and blocks nothing. Each decision can stream to your own endpoint as it happens.
+5. No network in the deny path. Revoke at runtime; stream to your own endpoint when you want one.
+6. Tested: 1,415 test functions, a red-team harness and property invariants in CI.
+
 Apache-2.0 · Python 3.9+ · zero runtime dependencies · TypeScript port:
 [attenu-guard-ts](https://github.com/attenu-io/attenu-guard-ts), on npm as `attenu-guard`
 
@@ -228,7 +237,7 @@ is false; please [tell us](SECURITY.md).
 **Has anyone outside checked the claims?** Three verifiers that share no code with this repository scored the published test vectors:
 
 1. [@safal207](https://github.com/safal207/ContractGraph-QA/tree/6893d0fd403f3cca3f1614aa259799250cedc005/proofs/attenu-delegation-20-independent), Node.js: 20 of 20 Delegation Token vectors (HS256 profile, draft steps 1 to 5). Python, stdlib only: 18 of 18 observer-envelope vectors, revision v1.1.
-2. [@XuebinMa](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701), Rust (agent-guard): 19 of 19 observer-envelope vectors, revision v1.2; bundle vectors revision v1.4, 17 of 20 on the first run, 20 of 20 after one change.
+2. @XuebinMa, Rust (agent-guard): [19 of 19 observer-envelope vectors, revision v1.2](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5569510706). [Bundle vectors revision v1.4](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701): 17 of 20 on the first run, 20 of 20 after one change.
 3. [Kieran Sweeney's Cred harness](https://github.com/cred-ninja/protocol/commit/a4fc76e08a0c0f19e5c53ab5803c0802c8c44878): 17 of 20 Delegation Token vectors, 0 fail, 3 declared gaps, each a stated design choice on his side.
 
 **Does it hold up today?** Run 2026-09-28 on v0.18.0: `tests/red_team.py` 17 attacks, 15 defended, 2 documented limitations, 0 broken; `tests/run_properties.py` 4,000 random trees per invariant, all held.
