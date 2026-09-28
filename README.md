@@ -231,15 +231,24 @@ Each third-party number is the author's reported corpus score at a pin, not comp
 
 ## Compared with
 
-- **Framework-native permissions.** Deep Agents: a sub-agent's `tools` "overrides the inherited tools entirely". CrewAI: delegation grants "powerful collaboration tools", untied to the delegator's. OpenAI Agents SDK: "the new agent takes over the conversation". Google ADK: `disallow_transfer_to_peers` gates who transfers, not what passes. [`examples/baselines/`](examples/baselines/): a sub-agent ran a tool its parent never held on Deep Agents 0.7.19, CrewAI 1.15.22, OpenAI Agents 0.22.3, ADK 2.10.0.
-- **OAuth token exchange (RFC 8693).** "Prior actors identified by any nested "act" claims are informational only and are not to be considered in access control decisions." Ours verify hops offline.
-- **SPIFFE/SPIRE.** "SPIFFE and SPIRE do not provide a means to implement authorization policies, only authentication policies."
-- **Macaroons and Biscuit.** Both attenuate offline; Biscuit's token "can only be restricted". We add typed ceilings with a meet, a JOSE wire format with 20 published vectors, and a per-call log.
-- **OPA, Cedar, Casbin.** One request against one policy; no parent relation unless you model it. Child ⊆ parent is `delegate()`'s invariant.
-- **Tenuo and Keel.** Both describe authority that only shrinks at a handoff and verifies offline, as we do. Differences: zero runtime dependencies, a hash-chained ledger scored by the verifiers above, 19 framework adapters plus A2A.
-- **IETF neighbours.** draft-niyikiza-oauth-attenuating-agent-tokens and draft-sweeney-wimse-credential-delegation, both cited by our draft; draft-jackson-wimse-evaluation, which cites ours; draft-schrock-canonical-action-identifier. All individual submissions, as ours is.
+Legend: **✓** stated on the project's own pages or shown by a run in this repository · **✗** its own pages or a run say no · **—** not stated on the pages read (silence is not a no). Framework hooks = Deep Agents, CrewAI, the OpenAI Agents SDK and Google ADK, each through its own hook API. Every quotation and every run, with 24 dated sources: [`docs/COMPARISON.md`](docs/COMPARISON.md).
 
-Sources, dated 2026-09-28: [`docs/COMPARISON.md`](https://github.com/attenu-io/attenu-guard/blob/main/docs/COMPARISON.md).
+| | attenu-guard | Tenuo | Keel | Framework hooks | OPA · Cedar · Casbin |
+|---|---|---|---|---|---|
+| Every tool call checked, in your process | ✓ | ✓ | ✗ the spec names no runtime | ✓ | ✓ |
+| Child holds no more than its parent, enforced at the handoff | ✓ built into `delegate()` | ✓ | ✓ | ✗ a sub-agent ran a tool its parent never held, all four ([`examples/baselines/`](examples/baselines/), 2026-09-28) | you write the rule |
+| Holds down a chain of any depth | ✓ | — | ✓ | ✗ | — |
+| Revoke a parent, every descendant denies at once | ✓ | — | — | — | — |
+| Limits with units that only shrink (rows, spend, calls) | ✓ | — | — | — | — |
+| Every allow and deny on a hash-chained log | ✓ | receipts, opt-in | — | — | — |
+| Verified offline, no server in the path | ✓ | ✓ | ✓ | — | n/a |
+| Observe mode: record everything, block nothing | ✓ | ✓ | — | — | — |
+| Test vectors scored by outside verifiers | ✓ three | — | — | n/a | n/a |
+| Agent-framework adapters | 19 + A2A | its README lists its own | — | n/a | — |
+| Python runtime dependencies | none | `pyyaml`, `pydantic`, compiled wheels | n/a | n/a | — |
+| Code you can run | Apache-2.0, enforcement and verifier | Apache-2.0 | spec and verifier public; reference server Keel-internal | n/a | Apache-2.0 |
+
+Tenuo and Keel enforce the same handoff rule we do. OAuth token exchange, SPIFFE, macaroons and Biscuit, and the four neighbouring Internet-Drafts (draft-niyikiza and draft-sweeney, both cited by our draft; draft-jackson, which cites ours; draft-schrock) are on the same page, each in its own words.
 
 ## Writing
 
