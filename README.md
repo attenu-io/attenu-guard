@@ -1,12 +1,11 @@
 # attenu-guard
 
-When one AI agent hands work to another, the frameworks we tested don't check the second one's
-permissions against the first one's. attenu-guard gives it the permissions you declare for its task, never more than the
-parent holds, and refuses the rest,
-inside your process, with no network call in the deny path. Every `check()`, allowed or denied,
-lands on a hash-chained log you can verify offline.
+**Delegation without escalation.** attenu-guard checks every agent tool call in your process, narrows permissions
+at each handoff, and logs every decision in a verifiable chain. Works with 19 frameworks. No dependencies.
 
-It is for people building agents that hand work to other agents.
+When one AI agent hands work to another, the frameworks we tested don't check the second one's permissions
+against the first one's. attenu-guard gives the child the permissions you declare for its task, never more than
+the parent holds, and refuses the rest, with no network call in the deny path.
 
 **What you get**
 
@@ -105,6 +104,46 @@ rather than on third-party apps.
 ![attenu-guard demo — the poisoned summariser: one legitimate read allowed, the exfiltration blocked, the subtree revoked, the audit chain verified](https://raw.githubusercontent.com/attenu-io/attenu-guard/main/docs/assets/demo.gif)
 
 An open enforcement layer for [OWASP ASI07 (insecure inter-agent communication) and ASI08 (cascading failures)](https://genai.owasp.org/download/52117/): delegated authority stays inside the parent's limits, and every check the guard records stays verifiable offline.
+
+## Proof
+
+**Does this happen in shipped code?** Three projects merged native fixes for sub-agent defects we reported:
+
+1. **LangChain Open SWE.** A sub-agent pushed a workflow file its parent was held on. Advisory [GHSA-wpjg-64mw-3qj9](https://github.com/langchain-ai/open-swe/security/advisories/GHSA-wpjg-64mw-3qj9) (published 2026-09-18, CWE-862, no CVE) credits "Reported by Rafael Asor (Attenu)"; reported 2026-09-07, native fix [open-swe#2496](https://github.com/langchain-ai/open-swe/pull/2496) merged the same day. [The write-up](https://attenu.io/blog/open-swe-sub-agent-pushed-a-workflow-file/).
+2. **Yuxi.** The default approval mode hid the write, edit and execute tools from sub-agents without intercepting them. Native fix [xerrors/Yuxi#1001](https://github.com/xerrors/Yuxi/pull/1001), merged 2026-09-08 with its tests.
+3. **minion-agent.** A managed sub-agent's executor and step-limit configuration was dropped on the way in. Native fix [femto/minion-agent#7](https://github.com/femto/minion-agent/pull/7), merged 2026-09-08 with regression tests.
+4. **And more.** Further reports are inside their disclosure windows; they are listed here when they close.
+
+**Has anyone outside checked the claims?** Three verifiers that share no code with this repository scored the published test vectors:
+
+1. [@safal207](https://github.com/safal207/ContractGraph-QA/tree/6893d0fd403f3cca3f1614aa259799250cedc005/proofs/attenu-delegation-20-independent), Node.js: 20 of 20 Delegation Token vectors (HS256 profile, draft steps 1 to 5). Python, stdlib only: 18 of 18 observer-envelope vectors, revision v1.1.
+2. @XuebinMa, Rust (agent-guard): [19 of 19 observer-envelope vectors, revision v1.2](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5569510706). [Bundle vectors revision v1.4](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701): 17 of 20 on the first run, 20 of 20 after one change.
+3. [Kieran Sweeney's Cred harness](https://github.com/cred-ninja/protocol/commit/a4fc76e08a0c0f19e5c53ab5803c0802c8c44878): 17 of 20 Delegation Token vectors, 0 fail, 3 declared gaps, each a stated design choice on his side.
+
+**Does it hold up today?** Run 2026-09-28 on v0.18.0: `tests/red_team.py` 17 attacks, 15 defended, 2 documented limitations, 0 broken; `tests/run_properties.py` 4,000 random trees per invariant, all held.
+
+Each third-party number is the author's reported corpus score at a pin, not completeness, runtime correctness or certification. Pins and boundaries: [`tests/vectors/README.md`](tests/vectors/README.md).
+
+## Compared with
+
+Legend: **✓** stated on the project's own pages or shown by a run in this repository · **✗** its own pages or a run say no · **—** not stated on the pages read (silence is not a no). Framework hooks = Deep Agents, CrewAI, the OpenAI Agents SDK and Google ADK, each through its own hook API. Every quotation and every run, with 24 dated sources: [`docs/COMPARISON.md`](docs/COMPARISON.md).
+
+| | attenu-guard | Tenuo | Keel | Framework hooks | OPA · Cedar · Casbin |
+|---|---|---|---|---|---|
+| Every tool call checked, in your process | ✓ | ✓ | n/a, the spec names no runtime | ✓ | ✓ |
+| Child holds no more than its parent, enforced at the handoff | ✓ built into `delegate()` | ✓ | ✓ | ✗ a sub-agent ran a tool its parent never held, all four ([`examples/baselines/`](examples/baselines/), 2026-09-28) | you write the rule |
+| Holds down a chain of any depth | ✓ | — | ✓ | ✗ | — |
+| Revoke a parent, every descendant denies at once | ✓ | — | — | — | — |
+| Limits with units that only shrink (rows, spend, calls) | ✓ | — | — | — | — |
+| Every allow and deny on a hash-chained log | ✓ | receipts, opt-in | — | — | — |
+| Verified offline, no server in the path | ✓ | ✓ | ✓ | — | n/a |
+| Observe mode: record everything, block nothing | ✓ | ✓ | — | — | — |
+| Test vectors scored by outside verifiers | ✓ three | — | — | n/a | n/a |
+| Agent-framework adapters | 19 + A2A | its README lists its own | — | n/a | — |
+| Python runtime dependencies | none | `pyyaml`, `pydantic`, compiled wheels | n/a | n/a | — |
+| Code you can run | Apache-2.0, enforcement and verifier | Apache-2.0 | spec and verifier public; reference server Keel-internal | n/a | Apache-2.0 |
+
+Tenuo and Keel enforce the same handoff rule we do. OAuth token exchange, SPIFFE, macaroons and Biscuit, and the four neighbouring Internet-Drafts (draft-niyikiza and draft-sweeney, both cited by our draft; draft-jackson, which cites ours; draft-schrock) are on the same page, each in its own words.
 
 ## What happens at a handoff today
 
@@ -224,46 +263,6 @@ nothing, and that audit tampering is detected. The red-team harness (see
 — privilege escalation, chain splicing, expired-grant reuse — and every genuine
 finding is fixed and pinned as a regression. If you can break one, the core claim
 is false; please [tell us](SECURITY.md).
-
-## Proof
-
-**Does this happen in shipped code?** Three projects merged native fixes for sub-agent defects we reported:
-
-1. **LangChain Open SWE.** A sub-agent pushed a workflow file its parent was held on. Advisory [GHSA-wpjg-64mw-3qj9](https://github.com/langchain-ai/open-swe/security/advisories/GHSA-wpjg-64mw-3qj9) (published 2026-09-18, CWE-862, no CVE) credits "Reported by Rafael Asor (Attenu)"; reported 2026-09-07, native fix [open-swe#2496](https://github.com/langchain-ai/open-swe/pull/2496) merged the same day. [The write-up](https://attenu.io/blog/open-swe-sub-agent-pushed-a-workflow-file/).
-2. **Yuxi.** The default approval mode hid the write, edit and execute tools from sub-agents without intercepting them. Native fix [xerrors/Yuxi#1001](https://github.com/xerrors/Yuxi/pull/1001), merged 2026-09-08 with its tests.
-3. **minion-agent.** A managed sub-agent's executor and step-limit configuration was dropped on the way in. Native fix [femto/minion-agent#7](https://github.com/femto/minion-agent/pull/7), merged 2026-09-08 with regression tests.
-4. **And more.** Further reports are inside their disclosure windows; they are listed here when they close.
-
-**Has anyone outside checked the claims?** Three verifiers that share no code with this repository scored the published test vectors:
-
-1. [@safal207](https://github.com/safal207/ContractGraph-QA/tree/6893d0fd403f3cca3f1614aa259799250cedc005/proofs/attenu-delegation-20-independent), Node.js: 20 of 20 Delegation Token vectors (HS256 profile, draft steps 1 to 5). Python, stdlib only: 18 of 18 observer-envelope vectors, revision v1.1.
-2. @XuebinMa, Rust (agent-guard): [19 of 19 observer-envelope vectors, revision v1.2](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5569510706). [Bundle vectors revision v1.4](https://github.com/a2aproject/A2A/issues/1575#issuecomment-5596516701): 17 of 20 on the first run, 20 of 20 after one change.
-3. [Kieran Sweeney's Cred harness](https://github.com/cred-ninja/protocol/commit/a4fc76e08a0c0f19e5c53ab5803c0802c8c44878): 17 of 20 Delegation Token vectors, 0 fail, 3 declared gaps, each a stated design choice on his side.
-
-**Does it hold up today?** Run 2026-09-28 on v0.18.0: `tests/red_team.py` 17 attacks, 15 defended, 2 documented limitations, 0 broken; `tests/run_properties.py` 4,000 random trees per invariant, all held.
-
-Each third-party number is the author's reported corpus score at a pin, not completeness, runtime correctness or certification. Pins and boundaries: [`tests/vectors/README.md`](tests/vectors/README.md).
-
-## Compared with
-
-Legend: **✓** stated on the project's own pages or shown by a run in this repository · **✗** its own pages or a run say no · **—** not stated on the pages read (silence is not a no). Framework hooks = Deep Agents, CrewAI, the OpenAI Agents SDK and Google ADK, each through its own hook API. Every quotation and every run, with 24 dated sources: [`docs/COMPARISON.md`](docs/COMPARISON.md).
-
-| | attenu-guard | Tenuo | Keel | Framework hooks | OPA · Cedar · Casbin |
-|---|---|---|---|---|---|
-| Every tool call checked, in your process | ✓ | ✓ | n/a, the spec names no runtime | ✓ | ✓ |
-| Child holds no more than its parent, enforced at the handoff | ✓ built into `delegate()` | ✓ | ✓ | ✗ a sub-agent ran a tool its parent never held, all four ([`examples/baselines/`](examples/baselines/), 2026-09-28) | you write the rule |
-| Holds down a chain of any depth | ✓ | — | ✓ | ✗ | — |
-| Revoke a parent, every descendant denies at once | ✓ | — | — | — | — |
-| Limits with units that only shrink (rows, spend, calls) | ✓ | — | — | — | — |
-| Every allow and deny on a hash-chained log | ✓ | receipts, opt-in | — | — | — |
-| Verified offline, no server in the path | ✓ | ✓ | ✓ | — | n/a |
-| Observe mode: record everything, block nothing | ✓ | ✓ | — | — | — |
-| Test vectors scored by outside verifiers | ✓ three | — | — | n/a | n/a |
-| Agent-framework adapters | 19 + A2A | its README lists its own | — | n/a | — |
-| Python runtime dependencies | none | `pyyaml`, `pydantic`, compiled wheels | n/a | n/a | — |
-| Code you can run | Apache-2.0, enforcement and verifier | Apache-2.0 | spec and verifier public; reference server Keel-internal | n/a | Apache-2.0 |
-
-Tenuo and Keel enforce the same handoff rule we do. OAuth token exchange, SPIFFE, macaroons and Biscuit, and the four neighbouring Internet-Drafts (draft-niyikiza and draft-sweeney, both cited by our draft; draft-jackson, which cites ours; draft-schrock) are on the same page, each in its own words.
 
 ## Writing
 
