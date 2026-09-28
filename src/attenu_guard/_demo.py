@@ -24,12 +24,30 @@ def main(argv=None):
     import sys
     args = list(sys.argv[1:] if argv is None else argv)
     audit_path = None
-    if "--audit-path" in args:
-        i = args.index("--audit-path")
-        if i + 1 >= len(args):
-            print("usage: attenu-guard demo [--audit-path FILE]")
+    usage = "usage: attenu-guard demo [--audit-path FILE]"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--audit-path":
+            if i + 1 >= len(args):
+                print(usage)
+                return 1
+            audit_path = args[i + 1]
+            i += 2
+        elif a.startswith("--audit-path="):
+            audit_path = a[len("--audit-path="):]
+            i += 1
+        else:
+            # An argument the demo does not know is a typo, not a no-op: say so
+            # rather than run with defaults and leave the reader hunting for a file.
+            print(f"unknown argument: {a}\n{usage}")
             return 1
-        audit_path = args[i + 1]
+    if audit_path is not None:
+        from pathlib import Path
+        p = Path(audit_path)
+        if p.is_dir() or any(parent.is_file() for parent in p.parents):
+            print(f"{audit_path} is not a file path the demo can write to.")
+            return 1
     print("=" * 68)
     print("  attenu-guard demo — the poisoned summariser")
     print("=" * 68)

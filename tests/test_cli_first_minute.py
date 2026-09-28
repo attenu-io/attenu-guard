@@ -96,6 +96,31 @@ class TestDemo(unittest.TestCase):
         self.assertIn("✗", view)
         self.assertIn("verification: OK", view)
 
+    def test_demo_accepts_the_equals_form_of_audit_path(self):
+        # `--audit-path=FILE` used to be ignored silently: exit 0, no file, generic hint.
+        path = str(Path(tempfile.mkdtemp()) / "demo.jsonl")
+        rc, _ = run("demo", f"--audit-path={path}")
+        self.assertEqual(rc, 0)
+        self.assertTrue(Path(path).is_file())
+
+    def test_demo_rejects_an_unknown_argument_instead_of_ignoring_it(self):
+        rc, out = run("demo", "--audit-pth", "x.jsonl")
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown argument: --audit-pth", out)
+        self.assertIn("usage: attenu-guard demo", out)
+
+    def test_demo_names_a_directory_or_file_parent_as_not_a_file_path(self):
+        d = tempfile.mkdtemp()
+        rc, out = run("demo", "--audit-path", d)
+        self.assertEqual(rc, 1)
+        self.assertIn("is not a file path", out)
+        self.assertNotIn("already holds a ledger", out)
+        blocker = Path(d) / "afile"
+        blocker.write_text("x")
+        rc, out = run("demo", "--audit-path", str(blocker / "demo.jsonl"))
+        self.assertEqual(rc, 1)
+        self.assertIn("is not a file path", out)
+
     def test_demo_refuses_to_overwrite_an_existing_ledger(self):
         path = str(Path(tempfile.mkdtemp()) / "demo.jsonl")
         self.assertEqual(run("demo", "--audit-path", path)[0], 0)

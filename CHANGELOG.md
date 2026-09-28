@@ -9,7 +9,7 @@ Versions follow semantic versioning.
 ## [0.18.0] - 2026-09-28
 
 ### Added
-- **`attenu-guard demo --audit-path FILE`** writes the demo's audit log to a file, so `attenu-guard view FILE` has something to render. Without the flag the demo ends by printing those two commands. The demo will not overwrite an existing ledger at that path
+- **`attenu-guard demo --audit-path FILE`** writes the demo's audit log to a file, so `attenu-guard view FILE` has something to render. Without the flag the demo ends by printing those two commands. The demo will not overwrite an existing ledger at that path. `--audit-path=FILE` is accepted too, an argument the demo does not know is rejected with the usage line rather than ignored, and a directory or a path under a regular file is reported as not a file path (code review, same day)
 
 ### Fixed
 - **An empty ledger verified as OK.** `attenu-guard verify` on a 0-byte (or blank-lines-only) `.jsonl` printed `OK` and exited 0, and `attenu-guard view` printed `verification: OK`. Both now report `EMPTY — no events to verify` and exit 2. A bundle with zero entries was already refused by `verify_bundle` as `missing_root`, and is now pinned by a test. `AuditLog.verify([])` in the library is unchanged
