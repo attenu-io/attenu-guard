@@ -12,7 +12,7 @@ footprint, the proof artefact and framework coverage, nothing wider.
 
 | | attenu-guard | Tenuo | Keel | Framework hooks ¹ | OPA · Cedar · Casbin |
 |---|---|---|---|---|---|
-| Every tool call checked, in your process | ✓ | ✓ "checked where the action runs" [S22] | ✗ the spec "does not specify a runtime, gateway, or proxy" [S21] | ✓ [S1] [S3] [S5] [S7] | ✓ one request against one policy [S18] [S19] [S20] |
+| Every tool call checked, in your process | ✓ | ✓ "checked where the action runs" [S22] | n/a, the spec "does not specify a runtime, gateway, or proxy" [S21] | ✓ [S1] [S3] [S5] [S7] | ✓ one request against one policy [S18] [S19] [S20] |
 | Child holds no more than its parent, enforced at the handoff | ✓ `delegate()` takes the meet; 4,000 random trees per invariant, run 2026-09-28 | ✓ "No delegated warrant can exceed its parent" [S22] | ✓ "mechanically constrained to be a subset of its parent's" [S21] | ✗ a sub-agent ran a tool its parent never held, all four, run 2026-09-28 (§4) | you write the rule; no parent relation unless you model it [S18] [S19] |
 | Holds down a chain of any depth | ✓ every node stays inside the root; `del_max_depth` | — | ✓ "a per-project lineage of Permit objects bound by parent-child references" [S21] | ✗ no parent relation | — |
 | Revoke a parent, every descendant denies at once | ✓ `revoke()` on a subtree | — | — | — | — |

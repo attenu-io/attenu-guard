@@ -250,7 +250,7 @@ Legend: **✓** stated on the project's own pages or shown by a run in this repo
 
 | | attenu-guard | Tenuo | Keel | Framework hooks | OPA · Cedar · Casbin |
 |---|---|---|---|---|---|
-| Every tool call checked, in your process | ✓ | ✓ | ✗ the spec names no runtime | ✓ | ✓ |
+| Every tool call checked, in your process | ✓ | ✓ | n/a, the spec names no runtime | ✓ | ✓ |
 | Child holds no more than its parent, enforced at the handoff | ✓ built into `delegate()` | ✓ | ✓ | ✗ a sub-agent ran a tool its parent never held, all four ([`examples/baselines/`](examples/baselines/), 2026-09-28) | you write the rule |
 | Holds down a chain of any depth | ✓ | — | ✓ | ✗ | — |
 | Revoke a parent, every descendant denies at once | ✓ | — | — | — | — |
