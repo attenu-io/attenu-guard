@@ -87,16 +87,16 @@ In CrewAI, ordinary exceptions raised inside a tool hook let the tool continue; 
 
 ## 5. What this page does not claim
 
-- Not "first", not "only", not "unique". Attenuation that can only shrink, and offline verification, are
-  described by macaroons, Biscuit, Keel, Tenuo and the attenuating-agent-tokens draft.
-- No exploit claims. Every framework row is a scripted-model run in this repository showing a tool body
-  executing, and each framework offers hooks that can stop it.
 - No adoption claims. Nobody named here has adopted, embedded or endorsed attenu-guard; third-party
   verifier runs are corpus scores at a pin, and their authors said so.
+- No exploit claims. Every framework row is a scripted-model run in this repository showing a tool body
+  executing, and each framework offers hooks that can stop it.
 - No execution claims. The ledger proves authorization and lifecycle; `allow` means authorized, not
   executed ([THREAT-MODEL.md](THREAT-MODEL.md), and the two documented limitations in [RED-TEAM.md](RED-TEAM.md)).
 - No silence read as a negative. Hosted enforcement platforms are not listed: their public pages do not
   address sub-agent delegation one way or the other.
+- Not "first", not "only", not "unique". Attenuation that can only shrink, and offline verification, are
+  described by macaroons, Biscuit, Keel, Tenuo and the attenuating-agent-tokens draft.
 - If a quotation above no longer matches its page, open an issue with the page and the date; the row is
   corrected, not argued.
 
