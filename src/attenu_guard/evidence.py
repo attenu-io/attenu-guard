@@ -542,8 +542,12 @@ def _witness_public_key(kid, value) -> bytes:
 
 #: RFC 3339 `date-time` in UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction, and `Z`. RFC 3339
 #: allows `t` and `z` in lower case, so they are accepted too. A numeric offset, even `+00:00`, is
-#: not: a trust-set row says UTC in the one spelling that cannot be misread as local time.
-_RFC3339_UTC = re.compile(r"(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?[Zz]")
+#: not: a trust-set row says UTC in the one spelling that cannot be misread as local time. The
+#: digits are `[0-9]`, never `\d`: in a str pattern `\d` matches every Unicode decimal digit, and
+#: `int()` reads them, so "２０２６-…" in fullwidth digits would have parsed. RFC 3339's DIGIT is
+#: ASCII, and the TypeScript implementation refuses the rest.
+_RFC3339_UTC = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?[Zz]")
 
 
 def _rfc3339_utc(value):

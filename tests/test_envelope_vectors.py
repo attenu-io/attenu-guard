@@ -931,7 +931,11 @@ class TestTrustRowExpiry(unittest.TestCase):
         for bad in ("2026-10-05", "2026-10-05T00:00:00", "2026-10-05T00:00:00+00:00",
                     "2026-10-05 00:00:00Z", "2026-13-01T00:00:00Z", "2026-02-30T00:00:00Z",
                     "2026-10-05T24:00:00Z", "2026-10-05T00:00:60Z", "2026-10-05T00:00:00Z\n",
-                    " 2026-10-05T00:00:00Z", "", None, 1759622400, True, ["2026-10-05T00:00:00Z"]):
+                    " 2026-10-05T00:00:00Z", "", None, 1759622400, True, ["2026-10-05T00:00:00Z"],
+                    # Unicode decimal digits that are not ASCII: `\d` and `int()` both took
+                    # them, and RFC 3339's DIGIT does not.
+                    "２０２６-10-05T00:00:00Z", "2026-10-05T00:00:00.５Z",
+                    "٢٠٢٦-10-05T00:00:00Z"):
             with self.subTest(not_after=repr(bad)):
                 with self.assertRaises(ValueError) as raised:
                     self._report(self._rows(not_after=bad), now=None)
