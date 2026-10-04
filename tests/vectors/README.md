@@ -407,7 +407,7 @@ observer-envelope section below is their full treatment.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` or `event` that is not an integer or a string, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry, or nowhere when `seq` names no entry |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named | the covered entry |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all | the covered entry |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA | the covered entry |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row is past its `not_after` is not in `witness_keys` | the covered entry |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string | the covered entry |
 
 `tests/test_bundle_vectors.py` asserts that this vocabulary and the reasons `evidence.py` can
@@ -761,9 +761,12 @@ states:
 - **`witness-signed`**: an envelope exists whose `subject` matches the entry
   recomputed from the bundle, and whose signature verifies under the trusted key
   its `witness.kid` names. A signature that verifies under some *other* trusted
-  key is not witness-signed. The state says where the signature came from and
-  nothing about authority: the witness is whoever holds that key, and nothing in
-  the envelope makes that the delegation parent.
+  key is not witness-signed. A witness signature covers the entry's hash and
+  chain position plus what the witness-key holder observed (result, time,
+  method); it does not attest that the action was permitted. An entry can be
+  witness-signed and still fail containment or monotonicity. The witness is
+  whoever holds that key, and nothing in the envelope makes that the delegation
+  parent.
 - **`process-asserted`**: no envelope, or one that does not verify. This covers
   two facts a bundle does not separate — a hop nobody undertook to cover, and a
   hop a witness undertook to cover and never did. v1 takes the weaker reading
@@ -864,7 +867,12 @@ no anchor. `witness_keys` is the trust set: `public_key_hex` is the raw 32-byte
 Ed25519 public key in lowercase hex and `alg` is `EdDSA`, the JOSE identifier
 both implementations use for Ed25519. Carrying the keys in the file is what
 makes `reject_bad_signature` and `reject_unknown_witness` checkable from the
-file alone. `expect_states` covers **every** entry in the chain, so an
+file alone. A row may also carry `not_after`, an RFC 3339 UTC date-time such as
+`2026-10-05T00:00:00Z`. A row whose `not_after` is at or before the verification
+time is left out of the trust set, so its envelopes fail
+`envelope_unknown_witness`; a `not_after` that is not an RFC 3339 UTC date-time
+is a malformed row. No row in this file carries one, so every case scores the
+same at any time. `expect_states` covers **every** entry in the chain, so an
 accepting case asserts a state and not merely the absence of a failure.
 
 Two more fields appear on one case each:
@@ -934,7 +942,7 @@ is reported on its own.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` that is not an integer or an `event` that is not a string, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row is past its `not_after` is not in `witness_keys` |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string |
 
 ### Scoring, and the two rules on where a failure may land

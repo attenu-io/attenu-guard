@@ -358,6 +358,13 @@ def denials(bundle: dict) -> list[dict]:
 # An envelope is never REQUIRED. An absent one is the status quo and changes
 # nothing. A present one has to verify: a broken envelope lands in the same
 # failure list as the chain-level checks and the bundle rejects.
+#
+# What a witness signature covers: the entry's hash and its chain position
+# (`chain_id`, `node`, `seq`, `event`, and `call_id` on an allow), plus what the
+# witness-key holder observed (`observed`: result, time, method). It does not
+# attest that the action was permitted. Whether an entry was within its node's
+# authority is answered by containment and monotonicity, from the ledger, and a
+# `witness-signed` entry can fail either of them.
 # =========================================================================
 
 #: The only envelope version this build knows. The version commits the exact signed member set
@@ -384,9 +391,11 @@ ENVELOPE_WITNESS_MEMBERS = frozenset({"kid", "alg"})
 ENVELOPE_RESULTS = ("matched", "not_matched", "indeterminate")
 #: The JOSE identifier for Ed25519, and the only `witness.alg` v1 defines.
 ENVELOPE_ALG = "EdDSA"
-#: The two per-entry states a verifier reports. `witness-signed` says where the signature came
-#: from and NOTHING about authority — the witness is whoever holds the key `witness.kid` names,
-#: which nothing in the envelope makes the delegation parent.
+#: The two per-entry states a verifier reports. `witness-signed` says an envelope over the entry
+#: verified under the trusted key `witness.kid` names. That signature covers the entry's hash and
+#: chain position plus what the witness-key holder observed (result, time, method); it does not
+#: attest that the action was permitted. The witness is whoever holds that key, which nothing in
+#: the envelope makes the delegation parent.
 WITNESS_SIGNED = "witness-signed"
 #: No envelope, or one that does not verify. Every entry in a bundle without envelopes is this.
 #: It covers two facts a bundle does not separate — a hop nobody undertook to cover, and a hop a
@@ -531,33 +540,105 @@ def _witness_public_key(kid, value) -> bytes:
     raise ValueError(f"witness key {kid!r}: expected 64 hex characters or 32 bytes")
 
 
-def _trusted_witnesses(witness_keys) -> dict:
-    """kid -> (alg, raw public key bytes), from the vector file's own `witness_keys` shape
-    (`[{"kid", "alg", "public_key_hex"}]`) or from a plain `{kid: public_key_bytes}` mapping.
+#: RFC 3339 `date-time` in UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction, and `Z`. RFC 3339
+#: allows `t` and `z` in lower case, so they are accepted too. A numeric offset, even `+00:00`, is
+#: not: a trust-set row says UTC in the one spelling that cannot be misread as local time.
+_RFC3339_UTC = re.compile(r"(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(\.\d+)?[Zz]")
+
+
+def _rfc3339_utc(value):
+    """`value` as an aware UTC `datetime`, or None when it is not an RFC 3339 UTC date-time.
+
+    Hand-parsed rather than `datetime.fromisoformat`, which reads a trailing `Z` only from
+    Python 3.11 and this package supports 3.9. A fraction is kept to the microsecond and the
+    digits past it are dropped. An out-of-range field (month 13, February 30, second 60) is
+    None: `datetime` cannot represent a leap second, so this does not accept one."""
+    from datetime import datetime, timezone
+    m = _RFC3339_UTC.fullmatch(value) if isinstance(value, str) else None
+    if m is None:
+        return None
+    micro = int((m.group(7)[1:] + "000000")[:6]) if m.group(7) else 0
+    try:
+        return datetime(*(int(m.group(i)) for i in range(1, 7)), micro, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _verification_time(now):
+    """The time a trust-set row's `not_after` is compared with, as an aware UTC `datetime`.
+
+    `None` is the current UTC time. Otherwise a timezone-aware `datetime`, an RFC 3339 UTC
+    string in the `not_after` grammar, or seconds since the Unix epoch. A naive `datetime` is
+    refused: whether it meant UTC or local time is exactly what the comparison cannot guess."""
+    from datetime import datetime, timezone
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be a timezone-aware datetime, not a naive one")
+        return now
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        try:
+            return datetime.fromtimestamp(now, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            raise ValueError(f"now={now!r} is not a representable time in seconds since the "
+                             "epoch") from None
+    parsed = _rfc3339_utc(now)
+    if parsed is None:
+        raise ValueError(f"now must be an aware datetime, an RFC 3339 UTC date-time such as "
+                         f"'2026-10-05T00:00:00Z', or seconds since the epoch; got {now!r}")
+    return parsed
+
+
+def _trusted_witnesses(witness_keys, now=None) -> tuple:
+    """`(trusted, expired)` from the vector file's own `witness_keys` shape
+    (`[{"kid", "alg", "public_key_hex"}]`, each row optionally with `not_after`) or from a plain
+    `{kid: public_key_bytes}` mapping. `trusted` is kid -> (alg, raw public key bytes); `expired`
+    is kid -> the `not_after` string of a row that was left out because it had expired.
 
     `None` means no trust anchor is configured, which is an EMPTY set, not an absent check: an
     envelope naming a kid nobody trusts is `envelope_unknown_witness`, and that is the honest
     answer whether the trust set is empty or merely does not contain it.
 
+    `not_after` is the row's own validity, an RFC 3339 UTC date-time such as
+    "2026-10-05T00:00:00Z". A row whose `not_after` is at or before `now` (`_verification_time`:
+    the current UTC time by default) is left out of the trust set, so an envelope naming its kid
+    is `envelope_unknown_witness`, and the message says the key expired and when. A row without
+    `not_after` is trusted with no time limit, as before.
+
     Every row is validated here and a bad one raises `ValueError` naming its kid. This is the one
     envelope input that is NOT attacker-supplied — the deployment chose these keys — so a mistake
     in them is reported to the caller rather than folded into a finding about the bundle. v1
-    defines Ed25519 and no other algorithm, so a row declaring anything else is refused too."""
+    defines Ed25519 and no other algorithm, so a row declaring anything else is refused too. A
+    `not_after` that is not an RFC 3339 UTC date-time, `null` included, is refused the same way,
+    and so is an expired row that is otherwise malformed: expiry never excuses a bad row."""
+    at = _verification_time(now)
     if witness_keys is None:
-        return {}
+        return {}, {}
     rows = (witness_keys.items() if isinstance(witness_keys, Mapping)
             else [(k.get("kid") if isinstance(k, Mapping) else None, k) for k in witness_keys])
-    trusted = {}
+    trusted, expired = {}, {}
     for kid, value in rows:
         if not isinstance(kid, str):
             raise ValueError("witness key kid must be a string")
+        not_after = until = None
         if isinstance(value, Mapping):
             alg = value.get("alg")
             if alg != ENVELOPE_ALG:
                 raise ValueError(f"witness key {kid!r}: alg must be {ENVELOPE_ALG!r}, got {alg!r}")
+            if "not_after" in value:
+                not_after = value["not_after"]
+                until = _rfc3339_utc(not_after)
+                if until is None:
+                    raise ValueError(f"witness key {kid!r}: not_after must be an RFC 3339 UTC "
+                                     f"date-time such as '2026-10-05T00:00:00Z', got {not_after!r}")
             value = value.get("public_key_hex")
-        trusted[kid] = (ENVELOPE_ALG, _witness_public_key(kid, value))
-    return trusted
+        key = _witness_public_key(kid, value)
+        if until is not None and until <= at:
+            expired[kid] = not_after
+            continue
+        trusted[kid] = (ENVELOPE_ALG, key)
+    return trusted, expired
 
 
 def _envelope_raw_bytes(raw):
@@ -593,7 +674,7 @@ def _envelope_line(state: str, result) -> str:
 
 
 def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
-               raw_bytes) -> tuple[dict, _FailureLog]:
+               raw_bytes, expired: dict | None = None) -> tuple[dict, _FailureLog]:
     """Score every envelope in the bundle and derive the per-entry state.
 
     Returns the summary `verify_bundle` reports as `report["envelopes"]`, plus the failures,
@@ -606,10 +687,16 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     this array already named is `envelope_duplicate_subject`, and the entry falls back to
     `process-asserted`: two observations of one event contradict each other by construction —
     whoever appends the second decides what the first said, and an entry whose coverage is
-    disputed must not read as clean."""
+    disputed must not read as clean.
+
+    `expired` is the kid -> `not_after` map `_trusted_witnesses` left out of `trusted`; it only
+    changes the wording of the `envelope_unknown_witness` an expired key gets."""
     fail = _FailureLog()
     states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
+    #: seq -> the `witness.kid` of the envelope that verified for it. Kept like `results`: the
+    #: first verifying envelope's kid stands even when a duplicate turns the state back.
+    witnesses: dict = {}
     # The hash walk is what an envelope's binding member is checked against; a bundle carrying
     # none does not pay for it. Every entry is process-asserted in that case, which is the
     # status quo and exactly what this reports.
@@ -622,11 +709,13 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     for index, envelope in enumerate(envelopes):
         raw = raw_bytes[index] if raw_bytes and index < len(raw_bytes) else None
         seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw,
-                                            fail, claims)
+                                            fail, claims, expired)
         if seq is None:
             continue
         states[seq] = WITNESS_SIGNED
         results[seq] = result
+        # A string by now: `_score_envelope` refuses an envelope whose kid is not one.
+        witnesses[seq] = envelope["witness"]["kid"]
 
     # The first envelope's result stands in `results` — it is what that witness said, and the
     # duplicate does not erase it — but the STATE falls back, so a contradicted entry never
@@ -639,12 +728,12 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     return ({"status": "verified" if not fail else "FAILED",
              "count": len(envelopes),
              "witness_signed": sorted(s for s, st in states.items() if st == WITNESS_SIGNED),
-             "states": states, "results": results, "lines": lines,
+             "states": states, "results": results, "witnesses": witnesses, "lines": lines,
              "failures": list(fail.messages)}, fail)
 
 
 def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, trusted: dict,
-                    raw, fail: _FailureLog, claims: dict):
+                    raw, fail: _FailureLog, claims: dict, expired: dict | None = None):
     """One envelope, checked in the order the seven named failures are defined in.
 
     Returns `(seq, node, result)` for an envelope that verified, and `(None, None, None)` for
@@ -824,6 +913,16 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
         return None, None, None
     known = trusted.get(kid)
     if known is None:
+        # A key whose trust-set row has expired is not in the trust set, so it is the same
+        # failure as any other untrusted kid. The message keeps that wording first and then says
+        # why, because "not trusted" and "trusted until a date that has passed" call for
+        # different fixes.
+        lapsed = (expired or {}).get(kid)
+        if lapsed is not None:
+            report("envelope_unknown_witness",
+                   f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
+                   f"({sorted(trusted)}): the key expired at not_after={lapsed!r}", subject)
+            return None, None, None
         report("envelope_unknown_witness",
                f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
                f"({sorted(trusted)})", subject)
@@ -857,21 +956,29 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     return seq, node, envelope.get("observed", {}).get("result")
 
 
-def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None) -> dict:
+def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, now=None) -> dict:
     """Score a bundle's observer envelopes on their own, without the ledger checks.
 
     `witness_keys` is the trust set: the vector file's `[{"kid", "alg", "public_key_hex"}]`, or
-    a `{kid: public_key_bytes}` mapping. `envelope_bytes` is the list of envelope bytes AS
-    RECEIVED, positionally aligned with `bundle["envelopes"]` (entries may be None) — only
-    `envelope_non_canonical` needs them, and only where a deployment kept them.
+    a `{kid: public_key_bytes}` mapping. A row may carry `not_after`, an RFC 3339 UTC date-time;
+    a row whose `not_after` is at or before `now` (default: the current UTC time) is left out of
+    the trust set, and its envelopes fail `envelope_unknown_witness`, with the expiry in the
+    message. `envelope_bytes` is the list of envelope bytes AS RECEIVED, positionally aligned
+    with `bundle["envelopes"]` (entries may be None) — only `envelope_non_canonical` needs them,
+    and only where a deployment kept them.
 
-    Returns `{ok, status, count, states, results, lines, witness_signed, failures,
+    Returns `{ok, status, count, states, results, witnesses, lines, witness_signed, failures,
     failure_details}`. `states` maps every entry's seq to `witness-signed` or
     `process-asserted`; `lines` is the report line for each, `witness-signed (matched)` and so
-    on, with no result on a process-asserted entry."""
+    on, with no result on a process-asserted entry. `results` and `witnesses` map a covered
+    seq to the verifying envelope's `observed.result` and `witness.kid`. A `witness-signed`
+    state means that signature covers the entry's hash and chain position plus what the
+    witness-key holder observed (result, time, method); it does not attest that the action was
+    permitted."""
     entries = bundle.get("entries") or []
-    summary, fail = _envelopes(entries, bundle.get("envelopes") or [],
-                               _trusted_witnesses(witness_keys), envelope_bytes)
+    trusted, expired = _trusted_witnesses(witness_keys, now)
+    summary, fail = _envelopes(entries, bundle.get("envelopes") or [], trusted,
+                               envelope_bytes, expired)
     return {"ok": not fail, **summary, "failure_details": fail.details}
 
 
@@ -1341,7 +1448,7 @@ def _integrity_position(entries: list[dict]) -> tuple:
 
 def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = None,
                   expected_head: tuple | None = None, witness_keys=None,
-                  envelope_bytes=None) -> dict:
+                  envelope_bytes=None, now=None) -> dict:
     """Verify integrity, monotonicity and containment from the bundle alone. Returns
     {ok, checks, failures, failure_details, ...}.
 
@@ -1360,10 +1467,18 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     `witness_keys` is the trust set for the bundle's observer envelopes, if it carries any:
     `[{"kid", "alg", "public_key_hex"}]` (the envelope vector file's own shape) or a
     `{kid: public_key_bytes}` mapping. `None` is an EMPTY trust set, not a skipped check — an
-    envelope naming a key nobody trusts is `envelope_unknown_witness`. `envelope_bytes` supplies
+    envelope naming a key nobody trusts is `envelope_unknown_witness`. A row may carry
+    `not_after`, an RFC 3339 UTC date-time such as "2026-10-05T00:00:00Z"; a row whose
+    `not_after` is at or before `now` is left out of the trust set, so its envelopes fail
+    `envelope_unknown_witness` with the expiry in the message. `now` defaults to the current
+    UTC time and may be an aware `datetime`, an RFC 3339 UTC string or epoch seconds; a
+    malformed `not_after` raises `ValueError` naming the kid. `envelope_bytes` supplies
     the envelope bytes AS RECEIVED, positionally aligned with `bundle["envelopes"]`, which only
     `envelope_non_canonical` needs and only where a deployment kept them. A bundle with no
     `envelopes` array reports every entry `process-asserted` and verifies exactly as before.
+    `report["envelopes"]` carries the per-entry state; a `witness-signed` entry's signature
+    covers the entry's hash and chain position plus what the witness-key holder observed
+    (result, time, method), and does not attest that the action was permitted.
 
     `failure_details` is the structured twin of `failures`: same order, same count, one
     `{"reason", "seq", "node", "call_id", "detail"}` dict per string, so a conformance suite can
@@ -1556,8 +1671,9 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # nothing — but a PRESENT one has to verify, and a broken one lands in this same list. The
     # per-entry state is reported either way, so a reader sees which hops were covered before
     # reading which one failed.
-    envelopes = _envelopes(entries, bundle.get("envelopes") or [],
-                           _trusted_witnesses(witness_keys), envelope_bytes)
+    trusted, expired = _trusted_witnesses(witness_keys, now)
+    envelopes = _envelopes(entries, bundle.get("envelopes") or [], trusted, envelope_bytes,
+                           expired)
     if "envelopes" in bundle:
         envelope_summary, envelope_failures = envelopes
         checks["envelopes"] = envelope_summary["status"]

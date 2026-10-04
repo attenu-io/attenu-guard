@@ -21,3 +21,20 @@ not that the bundle is complete.
 
 Place enforcement where the interception point actually sits (`docs/INTEGRATIONS.md` has each
 framework's hook); read the ledger as an authorization record, not an execution trace.
+
+### Witness signatures
+
+An observer envelope is a witness's signature over one ledger entry. The signature covers the
+entry's hash and chain position plus what the witness-key holder observed (result, time, method).
+It does not attest that the action was permitted. An entry reported `witness-signed` can still
+fail containment or monotonicity: a process that appends an allow outside its node's authority,
+in chain order, gets it signed by a witness that signs what it receives in chain order, and
+containment is the check that catches it. `attenu-guard verify --entries` prints each entry's
+envelope state next to the checks that failed on it.
+
+A witness in the subject's own trust domain protects nothing beyond that domain. Place the
+witness, and its key, where the process it observes cannot reach them.
+
+Which witness keys count is the verifier's decision, made in `witness_keys`. A row there may
+carry `not_after` (RFC 3339, UTC); from that time on the key is not trusted and its envelopes
+fail `envelope_unknown_witness`. A row without `not_after` is trusted until it is removed.

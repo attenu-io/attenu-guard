@@ -6,6 +6,15 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Added
+- **`attenu-guard verify --entries`** prints, after the usual output, `entries:` and one line per ledger entry: `seq`, `event`, `node`, `scope`, the envelope `state` (`witness-signed` or `process-asserted`, bundles only), `observed` and `witness` on a witness-signed entry, and `failed=` with every check whose finding is positioned on that entry, in report order. A finding with no position, such as the anchor's, stays in the bundle-level output. A value that is not plain printable ASCII is printed as JSON, so no value can end its line or forge another. Without the flag the output and the exit codes are unchanged. Asked for by mickyarun on dev.to (#23): in the separated-custody run of 2026-09-30, a forged allow appended in chain order was witness-signed and caught by containment, and a reader looking at that entry saw only its signature
+- **`witness_keys` rows take an optional `not_after`** (RFC 3339 UTC, such as `2026-10-05T00:00:00Z`). A row whose `not_after` is at or before the verification time is left out of the trust set, so its envelopes fail `envelope_unknown_witness`, and the message says the key expired and when. A malformed `not_after` raises `ValueError` naming the kid, like any other bad row, and a row without one is trusted as before. `verify_bundle()` and `verify_envelopes()` take `now` (default: the current UTC time), and `attenu-guard verify --witness-keys FILE` checks rows against the current time. Proposed by peterbuildssecure on dev.to (#22)
+- `report["envelopes"]["witnesses"]` maps each covered seq to the `witness.kid` of the envelope that verified for it, kept the way `results` is
+
+### Changed
+- **What a witness signature covers is stated plainly** wherever the envelope states are described (`tests/vectors/README.md`, `examples/verify/README.md`, `docs/THREAT-MODEL.md`, the `evidence` docstrings): the entry's hash and chain position plus what the witness-key holder observed (result, time, method). It does not attest that the action was permitted. The state names, the vectors and the seven failure names are unchanged. From mickyarun's review on dev.to (#22)
+- `docs/THREAT-MODEL.md` states that a witness in the subject's own trust domain protects nothing beyond that domain (#22)
+
 ### Fixed
 - **The MCP server-verifier recipe did not run on mcp 2.x** (#12). mcp 2.x removed the in-memory session helper the demo and its tests imported, renamed `FastMCP` to `MCPServer` and snake-cased the result fields (`is_error`), and `pip install 'attenu-guard[mcp]'` resolves to 2.x. The recipe now connects with `mcp.Client(server)` on 2.x and keeps the 1.x path, and CI runs its demo and tests pinned on mcp 1.28.1 and on 2.3.0
 

@@ -852,6 +852,161 @@ class TestWitnessAlgorithm(unittest.TestCase):
                     envelope_bytes=[raw])["ok"])
 
 
+# =========================================================================
+# Trust-row expiry: `not_after` on a witness_keys row (attenu-io/attenu-guard#22)
+# =========================================================================
+class TestTrustRowExpiry(unittest.TestCase):
+    """A `witness_keys` row may carry `not_after`, an RFC 3339 UTC date-time. At or after it the
+    row is left out of the trust set, so its envelopes fail the existing
+    `envelope_unknown_witness`, and the message says the key expired and when. A malformed
+    `not_after` raises `ValueError` naming the kid, like any other bad row. A row without one
+    is trusted at any time, as before."""
+
+    NOT_AFTER = "2026-10-05T00:00:00Z"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])   # valid_spawn_envelope
+        cls.kid = generate_envelopes.WITNESS_KID
+        cls.other = generate_envelopes.WITNESS_KID_B
+
+    def _rows(self, **fields):
+        rows = [dict(k) for k in self.case["witness_keys"]]
+        rows[0].update(fields)                      # the row of the kid that signed the envelope
+        self.assertEqual(rows[0]["kid"], self.kid)
+        return rows
+
+    def _report(self, rows, now):
+        return evidence.verify_envelopes(self.case["bundle"], witness_keys=rows, now=now)
+
+    def test_a_row_inside_its_validity_is_trusted(self):
+        report = self._report(self._rows(not_after=self.NOT_AFTER), now="2026-10-04T23:59:59Z")
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "witness-signed")
+        self.assertEqual(report["witnesses"], {generate_envelopes.SPAWN_SEQ: self.kid})
+
+    def test_an_expired_row_is_left_out_and_the_message_says_when(self):
+        for now in (self.NOT_AFTER, "2026-10-05T00:00:01Z"):     # at, and after
+            with self.subTest(now=now):
+                report = self._report(self._rows(not_after=self.NOT_AFTER), now=now)
+                self.assertFalse(report["ok"])
+                self.assertEqual(
+                    [(d["reason"], d["seq"], d["node"]) for d in report["failure_details"]],
+                    [("envelope_unknown_witness", generate_envelopes.SPAWN_SEQ,
+                      self.case["bundle"]["entries"][generate_envelopes.SPAWN_SEQ]["node"])])
+                self.assertEqual(
+                    report["failures"],
+                    [f"envelope_unknown_witness: witness kid={self.kid!r} alg='EdDSA' is not in "
+                     f"the trusted witness keys ({[self.other]!r}): the key expired at "
+                     f"not_after={self.NOT_AFTER!r}"])
+                self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ],
+                                 "process-asserted")
+                self.assertEqual(report["witnesses"], {})
+
+    def test_verify_bundle_takes_now_and_reports_the_expiry_in_its_own_list(self):
+        signer = HS256TestSigner(bytes.fromhex(self.case["signer"]["secret_hex"]),
+                                 kid=self.case["signer"]["kid"])
+        rows = self._rows(not_after=self.NOT_AFTER)
+        before = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=rows,
+                                        now="2026-10-04T00:00:00Z")
+        after = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=rows,
+                                       now="2026-10-06T00:00:00Z")
+        self.assertTrue(before["ok"], before["failures"])
+        self.assertFalse(after["ok"])
+        self.assertEqual(after["checks"]["envelopes"], "FAILED")
+        self.assertEqual([d["reason"] for d in after["failure_details"]],
+                         ["envelope_unknown_witness"])
+        self.assertIn("the key expired at not_after='2026-10-05T00:00:00Z'", after["failures"][0])
+
+    def test_a_row_without_not_after_is_trusted_at_any_time(self):
+        for now in (None, "1970-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+            with self.subTest(now=now):
+                self.assertTrue(self._report(self._rows(), now=now)["ok"])
+
+    def test_the_default_now_is_the_current_utc_time(self):
+        self.assertFalse(self._report(self._rows(not_after="2000-01-01T00:00:00Z"), None)["ok"])
+        self.assertTrue(self._report(self._rows(not_after="9999-12-31T23:59:59Z"), None)["ok"])
+
+    def test_a_malformed_not_after_raises_naming_the_kid(self):
+        for bad in ("2026-10-05", "2026-10-05T00:00:00", "2026-10-05T00:00:00+00:00",
+                    "2026-10-05 00:00:00Z", "2026-13-01T00:00:00Z", "2026-02-30T00:00:00Z",
+                    "2026-10-05T24:00:00Z", "2026-10-05T00:00:60Z", "2026-10-05T00:00:00Z\n",
+                    " 2026-10-05T00:00:00Z", "", None, 1759622400, True, ["2026-10-05T00:00:00Z"]):
+            with self.subTest(not_after=repr(bad)):
+                with self.assertRaises(ValueError) as raised:
+                    self._report(self._rows(not_after=bad), now=None)
+                self.assertIn(repr(self.kid), str(raised.exception))
+                self.assertIn("not_after", str(raised.exception))
+
+    def test_expiry_never_excuses_a_malformed_row(self):
+        # A row past its not_after is still configuration, and still checked whole.
+        for fields in ({"public_key_hex": "zz" * 32}, {"alg": "none"}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    self._report(self._rows(not_after="2000-01-01T00:00:00Z", **fields), now=None)
+
+    def test_rfc3339_fractions_and_lower_case_are_accepted(self):
+        rows = self._rows(not_after="2026-10-05t00:00:00.5z")
+        self.assertTrue(self._report(rows, now="2026-10-05T00:00:00.4Z")["ok"])
+        self.assertFalse(self._report(rows, now="2026-10-05T00:00:00.5Z")["ok"])
+
+    def test_now_may_be_an_aware_datetime_a_string_or_epoch_seconds(self):
+        from datetime import datetime, timedelta, timezone
+        rows = self._rows(not_after=self.NOT_AFTER)
+        instant = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        for now in (instant, self.NOT_AFTER, instant.timestamp(), int(instant.timestamp()),
+                    instant.astimezone(timezone(timedelta(hours=3)))):
+            with self.subTest(now=repr(now)):
+                self.assertFalse(self._report(rows, now=now)["ok"])
+        self.assertTrue(self._report(rows, now=instant - timedelta(seconds=1))["ok"])
+        for bad in (datetime(2026, 10, 5), "yesterday", True, float("nan"), float("inf"), [0]):
+            with self.subTest(now=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self._report(rows, now=bad)
+
+    def test_the_mapping_form_honours_not_after_too(self):
+        row = self._rows(not_after="2000-01-01T00:00:00Z")[0]
+        report = evidence.verify_envelopes(self.case["bundle"], witness_keys={self.kid: row})
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_unknown_witness"])
+        self.assertIn("the key expired at not_after='2000-01-01T00:00:00Z'", report["failures"][0])
+
+    def test_an_expired_kid_with_a_valid_row_of_its_own_is_still_trusted(self):
+        # Two rows for one kid: the expired one is left out, the valid one is the trust set.
+        rows = self._rows(not_after="2000-01-01T00:00:00Z")
+        rows.append(dict(rows[0], not_after="9999-12-31T23:59:59Z"))
+        self.assertTrue(evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)["ok"])
+
+
+class TestWitnessesMap(unittest.TestCase):
+    """`report["envelopes"]["witnesses"]`: seq -> the kid of the envelope that verified for it,
+    which is what `attenu-guard verify --entries` prints as `witness=`."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])
+
+    def test_a_verified_envelope_names_its_kid_and_no_other_entry_has_one(self):
+        report = evidence.verify_envelopes(self.case["bundle"],
+                                           witness_keys=self.case["witness_keys"])
+        self.assertEqual(report["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+    def test_a_duplicate_keeps_the_first_kid_as_results_keeps_its_result(self):
+        entries = self.case["bundle"]["entries"]
+        seed = generate_envelopes.SEEDS[generate_envelopes.WITNESS_KID]
+        envelope = evidence.sign_envelope(entries, generate_envelopes.SPAWN_SEQ, seed,
+                                          kid=generate_envelopes.WITNESS_KID,
+                                          at=generate_envelopes.OBSERVED_AT,
+                                          method=generate_envelopes.OBSERVED_METHOD)
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"] = [envelope, copy.deepcopy(envelope)]
+        report = evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual(report["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+
 def _resign(envelope):
     return generate_envelopes._resign(envelope)
 

@@ -145,6 +145,231 @@ class TestVerifyCli(unittest.TestCase):
             rc, out = run("verify", str(Path(td) / "l.jsonl"))
             self.assertEqual(rc, 0); self.assertIn("OK", out)
 
+    def test_the_default_output_is_the_walkthroughs_byte_for_byte(self):
+        # examples/verify/README.md prints exactly this. `--entries` only ever appends to it.
+        rc, out = run("verify", str(SAMPLES / "clean.bundle.json"), "--hs256-key", KEY)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "integrity=True monotonicity=True containment=True anchor=verified "
+                              "nodes=3 actions_checked=2\nOK\n")
+
+
+# =========================================================================
+# `verify --entries` (attenu-io/attenu-guard#23) and trust-row expiry (#22)
+# =========================================================================
+WITNESS_KID = "witness-test"
+WITNESS_SEED = bytes(range(32))
+ANCHOR_SECRET = b"forged-allow-anchor"
+
+
+def _witness_keys(not_after=None) -> list:
+    public = evidence._ed25519_backend()[2](WITNESS_SEED)
+    row = {"kid": WITNESS_KID, "alg": "EdDSA", "public_key_hex": public.hex()}
+    if not_after is not None:
+        row["not_after"] = not_after
+    return [row]
+
+
+def _forged_allow_bundle(scope: str = "web.search") -> dict:
+    """The separated-custody run of 2026-09-30, bundle (d), rebuilt with the public API.
+
+    A supervisor holding {web.search, docs.write} delegates {docs.write} to a brief-writer. The
+    child's docs.write is allowed and its web.search denied. Then the process appends an allow
+    of `scope` on the child's node, in chain order, and the witness signs it exactly as it
+    signed the honest spawn and allow: it signs what it receives in chain order. The chain,
+    the anchor and every envelope verify; containment is the only check that catches it."""
+    from attenu_guard import Authority, Guard
+    sup = Guard.issue("supervisor", Authority(scopes={"web.search", "docs.write"}),
+                      task="research and write a brief", chain_id="witness-custody-run")
+    child = sup.delegate("brief-writer", Authority(scopes={"docs.write"}), task="write the brief")
+    child.check("docs.write")
+    child.check("web.search")
+    ledger = sup.audit_log()
+    honest = ledger.entries[2]
+    assert (honest["event"], honest["scope"]) == ("allow", "docs.write"), honest
+    ledger.append("allow", 5, chain_id=honest["chain_id"], node=honest["node"], scope=scope,
+                  tool=None, context={})
+    entries = ledger.entries
+    envelopes = [evidence.sign_envelope(entries, seq, WITNESS_SEED, kid=WITNESS_KID,
+                                        result="indeterminate", at="2026-09-30T07:43:46Z",
+                                        method="signs what it receives in chain order")
+                 for seq in (1, 2, 4)]
+    return evidence.export_bundle(ledger, HS256TestSigner(ANCHOR_SECRET, kid="agent-anchor"),
+                                  envelopes=envelopes)
+
+
+class TestVerifyEntries(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _write(self, name: str, obj) -> str:
+        path = self.td / name
+        path.write_text(json.dumps(obj))
+        return str(path)
+
+    def _verify_both_ways(self, *args) -> tuple:
+        """(exit code, the output without --entries, the entry lines --entries added).
+
+        Asserts the two contracts every --entries run keeps: the exit code does not move, and
+        the default output comes first, byte for byte, followed by `entries:`."""
+        rc_default, default = run("verify", *args)
+        rc, out = run("verify", *args, "--entries")
+        self.assertEqual(rc, rc_default)
+        self.assertNotIn("entries:", default)
+        self.assertTrue(out.startswith(default + "entries:\n"), out)
+        return rc, default, out[len(default + "entries:\n"):].splitlines()
+
+    def test_a_clean_bundle_with_an_envelope_lists_every_entry_and_fails_none(self):
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                    if c["name"] == "valid_spawn_envelope")
+        bundle = self._write("bundle.json", case["bundle"])
+        keys = self._write("keys.json", case["witness_keys"])
+        rc, _default, lines = self._verify_both_ways(bundle, "--witness-keys", keys)
+        self.assertEqual(rc, 0)
+        expected = []
+        for e in case["bundle"]["entries"]:
+            line = f"  seq={e['seq']} event={e['event']} node={e['node']}"
+            if e.get("scope") is not None:
+                line += f" scope={e['scope']}"
+            if e["seq"] == 1:   # the spawn the corpus's one envelope covers
+                line += " state=witness-signed observed=matched witness=witness-interop-v1"
+            else:
+                line += " state=process-asserted"
+            expected.append(line)
+        self.assertEqual(lines, expected)
+
+    def test_the_forged_in_order_allow_is_failed_by_containment_on_its_own_line_only(self):
+        bundle = self._write("bundle-d.json", _forged_allow_bundle())
+        keys = self._write("keys.json", _witness_keys())
+        rc, default, lines = self._verify_both_ways(
+            bundle, "--hs256-key", ANCHOR_SECRET.hex(), "--witness-keys", keys)
+        self.assertEqual(rc, 2)
+        self.assertEqual(default, (
+            "integrity=True monotonicity=True containment=False anchor=verified nodes=2 "
+            "actions_checked=2\n"
+            "  - containment: allow of 'web.search' on witness-custody-run:n1 outside its "
+            "authority ['docs.write']\n"
+            "FAILED\n"))
+        signed = f"state=witness-signed observed=indeterminate witness={WITNESS_KID}"
+        self.assertEqual(lines, [
+            "  seq=0 event=root node=witness-custody-run:n0 state=process-asserted",
+            f"  seq=1 event=spawn node=witness-custody-run:n1 {signed}",
+            f"  seq=2 event=allow node=witness-custody-run:n1 scope=docs.write {signed}",
+            "  seq=3 event=deny node=witness-custody-run:n1 scope=web.search state=process-asserted",
+            f"  seq=4 event=allow node=witness-custody-run:n1 scope=web.search {signed} "
+            "failed=containment",
+        ])
+        self.assertEqual([line for line in lines if "failed=" in line], [lines[4]])
+
+    def test_checks_on_one_entry_are_listed_in_report_order_each_once(self):
+        # No trust set: every envelope fails envelope_unknown_witness at the entry it covers,
+        # and the forged allow also fails containment, which the report lists first.
+        bundle = self._write("bundle-d.json", _forged_allow_bundle())
+        rc, _default, lines = self._verify_both_ways(bundle, "--hs256-key", ANCHOR_SECRET.hex())
+        self.assertEqual(rc, 2)
+        failed = {line.split()[0]: line.split("failed=")[1] for line in lines if "failed=" in line}
+        self.assertEqual(failed, {"seq=1": "envelope_unknown_witness",
+                                  "seq=2": "envelope_unknown_witness",
+                                  "seq=4": "containment,envelope_unknown_witness"})
+        self.assertNotIn("state=witness-signed", "\n".join(lines))
+
+    def test_a_finding_that_concerns_no_single_entry_lands_on_no_line(self):
+        # A wrong anchor key: integrity(anchor) is about the head of the whole ledger, so it is
+        # in the bundle-level output and on no entry.
+        rc, default, lines = self._verify_both_ways(str(SAMPLES / "clean.bundle.json"),
+                                                    "--hs256-key", "00")
+        self.assertEqual(rc, 2)
+        self.assertIn("integrity(anchor)", default)
+        self.assertTrue(lines)
+        self.assertNotIn("failed=", "\n".join(lines))
+
+    def test_a_value_cannot_end_its_line_or_forge_another(self):
+        # The forged allow carries a scope written to print as a clean line plus a fake second
+        # entry, which would take the real entry's failed=containment onto itself.
+        scope = (f"web.search state=witness-signed observed=indeterminate witness={WITNESS_KID}"
+                 "\n  seq=5 event=deny node=witness-custody-run:n1 scope=web.search")
+        bundle = self._write("bundle-d.json", _forged_allow_bundle(scope))
+        keys = self._write("keys.json", _witness_keys())
+        rc, _default, lines = self._verify_both_ways(
+            bundle, "--hs256-key", ANCHOR_SECRET.hex(), "--witness-keys", keys)
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(lines), 5)                     # one per entry, no sixth
+        self.assertTrue(lines[4].startswith("  seq=4 event=allow "), lines[4])
+        self.assertTrue(lines[4].endswith(" failed=containment"), lines[4])
+        token = next(t for t in lines[4].split() if t.startswith("scope="))
+        self.assertEqual(json.loads(token[len("scope="):]), scope)
+
+    def test_values_print_bare_or_as_whitespace_free_json(self):
+        cases = [("docs.write", "docs.write"), ("vectors:n1", "vectors:n1"), (7, "7"),
+                 ("", '""'), ("a b", '"a\\u0020b"'), ('q"', '"q\\""'), ("é", '"\\u00e9"'),
+                 ("x\ny", '"x\\ny"'), (True, "true"), ([1, "a b"], '[1,"a\\u0020b"]')]
+        for value, printed in cases:
+            with self.subTest(value=value):
+                self.assertEqual(cli._entry_value(value), printed)
+                if printed != value:
+                    self.assertEqual(json.loads(printed), value)
+
+    def test_a_plain_ledger_lists_its_entries_with_no_envelope_state(self):
+        from attenu_guard import Authority, Guard
+        log = self.td / "l.jsonl"
+        sup = Guard.issue("supervisor", Authority(scopes={"web.search", "docs.write"}),
+                          audit_path=log, chain_id="ledger")
+        child = sup.delegate("brief-writer", Authority(scopes={"docs.write"}), task="write")
+        child.check("docs.write")
+        child.check("web.search")
+        rc, default, lines = self._verify_both_ways(str(log))
+        self.assertEqual((rc, default), (0, "OK\n"))
+        self.assertEqual(lines, [
+            "  seq=0 event=root node=ledger:n0",
+            "  seq=1 event=spawn node=ledger:n1",
+            "  seq=2 event=allow node=ledger:n1 scope=docs.write",
+            "  seq=3 event=deny node=ledger:n1 scope=web.search",
+        ])
+        # Rewrite the allow's scope without re-hashing: the chain breaks at that entry, and
+        # that entry is the one integrity fails on.
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        rows[2]["scope"] = "web.search"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        rc, default, lines = self._verify_both_ways(str(log))
+        self.assertEqual((rc, default), (2, "TAMPERED — hash mismatch at seq 2\n"))
+        self.assertEqual([line for line in lines if "failed=" in line],
+                         ["  seq=2 event=allow node=ledger:n1 scope=web.search failed=integrity"])
+        self.assertNotIn("state=", "\n".join(lines))
+
+    def test_an_empty_ledger_is_still_empty_and_lists_nothing(self):
+        log = self.td / "empty.jsonl"
+        log.write_text("")
+        rc, default, lines = self._verify_both_ways(str(log))
+        self.assertEqual((rc, lines), (2, []))
+        self.assertIn("EMPTY", default)
+
+    def test_the_flag_may_come_before_the_path(self):
+        rc, out = run("verify", "--entries", str(SAMPLES / "clean.bundle.json"), "--hs256-key", KEY)
+        self.assertEqual(rc, 0)
+        self.assertIn("\nentries:\n  seq=0 event=root ", out)
+
+    def test_witness_keys_rows_honour_not_after_at_the_current_time(self):
+        bundle = self._write("bundle.json", _forged_allow_bundle())
+        expired = self._write("expired.json", _witness_keys(not_after="2000-01-01T00:00:00Z"))
+        rc, out = run("verify", bundle, "--witness-keys", expired, "--entries")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"envelope_unknown_witness: witness kid='{WITNESS_KID}' alg='EdDSA' is not "
+                      "in the trusted witness keys ([]): the key expired at "
+                      "not_after='2000-01-01T00:00:00Z'", out)
+        self.assertNotIn("state=witness-signed", out)
+        # A row still inside its validity verifies as a row without not_after does, so the
+        # only remaining finding on this bundle is the forged allow's containment.
+        valid = self._write("valid.json", _witness_keys(not_after="9999-12-31T23:59:59Z"))
+        rc, out = run("verify", bundle, "--witness-keys", valid)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("envelope_", out)
+        self.assertIn("containment=False", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
