@@ -923,7 +923,12 @@ evidence of *which* entry the witness signed, because the hash covers
 verifier finds the entry at `seq`, recomputes its hash from the bundle, and
 compares; the locators are then checked against **that same entry**, and one
 that disagrees is the same failure at the same position. `seq` is the lookup
-key, so there is nothing to compare it against.
+key, so there is nothing to compare it against. The entry at `seq` is the one
+whose own `seq` is that integer, and never a boolean (`true` is not 1), or, for
+an entry with no `seq` member at all, the one at that index. An entry whose
+`seq` is a boolean, a string, null or any other non-integer is at no `seq`, so
+no envelope covers it. Where two entries are at one `seq`, the later one is
+covered.
 
 `observed.result` is a closed vocabulary of three. `matched` means the witness
 saw the event and it agrees with what it independently observed.

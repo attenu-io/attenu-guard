@@ -506,38 +506,58 @@ def envelope_signing_input(envelope: Mapping) -> bytes:
     return canonical.dumps({k: v for k, v in envelope.items() if k != "sig"})
 
 
-def _recomputed_hashes(entries: list[dict]) -> dict:
-    """seq -> the entry's hash RECOMPUTED from the bundle, never read off the entry.
+def _recomputed_hashes(entries: list[dict]) -> list:
+    """Each entry's hash RECOMPUTED from the bundle, by index, never read off the entry.
 
     `entry_hash` in a subject is checked against this. The recomputation walks the ledger from
     GENESIS exactly as `AuditLog.verify` does, so an entry whose stored `hash` was replaced does
-    not get to supply the value it is compared against."""
-    out: dict = {}
+    not get to supply the value it is compared against. By index, not by seq: an entry's seq
+    can be missing, another entry's, or a bool that Python takes for an integer."""
+    out: list = []
     prev = _GENESIS
-    for i, e in enumerate(entries):
+    for e in entries:
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
             computed = _rehash(prev, payload)
         except Exception:  # noqa: BLE001 - an unhashable payload has no recomputable hash
             computed = None
-        out[e.get("seq", i)] = computed
+        out.append(computed)
         prev = computed if computed is not None else _GENESIS
     return out
+
+
+def _subject_index(entries: list[dict]) -> dict:
+    """subject.seq -> the index of the entry an envelope naming that seq covers.
+
+    An entry is keyed by its own seq when that is an integer and not a bool, and by its index
+    when it has no seq member at all. An entry whose seq is a bool, a float, a string or null is
+    keyed by nothing, so no envelope covers it: keyed by the raw value, `"seq": true` took the
+    envelope written for seq 1, because `True == 1` and `hash(True) == hash(1)` in Python. Where
+    two entries share a key the later one is covered, as it always was."""
+    keyed: dict = {}
+    for i, e in enumerate(entries):
+        if "seq" not in e:
+            keyed[i] = i
+        elif _is_seq(e["seq"]):
+            keyed[e["seq"]] = i
+    return keyed
 
 
 def envelope_subject(entries: list[dict], seq: int) -> dict:
     """The v1 subject for the entry at `seq`, recomputed from the ledger.
 
-    Raises `ValueError` when `seq` names no entry, or names one whose `event` v1 defines no
-    subject for."""
-    entry = next((e for e in entries if e.get("seq") == seq), None)
-    if entry is None:
+    `seq` finds its entry the way a verifier finds it (`_subject_index`), so the subject is the
+    one the verifier will check it against. Raises `ValueError` when `seq` names no entry, or
+    names one whose `event` v1 defines no subject for."""
+    at = _subject_index(entries).get(seq) if _is_seq(seq) else None
+    if at is None:
         raise ValueError(f"no entry at seq {seq!r}")
+    entry = entries[at]
     event = entry.get("event")
     if event not in ENVELOPE_SUBJECT_MEMBERS:
         raise ValueError(f"envelope v{ENVELOPE_VERSION} defines no subject for event {event!r}")
     subject = {"chain_id": entry.get("chain_id"), "node": entry.get("node"), "seq": seq,
-               "entry_hash": _recomputed_hashes(entries)[seq], "event": event}
+               "entry_hash": _recomputed_hashes(entries)[at], "event": event}
     if event == "allow":
         subject["call_id"] = entry.get("call_id")
     return subject
@@ -767,35 +787,39 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     fail = _FailureLog()
     states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
-    #: seq -> the `witness.kid` of the envelope that verified for it. Kept like `results`: the
-    #: first verifying envelope's kid stands even when a duplicate turns the state back.
+    #: entry index -> the `witness.kid` of the envelope that verified for it, for every entry
+    #: whose state is witness-signed. By index, not by seq: the index is the entry the subject
+    #: resolved to, the one `failure_entries` names, so of two entries sharing a seq only the
+    #: one the witness signed is in it. An entry whose coverage two envelopes dispute is not.
     witnesses: dict = {}
     # The hash walk is what an envelope's binding member is checked against; a bundle carrying
     # none does not pay for it. Every entry is process-asserted in that case, which is the
     # status quo and exactly what this reports.
-    by_seq = {e.get("seq", i): e for i, e in enumerate(entries)} if envelopes else {}
-    recomputed = _recomputed_hashes(entries) if envelopes else {}
-    #: seq -> how many envelopes in this array named it, valid or not. `_score_envelope` counts
-    #: an envelope in as soon as its subject names an entry this bundle has.
+    subject_index = _subject_index(entries) if envelopes else {}
+    recomputed = _recomputed_hashes(entries) if envelopes else []
+    #: entry index -> how many envelopes in this array named it, valid or not. `_score_envelope`
+    #: counts an envelope in as soon as its subject names an entry this bundle has.
     claims: dict = {}
 
     for index, envelope in enumerate(envelopes):
         raw = raw_bytes[index] if raw_bytes and index < len(raw_bytes) else None
-        seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw,
-                                            fail, claims, expired)
-        if seq is None:
+        at, _node, result = _score_envelope(envelope, index, entries, subject_index, recomputed,
+                                            trusted, raw, fail, claims, expired)
+        if at is None:
             continue
-        states[seq] = WITNESS_SIGNED
-        results[seq] = result
+        key = entries[at].get("seq", at)            # where `states` files that entry
+        states[key] = WITNESS_SIGNED
+        results[key] = result
         # A string by now: `_score_envelope` refuses an envelope whose kid is not one.
-        witnesses[seq] = envelope["witness"]["kid"]
+        witnesses[at] = envelope["witness"]["kid"]
 
     # The first envelope's result stands in `results` — it is what that witness said, and the
     # duplicate does not erase it — but the STATE falls back, so a contradicted entry never
-    # reports witness-signed and the bundle rejects.
-    for seq, count in claims.items():
+    # reports witness-signed and the bundle rejects; and it leaves `witnesses`.
+    for at, count in claims.items():
         if count > 1:
-            states[seq] = PROCESS_ASSERTED
+            states[entries[at].get("seq", at)] = PROCESS_ASSERTED
+            witnesses.pop(at, None)
 
     lines = {seq: _envelope_line(state, results.get(seq)) for seq, state in states.items()}
     return ({"status": "verified" if not fail else "FAILED",
@@ -805,15 +829,17 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
              "failures": list(fail.messages)}, fail)
 
 
-def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, trusted: dict,
-                    raw, fail: _FailureLog, claims: dict, expired: dict | None = None):
+def _score_envelope(envelope, index: int, entries: list, subject_index: dict, recomputed: list,
+                    trusted: dict, raw, fail: _FailureLog, claims: dict,
+                    expired: dict | None = None):
     """One envelope, checked in the order the seven named failures are defined in.
 
-    Returns `(seq, node, result)` for an envelope that verified, and `(None, None, None)` for
-    one that did not. Every failure is positioned on the entry the envelope COVERS, found by
-    `subject.seq` — the locators are checked against that entry, not used to find it.
+    Returns `(at, node, result)` for an envelope that verified, `at` being the index in
+    `entries` of the entry it covers, and `(None, None, None)` for one that did not. Every
+    failure is positioned on the entry the envelope COVERS, found by `subject.seq` through
+    `_subject_index` — the locators are checked against that entry, not used to find it.
 
-    `claims` is the caller's seq -> count of the envelopes that have named each entry so far,
+    `claims` is the caller's entry index -> count of the envelopes that have named it so far,
     and this function updates it. An envelope claims its entry as soon as `subject.seq` finds
     one, BEFORE the rest of the subject is checked, so a second envelope over an entry an
     earlier one already named is `envelope_duplicate_subject` whether either of them is
@@ -821,15 +847,16 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     said by appending after it."""
     def position(subject):
         # Every failure is positioned by `subject.seq`, and `subject` is attacker-supplied, so
-        # the lookup is guarded: a dict or a list is not hashable and `by_seq.get` would raise
-        # on it. A seq that is not an integer positions nothing, which is honest — it names no
-        # entry — and it is never used as a key.
+        # the lookup is guarded: a dict or a list is not hashable and `subject_index.get` would
+        # raise on it. A seq that is not an integer positions nothing, which is honest — it
+        # names no entry — and it is never used as a key.
         s = subject.get("seq") if isinstance(subject, Mapping) else None
         if not _is_seq(s):
             return None, None, None
-        entry = by_seq.get(s)
-        if entry is None:
+        at = subject_index.get(s)
+        if at is None:
             return s, None, None
+        entry = entries[at]
         return entry.get("seq"), entry.get("node"), entry
 
     def report(reason: str, detail: str, subject) -> tuple:
@@ -906,18 +933,19 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     if not _is_seq(subject.get("seq")):
         report("envelope_subject_mismatch", "subject seq is not an integer", subject)
         return None, None, None
-    entry = by_seq.get(subject.get("seq"))
-    if entry is None:
+    at = subject_index.get(subject.get("seq"))
+    if at is None:
         report("envelope_subject_mismatch",
                f"no entry at seq {subject.get('seq')!r} in this bundle", subject)
         return None, None, None
+    entry = entries[at]
     seq, node = entry.get("seq"), entry.get("node")
 
     # (3a') one entry, at most one envelope. Counted here, before anything else about this
     # envelope is judged, so the rule cannot be sidestepped by making the second envelope
     # defective in some other way as well.
-    already = claims.get(seq, 0)
-    claims[seq] = already + 1
+    already = claims.get(at, 0)
+    claims[at] = already + 1
     if already:
         report("envelope_duplicate_subject",
                f"seq {seq} is already covered by an earlier envelope in this bundle; two "
@@ -925,7 +953,7 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
                "is not witness-signed", subject)
         return None, None, None
 
-    computed = recomputed.get(seq)
+    computed = recomputed[at]
     if subject.get("entry_hash") != computed:
         report("envelope_subject_mismatch",
                f"subject entry_hash {subject.get('entry_hash')!r} != the hash recomputed for "
@@ -1026,7 +1054,7 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
         return None, None, None
     if non_canonical:
         return None, None, None
-    return seq, node, envelope.get("observed", {}).get("result")
+    return at, node, envelope.get("observed", {}).get("result")
 
 
 def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, now=None) -> dict:
@@ -1043,8 +1071,11 @@ def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, no
     Returns `{ok, status, count, states, results, witnesses, lines, witness_signed, failures,
     failure_details, failure_entries}`. `states` maps every entry's seq to `witness-signed` or
     `process-asserted`; `lines` is the report line for each, `witness-signed (matched)` and so
-    on, with no result on a process-asserted entry. `results` and `witnesses` map a covered
-    seq to the verifying envelope's `observed.result` and `witness.kid`. A `witness-signed`
+    on, with no result on a process-asserted entry. `results` maps a covered seq to the
+    verifying envelope's `observed.result`. `witnesses` maps the index in `bundle["entries"]` of
+    every witness-signed entry to that envelope's `witness.kid`: the entry the subject resolved
+    to, by index, the one `failure_entries` names, so of two entries sharing a seq only the one
+    the witness signed is in it. A `witness-signed`
     state means that signature covers the entry's hash and chain position plus what the
     witness-key holder observed (result, time, method); it does not attest that the action was
     permitted."""

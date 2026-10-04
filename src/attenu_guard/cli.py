@@ -150,11 +150,12 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
         observed=<observed.result> witness=<kid> failed=<check>[,<check>...]
 
     `seq` is always printed, as `seq=null` for an entry that has none. Any other key with no
-    value is left out. `state` is the per-entry envelope state `verify_bundle` reports, and is
-    left out for a plain ledger (`envelopes=None`). `observed` and `witness` are printed only on
-    a `witness-signed` entry: they are what the verifying envelope says, and a process-asserted
-    entry has none. `failed` lists the checks whose failures are about this entry
-    (`_failed_by_entry`).
+    value is left out. `state` is left out for a plain ledger (`envelopes=None`); on a bundle it
+    is `witness-signed` exactly when `envelopes["witnesses"]` holds this entry's index, which is
+    the entry the verifier resolved an envelope to, so of two entries sharing a seq only the one
+    the witness signed reads witness-signed. `observed` and `witness` are printed only on such an
+    entry: they are what its envelope says. `failed` lists the checks whose failures are about
+    this entry (`_failed_by_entry`).
 
     How a line parses, exactly: two spaces, then `key=value` tokens separated by single spaces.
     No token contains whitespace. The key is the text before the token's first `=`, and keys
@@ -167,12 +168,15 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
     for i, e in enumerate(entries):
         pairs = [("event", e.get("event")), ("node", e.get("node")), ("scope", e.get("scope"))]
         if envelopes is not None:
-            key = e.get("seq", i)                      # the key verify_bundle files states under
-            state = envelopes["states"].get(key)
-            pairs.append(("state", state))
-            if state == "witness-signed":
-                pairs.append(("observed", envelopes["results"].get(key)))
-                pairs.append(("witness", envelopes.get("witnesses", {}).get(key)))
+            kid = envelopes["witnesses"].get(i)        # by index: the entry the envelope covers
+            if kid is None:
+                pairs.append(("state", "process-asserted"))
+            else:
+                # `results` is keyed the way `states` is; a covered entry's key is its own seq,
+                # or its index when it has none, and the result there is its envelope's.
+                pairs += [("state", "witness-signed"),
+                          ("observed", envelopes["results"].get(e.get("seq", i))),
+                          ("witness", kid)]
         if i in failed:
             pairs.append(("failed", ",".join(failed[i])))
         # `seq` is never left out: an entry without one is exactly the entry a reader must see.

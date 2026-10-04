@@ -580,6 +580,23 @@ def _rehashed(entries: list) -> list:
     return entries
 
 
+def _signed_by_hand(subject_entry: dict, seq) -> dict:
+    """An envelope naming `seq` whose subject binds `subject_entry`, signed by the test witness.
+
+    Built by hand because `sign_envelope` resolves `seq` the way a verifier does, and so refuses
+    to bind an entry that `seq` does not name, which is the forger's envelope this builds."""
+    envelope = {"v": evidence.ENVELOPE_VERSION, "typ": evidence.ENVELOPE_TYP,
+                "subject": {"chain_id": subject_entry["chain_id"], "node": subject_entry["node"],
+                            "seq": seq, "entry_hash": subject_entry["hash"],
+                            "event": subject_entry["event"]},
+                "observed": {"result": "matched", "at": "2026-10-05T00:00:00Z",
+                             "method": "signed by hand"},
+                "witness": {"kid": WITNESS_KID, "alg": evidence.ENVELOPE_ALG}}
+    sign = evidence._ed25519_backend()[0]
+    envelope["sig"] = sign(WITNESS_SEED, evidence.envelope_signing_input(envelope)).hex()
+    return envelope
+
+
 class TestEntriesAttribution(unittest.TestCase):
     """A failure lands on the entry `verify_bundle` says it is about (`failure_entries`), by
     index. A forged entry's seq can be missing, null, a bool, a string, or another entry's, and
@@ -671,6 +688,44 @@ class TestEntriesAttribution(unittest.TestCase):
         self.assertTrue(lines[5].startswith("  seq=4 event=allow node=vectors:n1 scope=crm.export "))
         self.assertNotIn("failed=", lines[4])
         self.assertTrue(lines[5].endswith(" failed=integrity,containment"), lines[5])
+
+    def test_of_two_entries_sharing_a_seq_only_the_signed_copy_reads_witness_signed(self):
+        # The forged allow given seq 3, the real deny's seq. A subject naming seq 3 covers the
+        # later entry, and the witness signs that copy. Read by seq, the deny above it printed
+        # witness-signed too, with nothing failing on its line.
+        bundle = _forged_allow_bundle()
+        entries = bundle["entries"]
+        entries[4]["seq"] = 3
+        _rehashed(entries)
+        del bundle["anchor"]
+        bundle["envelopes"] = [evidence.sign_envelope(entries, seq, WITNESS_SEED, kid=WITNESS_KID,
+                                                      result="indeterminate",
+                                                      at="2026-09-30T07:43:46Z",
+                                                      method="signs what it receives in chain order")
+                               for seq in (1, 2, 3)]
+        self.assertEqual(bundle["envelopes"][2]["subject"]["entry_hash"], entries[4]["hash"])
+        rc, out, lines = self._entries_of(bundle)
+        self.assertEqual(rc, 2)
+        self.assertEqual(lines[3], "  seq=3 event=deny node=witness-custody-run:n1 scope=web.search "
+                                   "state=process-asserted")
+        self.assertEqual(lines[4], "  seq=3 event=allow node=witness-custody-run:n1 scope=web.search "
+                                   f"state=witness-signed observed=indeterminate witness={WITNESS_KID} "
+                                   "failed=integrity,containment")
+
+    def test_an_entry_whose_seq_is_true_takes_no_envelope(self):
+        # c51: the envelope names seq 1 and binds the very entry carrying "seq": true. True == 1
+        # in Python, so the lookup took that entry and it printed witness-signed.
+        bundle = _forged_allow_bundle()
+        entries = bundle["entries"]
+        entries[1]["seq"] = True
+        _rehashed(entries)
+        del bundle["anchor"]
+        bundle["envelopes"] = [_signed_by_hand(entries[1], 1)]
+        rc, out, lines = self._entries_of(bundle)
+        self.assertEqual(rc, 2)
+        self.assertIn("  - envelope_subject_mismatch: no entry at seq 1 in this bundle\n", out)
+        self.assertEqual(lines[1], "  seq=true event=spawn node=witness-custody-run:n1 "
+                                   "state=process-asserted failed=integrity")
 
     def test_a_reason_twice_on_one_entry_is_listed_once(self):
         from attenu_guard import vectors

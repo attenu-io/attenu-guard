@@ -32,6 +32,7 @@ from attenu_guard import canonical, evidence, vectors  # noqa: E402
 from attenu_guard.wire import HS256TestSigner  # noqa: E402
 
 import generate_envelopes  # tests/vectors/generate_envelopes.py  # noqa: E402
+import generate_bundles  # tests/vectors/generate_bundles.py  # noqa: E402
 
 _REPO_FILE = _ROOT / "tests" / "vectors" / "envelopes" / "envelope_vectors_v1.json"
 _PACKAGE_FILE = _ROOT / "src" / "attenu_guard" / "vectors" / "envelopes" / "envelope_vectors_v1.json"
@@ -1011,30 +1012,91 @@ class TestTrustRowExpiry(unittest.TestCase):
 
 
 class TestWitnessesMap(unittest.TestCase):
-    """`report["envelopes"]["witnesses"]`: seq -> the kid of the envelope that verified for it,
-    which is what `attenu-guard verify --entries` prints as `witness=`."""
+    """`report["envelopes"]["witnesses"]`: the index in `bundle["entries"]` of every
+    witness-signed entry -> the kid of the envelope that verified for it. By index, the entry the
+    subject resolved to, which is what `attenu-guard verify --entries` reads `state=` from."""
 
     @classmethod
     def setUpClass(cls):
-        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])      # one envelope, seq 1
+        cls.seed = generate_envelopes.SEEDS[generate_envelopes.WITNESS_KID]
 
-    def test_a_verified_envelope_names_its_kid_and_no_other_entry_has_one(self):
-        report = evidence.verify_envelopes(self.case["bundle"],
-                                           witness_keys=self.case["witness_keys"])
-        self.assertEqual(report["witnesses"],
+    def _sign(self, entries, seq):
+        return evidence.sign_envelope(entries, seq, self.seed,
+                                      kid=generate_envelopes.WITNESS_KID,
+                                      at=generate_envelopes.OBSERVED_AT,
+                                      method=generate_envelopes.OBSERVED_METHOD)
+
+    def _report(self, bundle):
+        return evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+
+    def test_a_verified_envelope_names_its_entry_by_index_and_no_other_entry(self):
+        # The vector ledger numbers its entries from 0, so the index and the seq agree here.
+        self.assertEqual(self._report(self.case["bundle"])["witnesses"],
                          {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
 
-    def test_a_duplicate_keeps_the_first_kid_as_results_keeps_its_result(self):
-        entries = self.case["bundle"]["entries"]
-        seed = generate_envelopes.SEEDS[generate_envelopes.WITNESS_KID]
-        envelope = evidence.sign_envelope(entries, generate_envelopes.SPAWN_SEQ, seed,
-                                          kid=generate_envelopes.WITNESS_KID,
-                                          at=generate_envelopes.OBSERVED_AT,
-                                          method=generate_envelopes.OBSERVED_METHOD)
+    def test_a_disputed_entry_is_not_witness_signed_and_not_in_the_map(self):
+        # Two envelopes over one entry: the state falls back and the entry leaves `witnesses`.
+        # `results` still keeps what the first witness said.
         bundle = copy.deepcopy(self.case["bundle"])
+        envelope = self._sign(bundle["entries"], generate_envelopes.SPAWN_SEQ)
         bundle["envelopes"] = [envelope, copy.deepcopy(envelope)]
-        report = evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+        report = self._report(bundle)
         self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual(report["witnesses"], {})
+        self.assertEqual(report["results"][generate_envelopes.SPAWN_SEQ], "matched")
+
+    def test_of_two_entries_sharing_a_seq_only_the_signed_copy_is_witness_signed(self):
+        # A copy of the spawn appended with the spawn's seq. A subject naming that seq covers the
+        # later entry, and `sign_envelope` resolves it the same way, so the witness signed the
+        # copy. Keyed by seq, the map could not say which of the two that was.
+        bundle = copy.deepcopy(self.case["bundle"])
+        entries = bundle["entries"]
+        entries.append(dict(entries[generate_envelopes.SPAWN_SEQ]))
+        generate_bundles._rehash_chain(entries)
+        copy_at = len(entries) - 1
+        bundle["envelopes"] = [self._sign(entries, generate_envelopes.SPAWN_SEQ)]
+        self.assertEqual(bundle["envelopes"][0]["subject"]["entry_hash"], entries[copy_at]["hash"])
+        report = self._report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"], {copy_at: generate_envelopes.WITNESS_KID})
+
+    def test_a_seq_that_is_not_an_integer_takes_no_envelope(self):
+        # c51: an entry whose seq is `true` took the envelope written for seq 1, because True == 1
+        # and hash(True) == hash(1) in Python; 1.0 did the same. The envelope here is signed over
+        # that very entry, so before the strict lookup it verified and the entry read
+        # witness-signed. A bool, a float or a string seq now names nothing.
+        for bad in (True, 1.0, "1"):
+            with self.subTest(seq=repr(bad)):
+                bundle = copy.deepcopy(self.case["bundle"])
+                entries = bundle["entries"]
+                entries[generate_envelopes.SPAWN_SEQ]["seq"] = bad
+                generate_bundles._rehash_chain(entries)
+                envelope = copy.deepcopy(bundle["envelopes"][0])
+                envelope["subject"]["entry_hash"] = entries[generate_envelopes.SPAWN_SEQ]["hash"]
+                bundle["envelopes"] = [_resign(envelope)]
+                report = self._report(bundle)
+                self.assertEqual([(d["reason"], d["seq"], d["node"])
+                                  for d in report["failure_details"]],
+                                 [("envelope_subject_mismatch", generate_envelopes.SPAWN_SEQ, None)])
+                self.assertEqual(report["failures"],
+                                 ["envelope_subject_mismatch: no entry at seq 1 in this bundle"])
+                self.assertEqual(report["failure_entries"], [None])
+                self.assertEqual(report["witnesses"], {})
+
+    def test_an_entry_without_a_seq_is_covered_by_its_index(self):
+        # Absent means the index, as it always did. The subject names the index, and the hash it
+        # is checked against is that entry's own, recomputed by index rather than looked up by a
+        # seq the entry does not have.
+        bundle = copy.deepcopy(self.case["bundle"])
+        entries = bundle["entries"]
+        del entries[generate_envelopes.SPAWN_SEQ]["seq"]
+        generate_bundles._rehash_chain(entries)
+        envelope = copy.deepcopy(bundle["envelopes"][0])
+        envelope["subject"]["entry_hash"] = entries[generate_envelopes.SPAWN_SEQ]["hash"]
+        bundle["envelopes"] = [_resign(envelope)]
+        report = self._report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
         self.assertEqual(report["witnesses"],
                          {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
 
