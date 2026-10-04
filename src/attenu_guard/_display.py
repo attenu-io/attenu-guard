@@ -9,9 +9,11 @@ such a value is printed without quotes:
 
   * a value whose text is entirely printable ASCII 0x21-0x7E other than `"` and `\\` prints as
     that text, exactly as it always has, so clean input prints byte for byte as before;
-  * any other value prints as its JSON form, with every character outside printable ASCII
-    escaped as \\uXXXX (UTF-16 code units, lower-case hex) and every space as \\u0020. That form
-    holds no whitespace and no line break, and `json.loads` gives the value back.
+  * any other value prints as `json.dumps` with `ensure_ascii=True` and compact separators,
+    then every space written as \\u0020. `ensure_ascii` escapes a quote and a backslash
+    with a backslash, the five controls with short forms (\\b \\t \\n \\f \\r), and every
+    other character outside printable ASCII as \\uXXXX (lower-case hex, UTF-16 units). That
+    form holds no whitespace and no line break, and `json.loads` gives the value back.
 
 A value printed through `repr` (`{x!r}`) is quoted and escaped already, and is left alone.
 """
@@ -25,10 +27,9 @@ BARE = re.compile(r'[!#-\[\]-~]+')
 
 
 def escaped(value) -> str:
-    """`value` as whitespace-free, ASCII-only JSON.
-
-    `ensure_ascii` escapes everything outside printable ASCII, and the space is the one printable
-    character JSON leaves alone; a value that is not JSON-native is rendered through `str`."""
+    """`value` as whitespace-free, ASCII-only JSON: `json.dumps` with `ensure_ascii=True` and
+    compact separators, then every space written as \\u0020, the one printable character
+    JSON leaves as it is. A value that is not JSON-native is rendered through `str` first."""
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"),
                       default=str).replace(" ", "\\u0020")
 

@@ -25,7 +25,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
-from ._display import shown as _shown
 from .canonical import MAX_SAFE_INTEGER
 from .reasons import Decision, Reason, ReasonCode
 
@@ -119,16 +118,11 @@ def ctx_field_of(ceiling) -> str:
 def describe(ceiling) -> str:
     """Uniform human-readable rendering of ANY ceiling: uses the ceiling's own
     `describe()` when it has one (all built-ins do), else `key=<wire form>`.
-    For dashboards, demos and parent-vs-child diffs; never parsed back.
-
-    The values in a description can come from a bundle (`evidence` puts them in the
-    monotonicity message), so every built-in prints each one through `_display.shown`: as it
-    is when it is printable ASCII without space, `"` or `\\`, as escaped JSON otherwise. A
-    description is therefore always one line, and clean values print as they always have."""
+    For dashboards, demos and parent-vs-child diffs; never parsed back."""
     fn = getattr(ceiling, "describe", None)
     if callable(fn):
         return fn()
-    return f"{_shown(ceiling.key)}={ceiling.to_wire()}"
+    return f"{ceiling.key}={ceiling.to_wire()}"
 
 
 def is_metered(ceiling) -> bool:
@@ -166,7 +160,7 @@ class RowLimit:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)}<={_shown(self.max_rows)}"
+        return f"{self.key}<={self.max_rows}"
 
     def narrow(self, other: "RowLimit") -> "RowLimit":
         return RowLimit(min(self.max_rows, other.max_rows))
@@ -199,7 +193,7 @@ class SpendCap:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)}<={_shown(self.max_spend)}"
+        return f"{self.key}<={self.max_spend}"
 
     def narrow(self, other: "SpendCap") -> "SpendCap":
         return SpendCap(min(self.max_spend, other.max_spend))
@@ -260,7 +254,7 @@ class CallLimit:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)}<={_shown(self.max_calls)}"
+        return f"{self.key}<={self.max_calls}"
 
     def narrow(self, other: "CallLimit") -> "CallLimit":
         return CallLimit(min(self.max_calls, other.max_calls), self.applies_to)
@@ -292,7 +286,7 @@ class EgressRank:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)}<={_shown(self.level)}"
+        return f"{self.key}<={self.level}"
 
     def narrow(self, other: "EgressRank") -> "EgressRank":
         stricter = self.level if _egress_rank(self.level) <= _egress_rank(other.level) else other.level
@@ -341,7 +335,7 @@ class Allow:
                                      sorted(self.one_of, key=str), val))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)} in [{', '.join(_shown(v) for v in sorted(self.one_of, key=str))}]"
+        return f"{self.key} in [{', '.join(sorted(map(str, self.one_of)))}]"
 
     def narrow(self, other: "Allow") -> "Allow":
         # admits fewer values -> stricter: set intersection.
@@ -382,8 +376,7 @@ class Deny:
                                      sorted(self.not_one_of, key=str), val))
 
     def describe(self) -> str:
-        return (f"{_shown(self.key)} not in "
-                f"[{', '.join(_shown(v) for v in sorted(self.not_one_of, key=str))}]")
+        return f"{self.key} not in [{', '.join(sorted(map(str, self.not_one_of)))}]"
 
     def narrow(self, other: "Deny") -> "Deny":
         # denying MORE values is stricter: set union.
@@ -422,7 +415,7 @@ class Prefix:
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val))
 
     def describe(self) -> str:
-        return f"{_shown(self.key)} startswith {_shown(self.prefix)}"
+        return f"{self.key} startswith {self.prefix}"
 
     def narrow(self, other: "Prefix") -> "Prefix":
         # If one prefix is a prefix of the other, the longer (more specific)

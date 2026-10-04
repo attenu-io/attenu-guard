@@ -7,7 +7,9 @@ attenu-guard — command-line tool.
   attenu-guard verify <log|bundle>   verify a hash-chained audit log, or an evidence bundle
                                      (integrity · child ⊆ parent · containment; --hs256-key/--pubkey checks the anchor;
                                       --witness-keys FILE supplies the trusted observer-envelope keys;
-                                      --entries adds one line per entry: its envelope state and the checks that failed on it)
+                                      --entries adds one line per entry: its envelope state and the checks that failed on it;
+                                      a line is key=value tokens split by single spaces, the key before the first "=",
+                                      and a value never contains a space; one that starts with " is a JSON string)
   attenu-guard scenarios <file>      run a declarative authorization scenario (JSON/YAML),
                            exit non-zero if any assertion fails. --coverage prints
                            which reason codes were exercised.
@@ -110,10 +112,10 @@ def _entry_value(value) -> str:
     reading if no value can end it early or start a forged one: a `scope` carrying a newline
     and a clean-looking second line would otherwise print a fake entry with the real entry's
     `failed=` attached to it. So a value is printed as it is only when it is printable ASCII
-    with no space, `"` or `\\`, and an integer in decimal. Anything else is printed as JSON
-    with every character outside printable ASCII escaped as \\uXXXX and spaces as \\u0020, so
-    it never contains whitespace and `json.loads` gives the value back (`_display.escaped`, the
-    rule the finding messages use too)."""
+    with no space, `"` or `\\`, and an integer in decimal. Anything else is printed by
+    `_display.escaped`, the rule the finding messages use too: `json.dumps` with
+    `ensure_ascii=True` and compact separators, then every space written as \\u0020. It
+    never contains whitespace, and `json.loads` gives the value back."""
     if isinstance(value, str) and _display.BARE.fullmatch(value):
         return value
     if isinstance(value, int) and not isinstance(value, bool):
@@ -121,62 +123,49 @@ def _entry_value(value) -> str:
     return _display.escaped(value)
 
 
-def _same(a, b) -> bool:
-    """Equal and of the same type: `True == 1` in Python, and a seq of `true` is not seq 1."""
-    return type(a) is type(b) and a == b
+def _failed_by_entry(failure_entries: list, failure_details: list) -> dict:
+    """entry index -> the reasons of the failures about that entry, in the order the report
+    lists them, each reason once.
 
-
-def _failed_by_entry(entries: list, failure_details: list) -> dict:
-    """entry index -> the reasons of the findings positioned on that entry, in the order the
-    report lists them, each reason once.
-
-    A finding lands on every entry whose own `seq` equals the finding's `seq`, and whose `node`
-    and `call_id` equal the finding's wherever the finding carries them. In a ledger whose seqs
-    are unique that is one entry. A finding with no `seq` concerns no single entry (a version,
-    root, anchor or chain-id failure, or an envelope whose subject names no entry); it is in the
-    bundle-level output already and lands on no line."""
-    by_seq: dict = {}
-    for i, e in enumerate(entries):
-        s = e.get("seq")
-        if isinstance(s, int) and not isinstance(s, bool):
-            by_seq.setdefault(s, []).append(i)
+    `failure_entries` is the verifier's own record of the entry each failure is about, by index
+    (`verify_bundle`'s `failure_entries`), so a failure lands on its entry even when that entry's
+    seq is missing, null, a bool, a string or a duplicate of another entry's. A failure about no
+    single entry (a version, root, anchor or chain-id failure, or an envelope whose subject names
+    no entry) is in the bundle-level output already and lands on no line."""
     out: dict = {}
-    for d in failure_details:
-        seq = d.get("seq")
-        if seq is None:
+    for index, d in zip(failure_entries, failure_details):
+        if index is None:
             continue
-        if isinstance(seq, int) and not isinstance(seq, bool):
-            candidates = by_seq.get(seq, [])
-        else:
-            candidates = [i for i, e in enumerate(entries) if _same(e.get("seq"), seq)]
-        for i in candidates:
-            e = entries[i]
-            if d.get("node") is not None and not _same(e.get("node"), d["node"]):
-                continue
-            if d.get("call_id") is not None and not _same(e.get("call_id"), d["call_id"]):
-                continue
-            reasons = out.setdefault(i, [])
-            if d["reason"] not in reasons:
-                reasons.append(d["reason"])
+        reasons = out.setdefault(index, [])
+        if d["reason"] not in reasons:
+            reasons.append(d["reason"])
     return out
 
 
-def _entry_lines(entries: list, failure_details: list, envelopes: dict | None = None) -> list:
+def _entry_lines(entries: list, failure_entries: list, failure_details: list,
+                 envelopes: dict | None = None) -> list:
     """The `--entries` block: `entries:`, then one line per ledger entry, in ledger order.
 
         seq=<n> event=<event> node=<node> scope=<scope> state=<witness-signed|process-asserted>
         observed=<observed.result> witness=<kid> failed=<check>[,<check>...]
 
-    A key with no value is left out. `state` is the per-entry envelope state `verify_bundle`
-    reports, and is left out for a plain ledger (`envelopes=None`). `observed` and `witness` are
-    printed only on a `witness-signed` entry: they are what the verifying envelope says, and a
-    process-asserted entry has none. `failed` lists the checks whose findings are positioned on
-    this entry (`_failed_by_entry`)."""
-    failed = _failed_by_entry(entries, failure_details)
+    `seq` is always printed, as `seq=null` for an entry that has none. Any other key with no
+    value is left out. `state` is the per-entry envelope state `verify_bundle` reports, and is
+    left out for a plain ledger (`envelopes=None`). `observed` and `witness` are printed only on
+    a `witness-signed` entry: they are what the verifying envelope says, and a process-asserted
+    entry has none. `failed` lists the checks whose failures are about this entry
+    (`_failed_by_entry`).
+
+    How a line parses, exactly: two spaces, then `key=value` tokens separated by single spaces.
+    No token contains whitespace. The key is the text before the token's first `=`, and keys
+    never contain one; a value may (`scope=failed=containment` is the scope "failed=containment").
+    A value that starts with `"` is a JSON string, which `json.loads` decodes. Any other value
+    is printed as it is: printable ASCII other than space, `"` and `\\`, an integer, `null` for
+    an entry with no seq, or the compact JSON of a value that is not a string."""
+    failed = _failed_by_entry(failure_entries, failure_details)
     lines = ["entries:"]
     for i, e in enumerate(entries):
-        pairs = [("seq", e.get("seq")), ("event", e.get("event")), ("node", e.get("node")),
-                 ("scope", e.get("scope"))]
+        pairs = [("event", e.get("event")), ("node", e.get("node")), ("scope", e.get("scope"))]
         if envelopes is not None:
             key = e.get("seq", i)                      # the key verify_bundle files states under
             state = envelopes["states"].get(key)
@@ -186,7 +175,10 @@ def _entry_lines(entries: list, failure_details: list, envelopes: dict | None = 
                 pairs.append(("witness", envelopes.get("witnesses", {}).get(key)))
         if i in failed:
             pairs.append(("failed", ",".join(failed[i])))
-        lines.append("  " + " ".join(f"{k}={_entry_value(v)}" for k, v in pairs if v is not None))
+        # `seq` is never left out: an entry without one is exactly the entry a reader must see.
+        tokens = [f"seq={_entry_value(e.get('seq'))}"]
+        tokens += [f"{k}={_entry_value(v)}" for k, v in pairs if v is not None]
+        lines.append("  " + " ".join(tokens))
     return lines
 
 
@@ -198,8 +190,8 @@ def _verify(args: list):
     (child ⊆ parent) and containment from the bundle alone; the signed anchor is verified when a key is given
     and reported as "not checked" otherwise. `--witness-keys FILE` supplies the trusted witness keys for a
     bundle carrying observer envelopes; without it every envelope fails `envelope_unknown_witness`, and the
-    output says which flag to pass. A row in that file may carry `not_after` (RFC 3339 UTC); past it the key is
-    no longer trusted. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
+    output says which flag to pass. A row in that file may carry `not_after` (RFC 3339 UTC); from that time on
+    the key is not trusted. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
     refuses) is one line naming the file and, for a bad row, the kid. A ledger with zero events is reported
     EMPTY, not OK. `--entries` prints, after all of that, `entries:` and one line per entry (`_entry_lines`);
     without it the output is unchanged. Exit 0 = ok, 2 = a check failed, there was nothing to check, or the
@@ -255,26 +247,26 @@ def _verify(args: list):
             print("hint: pass --witness-keys FILE to supply the trusted witness keys")
         print("OK" if rep["ok"] else "FAILED")
         if per_entry:
-            print("\n".join(_entry_lines(bundle.get("entries") or [], rep["failure_details"],
-                                         rep["envelopes"])))
+            print("\n".join(_entry_lines(bundle.get("entries") or [], rep["failure_entries"],
+                                         rep["failure_details"], rep["envelopes"])))
         return 0 if rep["ok"] else 2
     entries = AuditLog.load(path)
     if not entries:
         print(EMPTY)
         if per_entry:
-            print("\n".join(_entry_lines([], [])))
+            print("\n".join(_entry_lines([], [], [])))
         return 2
     ok, reason = AuditLog.verify(entries)
     print("OK" if ok else f"TAMPERED — {reason}")
     if per_entry:
-        # A plain ledger has one check, the hash chain, and its finding is positioned the way a
-        # bundle's integrity finding is: on the first entry the chain does not reproduce at.
-        details = []
+        # A plain ledger has one check, the hash chain, and its failure is about the entry a
+        # bundle's integrity failure is about: the first one the chain does not reproduce at.
+        at, details = [], []
         if not ok:
             from attenu_guard import evidence
-            seq, node = evidence._integrity_position(entries)
-            details.append({"reason": "integrity", "seq": seq, "node": node, "call_id": None})
-        print("\n".join(_entry_lines(entries, details)))
+            at.append(evidence._integrity_break(entries))
+            details.append({"reason": "integrity"})
+        print("\n".join(_entry_lines(entries, at, details)))
     return 0 if ok else 2
 
 

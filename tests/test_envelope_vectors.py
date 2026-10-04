@@ -934,8 +934,8 @@ class TestTrustRowExpiry(unittest.TestCase):
                     " 2026-10-05T00:00:00Z", "", None, 1759622400, True, ["2026-10-05T00:00:00Z"],
                     # Unicode decimal digits that are not ASCII: `\d` and `int()` both took
                     # them, and RFC 3339's DIGIT does not.
-                    "２０２６-10-05T00:00:00Z", "2026-10-05T00:00:00.５Z",
-                    "٢٠٢٦-10-05T00:00:00Z"):
+                    "\uff12\uff10\uff12\uff16-10-05T00:00:00Z", "2026-10-05T00:00:00.\uff15Z",
+                    "\u0662\u0660\u0662\u0666-10-05T00:00:00Z"):
             with self.subTest(not_after=repr(bad)):
                 with self.assertRaises(ValueError) as raised:
                     self._report(self._rows(not_after=bad), now=None)
@@ -943,7 +943,7 @@ class TestTrustRowExpiry(unittest.TestCase):
                 self.assertIn("not_after", str(raised.exception))
 
     def test_expiry_never_excuses_a_malformed_row(self):
-        # A row past its not_after is still configuration, and still checked whole.
+        # An expired row is still configuration, and still checked whole.
         for fields in ({"public_key_hex": "zz" * 32}, {"alg": "none"}):
             with self.subTest(fields=fields):
                 with self.assertRaises(ValueError):
@@ -975,11 +975,39 @@ class TestTrustRowExpiry(unittest.TestCase):
                          ["envelope_unknown_witness"])
         self.assertIn("the key expired at not_after='2000-01-01T00:00:00Z'", report["failures"][0])
 
-    def test_an_expired_kid_with_a_valid_row_of_its_own_is_still_trusted(self):
-        # Two rows for one kid: the expired one is left out, the valid one is the trust set.
-        rows = self._rows(not_after="2000-01-01T00:00:00Z")
-        rows.append(dict(rows[0], not_after="9999-12-31T23:59:59Z"))
-        self.assertTrue(evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)["ok"])
+    def test_a_kid_named_by_two_rows_is_refused_whichever_row_comes_first(self):
+        # The later row used to win: a row added to expire a key left it trusted when it came
+        # first, and an expired row beside a live one trusted the key anyway. One kid, one row.
+        live = self._rows()[0]
+        expired = dict(live, not_after="2000-01-01T00:00:00Z")
+        for rows in ([live, expired], [expired, live], [live, dict(live)]):
+            with self.subTest(rows=[r.get("not_after") for r in rows]):
+                with self.assertRaises(ValueError) as raised:
+                    evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)
+                self.assertEqual(str(raised.exception),
+                                 f"witness key {self.kid!r}: more than one row names this kid")
+
+    def test_a_row_member_outside_the_four_is_refused(self):
+        # A row is read whole. Read by projection, a misspelled `notAfter` was a key that never
+        # expired and a `not_before` was a bound nobody checked.
+        for member in ("notAfter", "not_before", "comment"):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError) as raised:
+                    evidence.verify_envelopes(self.case["bundle"],
+                                              witness_keys=self._rows(**{member: "x"}))
+                self.assertEqual(str(raised.exception),
+                                 f"witness key {self.kid!r}: the row carries members this build "
+                                 f"does not evaluate and will not ignore: {member!r}")
+
+    def test_in_the_mapping_form_a_row_may_repeat_its_kid_and_must_agree(self):
+        row = self._rows()[0]
+        self.assertTrue(evidence.verify_envelopes(self.case["bundle"],
+                                                  witness_keys={self.kid: row})["ok"])
+        with self.assertRaises(ValueError) as raised:
+            evidence.verify_envelopes(self.case["bundle"],
+                                      witness_keys={self.kid: dict(row, kid=self.other)})
+        self.assertEqual(str(raised.exception),
+                         f"witness key {self.kid!r}: its row names a different kid, {self.other!r}")
 
 
 class TestWitnessesMap(unittest.TestCase):

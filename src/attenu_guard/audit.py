@@ -195,10 +195,13 @@ class AuditLog:
         prev = GENESIS
         expected_seq = 0
         for e in entries:
-            if e.get("seq") != expected_seq:
+            seq = e.get("seq")
+            # An integer, and never a bool: `True == 1` in Python, so a re-hashed chain carrying
+            # `"seq": true` at index 1 (or `1.0`) used to verify with no failure at all.
+            if not isinstance(seq, int) or isinstance(seq, bool) or seq != expected_seq:
                 # `seq` is the entry's own value, which a forged ledger chooses: printed by the
                 # one rule (`_display.shown`) so it cannot end the reader's line and start another.
-                return False, f"seq gap at {expected_seq} (got {_shown(e.get('seq'))})"
+                return False, f"seq gap at {expected_seq} (got {_shown(seq)})"
             stored = e.get("hash")
             payload = {k: v for k, v in e.items() if k != "hash"}
             if payload.get("prev_hash") != prev:

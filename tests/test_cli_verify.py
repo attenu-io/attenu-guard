@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import os
@@ -438,6 +439,38 @@ class TestDefaultOutputEscaping(unittest.TestCase):
             "FAILED",
         ])
 
+    def test_ceiling_descriptions_are_unchanged_outside_a_finding(self):
+        from attenu_guard import Allow, Authority
+        self.assertEqual(Allow("region", {"São Paulo"}).describe(), "region in [São Paulo]")
+        self.assertEqual(
+            Authority(scopes={"docs.write"}, ceilings=[Allow("region", {"São Paulo"})]).describe(),
+            "scopes=[docs.write] ceilings=[region in [São Paulo]] ttl=None")
+
+    def test_a_finding_prints_a_ceiling_as_describe_does_for_bare_values(self):
+        # The finding text is rendered in describe()'s own shape; this pins the two together for
+        # every built-in, so a change to one that is not made to the other fails here.
+        from attenu_guard import Allow, CallLimit, Deny, EgressRank, Prefix, RowLimit, SpendCap
+        from attenu_guard.ceilings import describe
+        for ceiling in (RowLimit(100), SpendCap(2.5), CallLimit(3), CallLimit(3, "fs.write"),
+                        EgressRank("internal"), Allow("region", {"us", "eu"}),
+                        Deny("tool", {"shell", "rm"}), Prefix("path", "/tmp/")):
+            with self.subTest(ceiling=describe(ceiling)):
+                self.assertEqual(evidence._ceiling_in_finding(ceiling), describe(ceiling))
+
+    def test_a_finding_escapes_a_value_that_is_not_bare_and_describe_does_not(self):
+        from attenu_guard import Allow
+        self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"São Paulo", "us"})),
+                         'region in ["S\\u00e3o\\u0020Paulo", us]')
+
+    def test_a_ceiling_this_build_does_not_define_stays_on_one_line(self):
+        from attenu_guard.ceilings import ceiling_from_wire, describe
+        clean = ceiling_from_wire({"key": "quota", "type": "x-unknown", "max": 1})
+        self.assertEqual(evidence._ceiling_in_finding(clean), describe(clean))
+        hostile = ceiling_from_wire({"key": "quota\nOK", "type": "x-unknown"})
+        text = evidence._ceiling_in_finding(hostile)
+        self.assertNotIn("\n", text)
+        self.assertEqual(json.loads(text), describe(hostile))
+
     def test_a_forged_seq_cannot_add_a_line_to_a_plain_ledger_verdict(self):
         from attenu_guard import Authority, Guard
         log = self.td / "l.jsonl"
@@ -485,6 +518,14 @@ class TestMalformedTrustFile(unittest.TestCase):
              f"witness key '{WITNESS_KID}': public_key_hex is not hexadecimal"),
             (self._row(alg="none"),
              f"witness key '{WITNESS_KID}': alg must be 'EdDSA', got 'none'"),
+            # A row is read whole: a misspelled `notAfter` read by projection was a key that
+            # never expired.
+            (self._row(notAfter="2000-01-01T00:00:00Z"),
+             f"witness key '{WITNESS_KID}': the row carries members this build does not "
+             "evaluate and will not ignore: 'notAfter'"),
+            # One kid, one row: the later row used to win, whichever way that pointed.
+            (_witness_keys() + _witness_keys(not_after="2000-01-01T00:00:00Z"),
+             f"witness key '{WITNESS_KID}': more than one row names this kid"),
         ]
         for rows, reason in cases:
             with self.subTest(reason=reason):
@@ -526,6 +567,150 @@ class TestMalformedTrustFile(unittest.TestCase):
 
 
 # =========================================================================
+# --entries attributes a failure by the index of its entry, never by its seq
+# =========================================================================
+def _rehashed(entries: list) -> list:
+    """Re-hash a ledger from GENESIS, as a forger who edited an entry would."""
+    from attenu_guard.audit import GENESIS, _hash
+    prev = GENESIS
+    for e in entries:
+        e["prev_hash"] = prev
+        e["hash"] = _hash(prev, {k: v for k, v in e.items() if k != "hash"})
+        prev = e["hash"]
+    return entries
+
+
+class TestEntriesAttribution(unittest.TestCase):
+    """A failure lands on the entry `verify_bundle` says it is about (`failure_entries`), by
+    index. A forged entry's seq can be missing, null, a bool, a string, or another entry's, and
+    the failure still lands on that entry and on no other."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _entries_of(self, bundle, *extra) -> tuple:
+        bundle_path = self.td / "bundle.json"
+        bundle_path.write_text(json.dumps(bundle))
+        keys = self.td / "keys.json"
+        keys.write_text(json.dumps(_witness_keys()))
+        rc, out = run("verify", str(bundle_path), "--witness-keys", str(keys), "--entries", *extra)
+        return rc, out, out.split("entries:\n", 1)[1].splitlines()
+
+    @staticmethod
+    def _forged(edit) -> dict:
+        """The forged-allow bundle with `edit` applied to its entries, re-hashed, anchor dropped."""
+        bundle = _forged_allow_bundle()
+        edit(bundle["entries"])
+        _rehashed(bundle["entries"])
+        del bundle["anchor"]
+        return bundle
+
+    def test_an_entry_without_a_seq_prints_seq_null_and_keeps_its_failures(self):
+        # The defect: findings about this entry carried seq None, were taken for chain-level
+        # ones, and the forged allow printed a clean line under a FAILED verdict.
+        for label, edit, failed in (
+                ("seq removed", lambda es: es[4].pop("seq"),
+                 # The envelope over seq 4 still finds this entry (the index stands in for a
+                 # missing seq), and its entry_hash no longer matches.
+                 "integrity,containment,envelope_subject_mismatch"),
+                ("seq null", lambda es: es[4].update(seq=None),
+                 # A null seq finds nothing, so that envelope failure is about no entry.
+                 "integrity,containment")):
+            with self.subTest(label):
+                rc, out, lines = self._entries_of(self._forged(edit))
+                self.assertEqual(rc, 2)
+                self.assertIn("integrity: seq gap at 4 (got None)", out)
+                self.assertEqual(lines[4], "  seq=null event=allow node=witness-custody-run:n1 "
+                                           f"scope=web.search state=process-asserted failed={failed}")
+                self.assertEqual([line for line in lines if "failed=" in line], [lines[4]])
+
+    def test_a_bool_seq_breaks_the_chain_at_its_own_entry(self):
+        # `"seq": true` at index 1 of a re-hashed chain verified with no integrity failure,
+        # because True == 1 in Python. It is a seq gap now, about that entry.
+        def edit(entries):
+            entries[1]["seq"] = True
+        bundle = self._forged(edit)
+        bundle["envelopes"] = []
+        rc, out, lines = self._entries_of(bundle)
+        self.assertEqual(rc, 2)
+        self.assertIn("integrity=False", out)
+        self.assertIn("  - integrity: seq gap at 1 (got True)\n", out)
+        self.assertEqual(lines[1], "  seq=true event=spawn node=witness-custody-run:n1 "
+                                   "state=process-asserted failed=integrity")
+        self.assertTrue(lines[4].endswith(" failed=containment"), lines[4])
+
+    def test_a_string_seq_is_a_seq_gap_about_its_own_entry(self):
+        def edit(entries):
+            entries[4]["seq"] = "4"
+        rc, out, lines = self._entries_of(self._forged(edit))
+        self.assertEqual(rc, 2)
+        self.assertIn("integrity: seq gap at 4 (got 4)", out)
+        self.assertTrue(lines[4].endswith(" failed=integrity,containment"), lines[4])
+        self.assertEqual([line for line in lines if "failed=" in line], [lines[4]])
+
+    def test_two_entries_sharing_a_seq_are_told_apart(self):
+        # A forged allow inserted after the real one at seq 4, on the same node, with its own
+        # call_id. Matching findings by seq and node could not tell the two apart.
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                    if c["name"] == "absent_envelope")
+        bundle = copy.deepcopy(case["bundle"])
+        entries = bundle["entries"]
+        self.assertEqual((entries[4]["seq"], entries[4]["event"]), (4, "allow"))
+        entries.insert(5, dict(entries[4], scope="crm.export", call_id="ab" * 16))
+        _rehashed(entries)
+        del bundle["anchor"]
+        rc, out, lines = self._entries_of(bundle)
+        self.assertEqual(rc, 2)
+        self.assertTrue(lines[4].startswith("  seq=4 event=allow node=vectors:n1 scope=crm.read "))
+        self.assertTrue(lines[5].startswith("  seq=4 event=allow node=vectors:n1 scope=crm.export "))
+        self.assertNotIn("failed=", lines[4])
+        self.assertTrue(lines[5].endswith(" failed=integrity,containment"), lines[5])
+
+    def test_a_reason_twice_on_one_entry_is_listed_once(self):
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                    if c["name"] == "valid_spawn_envelope")
+        bundle = copy.deepcopy(case["bundle"])
+        envelope = bundle["envelopes"][0]
+        bundle["envelopes"] = [envelope, copy.deepcopy(envelope), copy.deepcopy(envelope)]
+        report = evidence.verify_bundle(bundle, witness_keys=case["witness_keys"])
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_duplicate_subject"] * 2)
+        self.assertEqual(report["failure_entries"], [1, 1])
+        bundle_path = self.td / "dup.json"
+        bundle_path.write_text(json.dumps(bundle))
+        keys = self.td / "vector-keys.json"
+        keys.write_text(json.dumps(case["witness_keys"]))
+        rc, out = run("verify", str(bundle_path), "--witness-keys", str(keys), "--entries")
+        self.assertEqual(rc, 2)
+        self.assertIn("\n  seq=1 event=spawn node=vectors:n1 state=process-asserted "
+                      "failed=envelope_duplicate_subject\n", out)
+
+    def test_a_seq_that_is_not_an_integer_is_a_gap_in_the_ledger_itself(self):
+        from attenu_guard import Authority, AuditLog, Guard
+        g = Guard.issue("a", Authority(scopes={"x.read"}), chain_id="c")
+        g.delegate("b", Authority(scopes={"x.read"}), task="t")
+        for bad, printed in ((True, "True"), (1.0, "1.0"), ("1", "1")):
+            with self.subTest(seq=repr(bad)):
+                entries = [dict(e) for e in g.audit_log().entries]
+                entries[1]["seq"] = bad
+                _rehashed(entries)
+                self.assertEqual(AuditLog.verify(entries), (False, f"seq gap at 1 (got {printed})"))
+                log = self.td / "l.jsonl"
+                log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+                rc, out = run("verify", str(log), "--entries")
+                self.assertEqual(rc, 2)
+                self.assertTrue(out.startswith(f"TAMPERED — seq gap at 1 (got {printed})\n"), out)
+                self.assertIn(" failed=integrity\n", out.splitlines(True)[3])
+
+
+# =========================================================================
 # The display rule itself
 # =========================================================================
 class TestDisplayRule(unittest.TestCase):
@@ -541,8 +726,8 @@ class TestDisplayRule(unittest.TestCase):
         from attenu_guard import _display
         for value, printed in (("", '""'), ("a b", '"a\\u0020b"'), ("x\ny", '"x\\ny"'),
                                ('q"', '"q\\""'), ("back\\slash", '"back\\\\slash"'),
-                               ("é", '"\\u00e9"'), (" ", '"\\u2028"'),
-                               ("‮", '"\\u202e"'), ("\x7f", '"\\u007f"'),
+                               ("é", '"\\u00e9"'), ("\u2028", '"\\u2028"'),
+                               ("\u202e", '"\\u202e"'), ("\x7f", '"\\u007f"'),
                                ({"a": [1, "b c"]}, '{"a":[1,"b\\u0020c"]}')):
             with self.subTest(value=value):
                 shown = _display.shown(value)

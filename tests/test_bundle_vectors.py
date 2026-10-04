@@ -597,6 +597,23 @@ class TestFailureDetailsTwin(unittest.TestCase):
                     if detail["node"] is not None:
                         self.assertIn(detail["node"], nodes)
 
+    def test_every_positioned_failure_names_its_entry_by_index(self):
+        # `failure_entries` is in step with the other two lists, and an index points at the
+        # entry carrying the very seq and node its twin names. A failure about no single entry
+        # names none. This is what `attenu-guard verify --entries` attributes by.
+        for name, bundle, kwargs, _expected in self._sites():
+            with self.subTest(site=name):
+                report = evidence.verify_bundle(bundle, self.signer, **kwargs)
+                indices = report["failure_entries"]
+                self.assertEqual(len(indices), len(report["failure_details"]))
+                for index, detail in zip(indices, report["failure_details"]):
+                    if index is None:
+                        self.assertIsNone(detail["node"], detail)
+                        continue
+                    entry = bundle["entries"][index]
+                    self.assertEqual((entry.get("seq"), entry.get("node")),
+                                     (detail["seq"], detail["node"]), detail)
+
     def test_a_clean_bundle_reports_neither_list(self):
         report = evidence.verify_bundle(self.base, self.signer)
         self.assertTrue(report["ok"], report["failures"])
