@@ -640,9 +640,10 @@ class TestFailureDetailsTwin(unittest.TestCase):
 # The delegation structure is read in ledger order, and nothing skips the checks
 # =========================================================================
 class TestDelegationStructure(unittest.TestCase):
-    """Through 0.18.0 a spawn whose `parent` was absent, null, or named no node in the bundle was
-    never checked for monotonicity, so a child widened past its parent verified OK; the watched
-    process writes that field. Every spawn's parent must now be a string naming a node the root
+    """Through 0.18.0 a spawn whose `parent` was absent, null, a number or a boolean, or a node
+    not in the bundle was never checked for monotonicity, so a child widened past its parent
+    verified OK (a list or an object there raised TypeError instead); the watched process writes
+    that field. Every spawn's parent must now be a string naming a node the root
     or an earlier spawn defined, not revoked by an earlier kill and not the spawn's own node; a
     node is defined once; an allow is judged against a node defined earlier and not revoked; and
     a node id that is not a string is a finding, never a raise."""

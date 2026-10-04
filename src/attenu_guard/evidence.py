@@ -1816,8 +1816,9 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # (2) monotonicity: every child ⊆ its parent, read in ledger order. Every spawn is checked,
     # and the node it names as `parent` has to be one the root or an EARLIER spawn defined, not
     # revoked by an earlier kill, and not the spawn's own node. Through 0.18.0 a spawn whose
-    # parent was absent, null, or named no node in the bundle was skipped, so a child widened past
-    # the authority it was really given verified OK; the process being watched writes that field.
+    # parent was absent, null, a number or a boolean, or a node not in the bundle was skipped, so
+    # a child widened past the authority it was really given verified OK (a list or an object
+    # there raised TypeError instead); the process being watched writes that field.
     # A node is defined once: a second definition is a failure too, since only one of the two
     # could be read.
     mono = True
