@@ -1,7 +1,7 @@
 """An MCP server that checks the delegation chain before it runs a tool.
 
 The chain (attenu-guard Delegation Tokens, `attenu_guard.wire`) rides in the request's `_meta`
-(`meta={"attenu_chain": [...]}` on `ClientSession.call_tool`) — out-of-band of the tool arguments,
+(`meta={"attenu_chain": [...]}` on the client's `call_tool`) — out-of-band of the tool arguments,
 where MCP's own roadmap places agent identity and authority. The server:
 
   1. loads the chain offline (`wire.load`): signatures, parent hashes, depth, and child ⊆ parent at
@@ -11,14 +11,18 @@ where MCP's own roadmap places agent identity and authority. The server:
      does not run the body (fail closed);
   4. returns the denial-contract response on deny, and only then runs the tool.
 
-Trust boundary: the check lives at the MCP boundary. Code that calls the underlying Python function
-directly is outside it (the test proves it), as is any other route to the resource behind the tool.
+Trust boundary: the check is the first statement inside each tool function, so a direct Python call
+to that function is checked too (the test proves it). Outside it is any route to the resource that
+does not go through the tool function.
 """
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from mcp.server.fastmcp import Context, FastMCP
+try:  # mcp 2.x renamed FastMCP to MCPServer; `mcp.server.fastmcp` no longer imports there
+    from mcp.server.mcpserver import Context, MCPServer
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import Context, FastMCP as MCPServer
 
 from attenu_guard import AuditLog, wire
 from attenu_guard.reasons import Disposition
@@ -88,7 +92,7 @@ def _denial(tool: str, scope: str, error: str, detail: str, disposition: str | N
     return out
 
 
-def require_guard(server: FastMCP) -> ChainVerifier:
+def require_guard(server: MCPServer) -> ChainVerifier:
     """Fail closed: refuse to serve unless the verifier is attached."""
     v = getattr(server, "_attenu_verifier", None)
     if v is None:
@@ -96,9 +100,9 @@ def require_guard(server: FastMCP) -> ChainVerifier:
     return v
 
 
-def build_server(verifier: ChainVerifier | None, sink: list, *, name: str = "crm") -> FastMCP:
+def build_server(verifier: ChainVerifier | None, sink: list, *, name: str = "crm") -> MCPServer:
     """`sink` records every tool BODY that actually ran — the side-effect oracle."""
-    mcp = FastMCP(name)
+    mcp = MCPServer(name)
     mcp._attenu_verifier = verifier  # type: ignore[attr-defined]
 
     def gate(tool: str, args: dict, ctx: Context) -> dict | None:
