@@ -1,7 +1,8 @@
 # What an MCP server can check today
 
-*An MCP server (Python SDK, `FastMCP`) that verifies a delegation chain before it runs a tool. Offline, in-memory
-transport, no API key. Verified against `mcp` 1.28.1 and the MCP roadmap post of 2026-08-22, on 2026-08-25.*
+*An MCP server (Python SDK: `MCPServer` on `mcp` 2.x, `FastMCP` on 1.x) that verifies a delegation chain before it
+runs a tool. Offline, in-memory transport, no API key. Verified against `mcp` 1.28.1 and 2.3.0 on 2026-10-04, and
+against the MCP roadmap post of 2026-08-22 on 2026-08-25.*
 
 ## What MCP built well
 
@@ -12,7 +13,8 @@ gets its own audience-bound token. That is the right foundation, and this recipe
 ## What this recipe shows
 
 1. **The request carries no agent authority today.** `CallToolRequestParams` has `name`, `arguments`, `meta`, `task`
-   — nothing that says which agent is calling on whose behalf with how much of it. The roadmap post (2026-08-22)
+   (2.3.0 adds `input_responses` and `request_state`, for answering a server's input requests) — nothing that says
+   which agent is calling on whose behalf with how much of it. The roadmap post (2026-08-22)
    names it: "more and more of the callers are agents … delegating narrower authority to sub-agents" — with no
    spec text yet. The test next to this file pins that and names the day it changes.
 2. **A server can already check a chain.** The client puts attenu-guard Delegation Tokens (root → calling agent)
@@ -23,7 +25,7 @@ gets its own audience-bound token. That is the right foundation, and this recipe
 3. **The record verifies offline** — the server's ledger, and the client's own bundle, with no service involved.
 
 ```bash
-pip install 'attenu-guard' 'mcp<2'   # this recipe is pinned to mcp 1.x; see issue #12 for 2.x
+pip install 'attenu-guard[mcp]'   # mcp>=1.28; verified on 1.28.1 and 2.3.0
 python examples/integrations/mcp/server_verifier/demo.py
 # RUN_LIVE=1 python examples/integrations/mcp/server_verifier/live_smoke.py   # the same server over stdio
 ```
@@ -45,7 +47,7 @@ denied and each attempt is on the ledger; if the ledger cannot be written the bo
 
 | Claim | Pinned to | Test |
 |---|---|---|
-| No agent-authority field in the tool-call request | `mcp==1.28.1`, `CallToolRequestParams.model_fields`; roadmap post 2026-08-22 | `test_semantic_request_carries_no_agent_authority` |
+| No agent-authority field in the tool-call request | `mcp==1.28.1` and `mcp==2.3.0`, `CallToolRequestParams.model_fields`; roadmap post 2026-08-22 | `test_semantic_request_carries_no_agent_authority` |
 | Allowed / denied / spliced / missing chain behave as stated; side-effect oracle | this recipe | `test_side_effect_oracle_*`, `test_bypass_*` |
 | Ledger verifies; tampered ledger fails | `AuditLog.verify` | `test_bypass_tampered_ledger_fails` |
 

@@ -16,7 +16,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from mcp.shared.memory import create_connected_server_and_client_session as connect
+try:  # mcp 2.x: `Client(server)` connects to the server in-process; the 1.x helper below was removed
+    from mcp import Client as connect
+except ImportError:  # mcp 1.x
+    from mcp.shared.memory import create_connected_server_and_client_session as connect
 from mcp.types import CallToolRequestParams
 
 from attenu_guard import AuditLog, Authority, EgressRank, Guard, RowLimit

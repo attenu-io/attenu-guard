@@ -15,7 +15,8 @@ pytest.importorskip("mcp")
 from attenu_guard import AuditLog  # noqa: E402
 from attenu_guard.wire import HS256TestSigner  # noqa: E402
 
-PINNED = {"package": "mcp", "version": "1.28.1", "path": "mcp.types.CallToolRequestParams (name, arguments, meta, task)",
+PINNED = {"package": "mcp", "version": "1.28.1 and 2.3.0",
+          "path": "mcp.types.CallToolRequestParams (name, arguments, meta, task; 2.3.0 adds input_responses, request_state)",
           "roadmap": "blog.modelcontextprotocol.io/posts/mcp-roadmap 2026-08-22 — sub-agent authority named, no spec"}
 _D = Path(__file__).resolve().parents[2] / "examples" / "integrations" / "mcp" / "server_verifier"
 
@@ -33,6 +34,8 @@ def test_compat_mcp_importable_and_meta_supported():
     from mcp import ClientSession
     import inspect
     assert "meta" in inspect.signature(ClientSession.call_tool).parameters
+    if hasattr(connect, "call_tool"):            # mcp 2.x: the demo connects with `mcp.Client` itself
+        assert "meta" in inspect.signature(connect.call_tool).parameters
     print("mcp", importlib.metadata.version("mcp"), "(pinned story:", PINNED["version"] + ")")
 
 
@@ -70,7 +73,7 @@ def test_bypass_undeclared_tool_does_not_exist(tmp_path):
             res = await s.call_tool("crm_delete", {"all": True}, meta={"attenu_chain": []})
         return res, sink
     res, sink = asyncio.run(go())
-    assert res.isError and sink == []
+    assert cl.result_field(res, "is_error", "isError") and sink == []
 
 
 def test_bypass_retries_stay_denied_and_each_attempt_is_on_the_ledger(tmp_path):
@@ -98,7 +101,7 @@ def test_direct_python_call_still_hits_the_gate():
     server = sv.build_server(sv.ChainVerifier(_signer()), sink)
     fn = server._tool_manager.get_tool("crm_export").fn if hasattr(server, "_tool_manager") else None
     if fn is None:
-        pytest.skip("FastMCP internals differ; boundary documented in README")
+        pytest.skip("MCP server internals differ; boundary documented in README")
 
     class _Ctx:
         class request_context:

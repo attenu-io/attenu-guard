@@ -6,6 +6,9 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- **The MCP server-verifier recipe did not run on mcp 2.x** (#12). mcp 2.x removed the in-memory session helper the demo and its tests imported, renamed `FastMCP` to `MCPServer` and snake-cased the result fields (`is_error`), and `pip install 'attenu-guard[mcp]'` resolves to 2.x. The recipe now connects with `mcp.Client(server)` on 2.x and keeps the 1.x path, and CI runs its demo and tests pinned on mcp 1.28.1 and on 2.3.0
+
 ## [0.18.0] - 2026-09-28
 
 ### Added
