@@ -208,8 +208,15 @@ class AuditLog:
             # that its signature does not verify. Raising here crashed the verifier on input from
             # the bundle. Signing still raises, in `anchor()` and `evidence.export_bundle`.
             return False, "anchor signature invalid"
+        sig_hex = anchor.get("sig")
+        if sig_hex is None:
+            sig_hex = ""                    # a null sig reads as an absent one: nothing verifies
+        if not isinstance(sig_hex, str):
+            # A number, a bool, a list or an object is not hex, and `bytes.fromhex` raised a
+            # TypeError on it, out of the verifier, where only a ValueError was expected.
+            return False, "anchor signature not hex"
         try:
-            sig = bytes.fromhex(anchor.get("sig", ""))
+            sig = bytes.fromhex(sig_hex)
         except ValueError:
             return False, "anchor signature not hex"
         if not signer.verify(signing_input, sig, anchor.get("kid")):

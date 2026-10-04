@@ -867,6 +867,74 @@ class TestUnsafeIntegers(unittest.TestCase):
 
 
 # =========================================================================
+# Two leaves whose type verification assumed: an anchor's sig, an allow's scope
+# =========================================================================
+class TestNonStringLeaves(unittest.TestCase):
+    """An anchor `sig` that is not a string reached `bytes.fromhex` (TypeError), and an allow
+    `scope` that is not a string reached `startswith` against a wildcard (AttributeError): both
+    raised out of verification with exit 1. Each is now the existing finding, in one line."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _write(self, obj) -> str:
+        path = self.td / "bundle.json"
+        path.write_text(json.dumps(obj))
+        return str(path)
+
+    def test_an_anchor_sig_that_is_not_a_string(self):
+        from attenu_guard import AuditLog
+        bundle = json.loads((SAMPLES / "clean.bundle.json").read_text())
+        signer = HS256TestSigner(bytes.fromhex(KEY), kid=bundle["anchor"]["kid"])
+        head = ("integrity=False monotonicity=True containment=True anchor=FAILED nodes=3 "
+                "actions_checked=2")
+        for sig, reason in ((None, "anchor signature invalid"),     # null reads as absent
+                            (5, "anchor signature not hex"), (True, "anchor signature not hex"),
+                            ([1], "anchor signature not hex"), ({"a": 1}, "anchor signature not hex")):
+            with self.subTest(sig=repr(sig)):
+                anchored = copy.deepcopy(bundle)
+                anchored["anchor"]["sig"] = sig
+                self.assertEqual(AuditLog.verify_anchor(anchored["entries"], anchored["anchor"],
+                                                        signer), (False, reason))
+                path = self._write(anchored)
+                rc, out = run("verify", path, "--hs256-key", KEY)
+                self.assertEqual((rc, out.splitlines()),
+                                 (2, [head, f"  - integrity(anchor): {reason}", "FAILED"]))
+                # Without a key the anchor is not checked, so its sig is not read.
+                self.assertEqual(run("verify", path)[0], 0)
+
+    def test_an_allow_scope_that_is_not_a_string_is_a_containment_failure(self):
+        from attenu_guard import Authority, Guard
+        g = Guard.issue("a", Authority(scopes={"crm.*"}), chain_id="c")   # a wildcard: startswith
+        g.check("crm.read")
+        for scope, printed in ((5, "5"), (None, "None"), (True, "True"), (1.5, "1.5"),
+                               (["crm.read"], "['crm.read']"), ({"a": 1}, "{'a': 1}")):
+            with self.subTest(scope=repr(scope)):
+                entries = [dict(e) for e in g.audit_log().entries]
+                entries[1]["scope"] = scope
+                _rehashed(entries)
+                bundle = {"v": 1, "c14n": "JCS", "chain_id": "c", "entries": entries}
+                finding = f"containment: allow of {printed} on c:n0 outside its authority ['crm.*']"
+                report = evidence.verify_bundle(bundle)
+                self.assertEqual((report["failures"], report["failure_entries"]), ([finding], [1]))
+                path = self._write(bundle)
+                rc, out = run("verify", path)
+                self.assertEqual((rc, out.splitlines()), (2, [
+                    "integrity=True monotonicity=True containment=False anchor=not checked "
+                    "nodes=1 actions_checked=1", f"  - {finding}", "FAILED"]))
+                rc, out = run("verify", path, "--entries")
+                self.assertEqual(rc, 2)
+                line = out.splitlines()[-1]
+                self.assertTrue(line.startswith("  seq=1 event=allow node=c:n0 "), line)
+                self.assertTrue(line.endswith(" failed=containment"), line)
+
+
+# =========================================================================
 # The display rule itself
 # =========================================================================
 class TestDisplayRule(unittest.TestCase):

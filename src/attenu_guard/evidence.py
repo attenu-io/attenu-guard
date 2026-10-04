@@ -1800,7 +1800,10 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             log.add("containment", f"containment: allow on unknown node {_shown(node)}",
                     seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
             continue
-        if not a.permits(scope, ctx):
+        # A scope that is not a string is no scope the node can hold. Against a wildcard it
+        # raised (`startswith` on an int or a None), out of the verifier; against a plain scope
+        # it already failed here. It is this finding either way.
+        if not isinstance(scope, str) or not a.permits(scope, ctx):
             contained = False
             log.add("containment",
                     f"containment: allow of {scope!r} on {_shown(node)} outside its authority {sorted(a.scopes)}",
