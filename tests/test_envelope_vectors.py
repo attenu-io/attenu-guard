@@ -1063,10 +1063,10 @@ class TestWitnessesMap(unittest.TestCase):
 
     def test_a_seq_that_is_not_an_integer_takes_no_envelope(self):
         # c51: an entry whose seq is `true` took the envelope written for seq 1, because True == 1
-        # and hash(True) == hash(1) in Python; 1.0 did the same. The envelope here is signed over
-        # that very entry, so before the strict lookup it verified and the entry read
-        # witness-signed. A bool, a float or a string seq now names nothing.
-        for bad in (True, 1.0, "1"):
+        # and hash(True) == hash(1) in Python. The envelope here is signed over that very entry,
+        # so before the lookup took the schema's integer rule it verified and the entry read
+        # witness-signed. A bool, a fractional number or a string seq names nothing.
+        for bad in (True, 1.5, "1"):
             with self.subTest(seq=repr(bad)):
                 bundle = copy.deepcopy(self.case["bundle"])
                 entries = bundle["entries"]
@@ -1099,6 +1099,78 @@ class TestWitnessesMap(unittest.TestCase):
         self.assertTrue(report["ok"], report["failures"])
         self.assertEqual(report["witnesses"],
                          {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+
+class TestIntegralSeqAndVersion(unittest.TestCase):
+    """A `seq` or `v` is an integral number that is not a bool, as the schema's integer type
+    defines: `1.0` is 1 and `-0.0` is 0, and RFC 8785 writes both as the integer, so an honest
+    envelope or anchor still verifies over them with no re-signing. A bool, a string, and a
+    number that is fractional or not finite are not integers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])      # one envelope, seq 1
+        cls.signer = HS256TestSigner(bytes.fromhex(cls.case["signer"]["secret_hex"]),
+                                     kid=cls.case["signer"]["kid"])
+
+    def _envelopes_report(self, bundle):
+        return evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+
+    def test_an_entry_whose_seq_is_1_0_is_the_entry_at_seq_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["entries"][generate_envelopes.SPAWN_SEQ]["seq"] = 1.0
+        report = evidence.verify_bundle(bundle, self.signer, witness_keys=self.case["witness_keys"])
+        self.assertTrue(report["ok"], report["failures"])          # same hash, same anchor
+        self.assertEqual(report["envelopes"]["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+        self.assertEqual(report["envelopes"]["states"][generate_envelopes.SPAWN_SEQ],
+                         "witness-signed")
+
+    def test_a_subject_seq_of_1_0_covers_the_entry_at_seq_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"][0]["subject"]["seq"] = 1.0        # not re-signed: JCS writes it as 1
+        report = self._envelopes_report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+    def test_an_envelope_v_of_1_0_is_version_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"][0]["v"] = 1.0                     # not re-signed: JCS writes it as 1
+        self.assertTrue(self._envelopes_report(bundle)["ok"])
+
+    def test_an_envelope_v_that_is_not_an_integer_is_an_unknown_version(self):
+        for bad in (True, 1.5, "1"):
+            with self.subTest(v=repr(bad)):
+                bundle = copy.deepcopy(self.case["bundle"])
+                bundle["envelopes"][0]["v"] = bad
+                report = self._envelopes_report(bundle)
+                self.assertEqual([d["reason"] for d in report["failure_details"]],
+                                 ["envelope_unknown_version"])
+                self.assertIn(f"envelope v={bad!r} typ=", report["failures"][0])
+
+    def test_a_bundle_v_of_2_0_is_version_2_and_true_is_not_a_version(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["v"] = 2.0
+        self.assertTrue(evidence.verify_bundle(bundle, self.signer,
+                                               witness_keys=self.case["witness_keys"])["ok"])
+        bundle["v"] = True
+        report = evidence.verify_bundle(bundle, self.signer, witness_keys=self.case["witness_keys"])
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["version"])
+        self.assertEqual(report["failures"][0], "unsupported_version: bundle v=True not in [1, 2]")
+
+    def test_a_message_prints_an_integral_seq_as_its_integer(self):
+        # A subject naming seq 9.0 in a nine-entry bundle (seqs 0-8) finds no entry; the message
+        # names it as 9, the way every other implementation prints that number.
+        bundle = copy.deepcopy(self.case["bundle"])
+        envelope = copy.deepcopy(bundle["envelopes"][0])
+        envelope["subject"]["seq"] = 9.0
+        bundle["envelopes"] = [_resign(envelope)]
+        report = self._envelopes_report(bundle)
+        self.assertEqual(report["failures"],
+                         ["envelope_subject_mismatch: no entry at seq 9 in this bundle"])
+        self.assertEqual((report["failure_details"][0]["seq"], report["failure_entries"]), (9, [None]))
 
 
 def _resign(envelope):

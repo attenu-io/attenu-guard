@@ -924,11 +924,13 @@ verifier finds the entry at `seq`, recomputes its hash from the bundle, and
 compares; the locators are then checked against **that same entry**, and one
 that disagrees is the same failure at the same position. `seq` is the lookup
 key, so there is nothing to compare it against. The entry at `seq` is the one
-whose own `seq` is that integer, and never a boolean (`true` is not 1), or, for
-an entry with no `seq` member at all, the one at that index. An entry whose
-`seq` is a boolean, a string, null or any other non-integer is at no `seq`, so
-no envelope covers it. Where two entries are at one `seq`, the later one is
-covered.
+whose own `seq` is that integer, or, for an entry with no `seq` member at all,
+the one at that index. An integer here is an integral number that is not a
+bool, as the schema's integer type defines, so `1.0` is 1 and `true` is not;
+the same rule reads every `seq` and `v` in a bundle, an anchor and an envelope.
+An entry whose `seq` is a bool, a string, null, or a fractional or non-finite
+number is at no `seq`, so no envelope covers it. Where two entries are at one
+`seq`, the later one is covered.
 
 `observed.result` is a closed vocabulary of three. `matched` means the witness
 saw the event and it agrees with what it independently observed.

@@ -149,7 +149,8 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
         seq=<n> event=<event> node=<node> scope=<scope> state=<witness-signed|process-asserted>
         observed=<observed.result> witness=<kid> failed=<check>[,<check>...]
 
-    `seq` is always printed, as `seq=null` for an entry that has none. Any other key with no
+    `seq` is always printed, as the integer when it is integral (`1.0` prints 1), and as
+    `seq=null` for an entry that has none. Any other key with no
     value is left out. `state` is left out for a plain ledger (`envelopes=None`); on a bundle it
     is `witness-signed` exactly when `envelopes["witnesses"]` holds this entry's index, which is
     the entry the verifier resolved an envelope to, so of two entries sharing a seq only the one
@@ -163,6 +164,8 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
     A value that starts with `"` is a JSON string, which `json.loads` decodes. Any other value
     is printed as it is: printable ASCII other than space, `"` and `\\`, an integer, `null` for
     an entry with no seq, or the compact JSON of a value that is not a string."""
+    from attenu_guard.audit import _int_or
+    from attenu_guard.evidence import _state_key
     failed = _failed_by_entry(failure_entries, failure_details)
     lines = ["entries:"]
     for i, e in enumerate(entries):
@@ -172,15 +175,16 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
             if kid is None:
                 pairs.append(("state", "process-asserted"))
             else:
-                # `results` is keyed the way `states` is; a covered entry's key is its own seq,
-                # or its index when it has none, and the result there is its envelope's.
+                # `results` is keyed the way `states` is (`_state_key`), and for a covered
+                # entry the result filed there is its own envelope's.
                 pairs += [("state", "witness-signed"),
-                          ("observed", envelopes["results"].get(e.get("seq", i))),
+                          ("observed", envelopes["results"].get(_state_key(e, i))),
                           ("witness", kid)]
         if i in failed:
             pairs.append(("failed", ",".join(failed[i])))
         # `seq` is never left out: an entry without one is exactly the entry a reader must see.
-        tokens = [f"seq={_entry_value(e.get('seq'))}"]
+        # An integral seq prints as the integer it is (`1.0` as 1), as the verifier reads it.
+        tokens = [f"seq={_entry_value(_int_or(e.get('seq')))}"]
         tokens += [f"{k}={_entry_value(v)}" for k, v in pairs if v is not None]
         lines.append("  " + " ".join(tokens))
     return lines

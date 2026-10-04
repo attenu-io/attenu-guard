@@ -35,6 +35,7 @@ from typing import Any, Mapping
 from attenu_guard import canonical
 from attenu_guard._display import escaped as _escaped, shown as _shown
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
+from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
 from attenu_guard.ceilings import describe as _describe_ceiling
 from attenu_guard.reasons import Capture, BodyState, Policy
@@ -120,7 +121,7 @@ class _FailureLog:
     def add(self, reason: str, detail: str, *, seq=None, node=None, call_id=None,
             entry=None) -> None:
         self.messages.append(detail)
-        self.details.append({"reason": reason, "seq": seq, "node": node,
+        self.details.append({"reason": reason, "seq": _int_or(seq), "node": node,
                              "call_id": call_id, "detail": detail})
         self.about.append(entry)
 
@@ -529,18 +530,46 @@ def _recomputed_hashes(entries: list[dict]) -> list:
 def _subject_index(entries: list[dict]) -> dict:
     """subject.seq -> the index of the entry an envelope naming that seq covers.
 
-    An entry is keyed by its own seq when that is an integer and not a bool, and by its index
-    when it has no seq member at all. An entry whose seq is a bool, a float, a string or null is
-    keyed by nothing, so no envelope covers it: keyed by the raw value, `"seq": true` took the
-    envelope written for seq 1, because `True == 1` and `hash(True) == hash(1)` in Python. Where
-    two entries share a key the later one is covered, as it always was."""
+    An entry is keyed by its own seq when that is an integral number and not a bool, as the
+    schema's integer type defines (`_integral`: `1.0` is 1), and by its index when it has no seq
+    member at all. An entry whose seq is a bool, a string, null, or a number that is fractional
+    or not finite is keyed by nothing, so no envelope covers it: keyed by the raw value,
+    `"seq": true` took the envelope written for seq 1, because `True == 1` and
+    `hash(True) == hash(1)` in Python. Where two entries share a key the later one is covered,
+    as it always was."""
     keyed: dict = {}
     for i, e in enumerate(entries):
         if "seq" not in e:
             keyed[i] = i
-        elif _is_seq(e["seq"]):
-            keyed[e["seq"]] = i
+        else:
+            seq = _integral(e["seq"])
+            if seq is not None:
+                keyed[seq] = i
     return keyed
+
+
+def _same_number(a, b) -> bool:
+    """Two `seq` or `v` values are the same: equal integers when either is integral
+    (`_integral`), so `1.0` is 1; otherwise the same value of the same type, so `true` is not 1
+    and `"1"` is not 1, where Python's `==` says both are."""
+    ia, ib = _integral(a), _integral(b)
+    if ia is not None or ib is not None:
+        return ia == ib
+    return type(a) is type(b) and a == b
+
+
+def _version_order(value):
+    """Sort key for the versions `mixed_entry_versions` lists: numbers in numeric order, as
+    before, and anything else after them by its text, so a bool beside a string cannot raise."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (0, value, "")
+    return (1, 0, repr(value))
+
+
+def _state_key(entry: dict, index: int):
+    """Where `states` and `results` file an entry: its seq when it has one, as the integer when
+    it is integral, and its index when it has none."""
+    return _int_or(entry["seq"]) if "seq" in entry else index
 
 
 def envelope_subject(entries: list[dict], seq: int) -> dict:
@@ -549,9 +578,10 @@ def envelope_subject(entries: list[dict], seq: int) -> dict:
     `seq` finds its entry the way a verifier finds it (`_subject_index`), so the subject is the
     one the verifier will check it against. Raises `ValueError` when `seq` names no entry, or
     names one whose `event` v1 defines no subject for."""
-    at = _subject_index(entries).get(seq) if _is_seq(seq) else None
+    at = _subject_index(entries).get(_integral(seq)) if _is_seq(seq) else None
     if at is None:
         raise ValueError(f"no entry at seq {seq!r}")
+    seq = _integral(seq)
     entry = entries[at]
     event = entry.get("event")
     if event not in ENVELOPE_SUBJECT_MEMBERS:
@@ -752,12 +782,12 @@ def _envelope_raw_bytes(raw):
 
 
 def _is_seq(value) -> bool:
-    """A subject `seq` this build will look an entry up by: a JSON integer, and never a bool.
-
-    `True` hashes equal to `1` in Python, so an unguarded lookup would find the entry at seq 1
-    for `"seq": true`; a dict or a list is not hashable at all and would raise. The type check
-    comes first, and every use of `seq` is behind it."""
-    return isinstance(value, int) and not isinstance(value, bool)
+    """A `seq` or `v` this build reads as an integer: an integral number that is not a bool, as
+    the schema's integer type defines (`_integral`). `1.0` is 1, and JCS writes it as 1, so it
+    hashes as 1. `True == 1` and `hash(True) == hash(1)` in Python, so a bool is refused by type
+    before it can be compared or used as a key; so are a string, null, and a number that is
+    fractional or not finite. A dict or a list is not hashable at all and would raise."""
+    return _integral(value) is not None
 
 
 def _envelope_line(state: str, result) -> str:
@@ -785,7 +815,7 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     `expired` is the kid -> `not_after` map `_trusted_witnesses` left out of `trusted`; it only
     changes the wording of the `envelope_unknown_witness` an expired key gets."""
     fail = _FailureLog()
-    states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
+    states = {_state_key(e, i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
     #: entry index -> the `witness.kid` of the envelope that verified for it, for every entry
     #: whose state is witness-signed. By index, not by seq: the index is the entry the subject
@@ -807,7 +837,7 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
                                             trusted, raw, fail, claims, expired)
         if at is None:
             continue
-        key = entries[at].get("seq", at)            # where `states` files that entry
+        key = _state_key(entries[at], at)
         states[key] = WITNESS_SIGNED
         results[key] = result
         # A string by now: `_score_envelope` refuses an envelope whose kid is not one.
@@ -818,7 +848,7 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     # reports witness-signed and the bundle rejects; and it leaves `witnesses`.
     for at, count in claims.items():
         if count > 1:
-            states[entries[at].get("seq", at)] = PROCESS_ASSERTED
+            states[_state_key(entries[at], at)] = PROCESS_ASSERTED
             witnesses.pop(at, None)
 
     lines = {seq: _envelope_line(state, results.get(seq)) for seq, state in states.items()}
@@ -850,8 +880,8 @@ def _score_envelope(envelope, index: int, entries: list, subject_index: dict, re
         # the lookup is guarded: a dict or a list is not hashable and `subject_index.get` would
         # raise on it. A seq that is not an integer positions nothing, which is honest — it
         # names no entry — and it is never used as a key.
-        s = subject.get("seq") if isinstance(subject, Mapping) else None
-        if not _is_seq(s):
+        s = _integral(subject.get("seq")) if isinstance(subject, Mapping) else None
+        if s is None:
             return None, None, None
         at = subject_index.get(s)
         if at is None:
@@ -875,10 +905,9 @@ def _score_envelope(envelope, index: int, entries: list, subject_index: dict, re
     # `_is_seq` guards the version too: `True == 1` in Python, so a boolean `v` would otherwise
     # pass a version check the TypeScript implementation refuses, and the two would disagree
     # about the same bundle. Found by the cross-language hostile-value matrix.
-    if (not _is_seq(envelope.get("v")) or envelope.get("v") != ENVELOPE_VERSION
-            or envelope.get("typ") != ENVELOPE_TYP):
+    if _integral(envelope.get("v")) != ENVELOPE_VERSION or envelope.get("typ") != ENVELOPE_TYP:
         report("envelope_unknown_version",
-               f"envelope v={envelope.get('v')!r} typ={envelope.get('typ')!r}, this build "
+               f"envelope v={_int_or(envelope.get('v'))!r} typ={envelope.get('typ')!r}, this build "
                f"knows v={ENVELOPE_VERSION} typ={ENVELOPE_TYP!r}", subject)
         return None, None, None
 
@@ -933,13 +962,13 @@ def _score_envelope(envelope, index: int, entries: list, subject_index: dict, re
     if not _is_seq(subject.get("seq")):
         report("envelope_subject_mismatch", "subject seq is not an integer", subject)
         return None, None, None
-    at = subject_index.get(subject.get("seq"))
+    at = subject_index.get(_integral(subject.get("seq")))
     if at is None:
         report("envelope_subject_mismatch",
-               f"no entry at seq {subject.get('seq')!r} in this bundle", subject)
+               f"no entry at seq {_int_or(subject.get('seq'))!r} in this bundle", subject)
         return None, None, None
     entry = entries[at]
-    seq, node = entry.get("seq"), entry.get("node")
+    seq, node = _int_or(entry.get("seq")), entry.get("node")
 
     # (3a') one entry, at most one envelope. Counted here, before anything else about this
     # envelope is judged, so the rule cannot be sidestepped by making the second envelope
@@ -1287,7 +1316,7 @@ def _v2_field_leaks_on_v1(entries: list[dict]) -> _FailureLog:
         leaked = sorted(_V2_ONLY_FIELDS & e.keys())
         if leaked:
             failures.add("v2_field_on_v1",
-                         f"v2_field_on_v1: seq={_shown(e.get('seq'))} event={e.get('event')!r} "
+                         f"v2_field_on_v1: seq={_shown(_int_or(e.get('seq')))} event={e.get('event')!r} "
                          f"carries v2-only field(s) {leaked} on a schema_version=1 entry",
                          seq=e.get("seq"), node=e.get("node"), entry=e)
     return failures
@@ -1332,14 +1361,14 @@ def _policy_failures(entries: list[dict], bundle_v) -> _FailureLog:
                 continue                    # _validate_allow owns this entry's message
             if not _is_known_policy(e.get("policy")):
                 failures.add("invalid_policy",
-                             f"invalid_policy: seq={_shown(e.get('seq'))} allow carries policy "
+                             f"invalid_policy: seq={_shown(_int_or(e.get('seq')))} allow carries policy "
                              f"{e.get('policy')!r}, not a value this format defines",
                              seq=e.get("seq"), node=e.get("node"), entry=e)
         else:
             if ev == "deny" and bundle_v == 2:
                 continue                    # _validate_deny owns this entry's message
             failures.add("policy_on_non_allow",
-                         f"policy_on_non_allow: seq={_shown(e.get('seq'))} event={ev!r} carries "
+                         f"policy_on_non_allow: seq={_shown(_int_or(e.get('seq')))} event={ev!r} carries "
                          f"`policy`, which is an allow-only field",
                          seq=e.get("seq"), node=e.get("node"), entry=e)
     return failures
@@ -1374,7 +1403,7 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             nodes.add(e.get("node"))
             err = _validate_root(e)
             if err:
-                failures.add("invalid_root", f"invalid_root: {err} (seq {_shown(e.get('seq'))})",
+                failures.add("invalid_root", f"invalid_root: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), entry=e)
         elif ev == "spawn":
             nodes.add(e.get("node"))
@@ -1384,7 +1413,7 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             revoked_nodes.update(e.get("revoked") or [])
             err = _validate_kill(e)
             if err:
-                failures.add("invalid_kill", f"invalid_kill: {err} (seq {_shown(e.get('seq'))})",
+                failures.add("invalid_kill", f"invalid_kill: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), entry=e)
 
         if ev in ("allow", "deny"):
@@ -1395,15 +1424,15 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
                     # Positioned on the SECOND sighting: the entry that re-used a call_id is the
                     # offending record, the first one having been legitimate when it was written.
                     failures.add("duplicate_call_id",
-                                 f"duplicate_call_id: call_id {_shown(cid)} on seq {_shown(e.get('seq'))} ({ev}) "
-                                 f"already used at seq {_shown(prior[2])} ({prior[0]})",
+                                 f"duplicate_call_id: call_id {_shown(cid)} on seq {_shown(_int_or(e.get('seq')))} ({ev}) "
+                                 f"already used at seq {_shown(_int_or(prior[2]))} ({prior[0]})",
                                  seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 else:
                     seen_call_ids[cid] = (ev, e.get("node"), e.get("seq"))
             validator = _validate_allow if ev == "allow" else _validate_deny
             err = validator(e)
             if err:
-                failures.add(f"invalid_{ev}", f"invalid_{ev}: {err} (seq {_shown(e.get('seq'))})",
+                failures.add(f"invalid_{ev}", f"invalid_{ev}: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 if ev == "allow" and cid is not None:
                     invalid_allow_ids.add(cid)
@@ -1414,13 +1443,13 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             cid = e.get("call_id")
             err = _validate_outcome(e)
             if err:
-                failures.add("invalid_outcome", f"invalid_outcome: {err} (seq {_shown(e.get('seq'))})",
+                failures.add("invalid_outcome", f"invalid_outcome: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 continue
             if cid in outcomes:
                 failures.add("duplicate_outcome",
-                             f"duplicate_outcome: call_id {_shown(cid)} at seq {_shown(e.get('seq'))} "
-                             f"(first at seq {_shown(outcomes[cid].get('seq'))})",
+                             f"duplicate_outcome: call_id {_shown(cid)} at seq {_shown(_int_or(e.get('seq')))} "
+                             f"(first at seq {_shown(_int_or(outcomes[cid].get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 continue
             outcomes[cid] = e
@@ -1440,7 +1469,7 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
         allow_e = allows.get(cid)
         if allow_e is None:
             failures.add("outcome_without_allow",
-                         f"outcome_without_allow: call_id {_shown(cid)} at seq {_shown(oc.get('seq'))} has no allow in this chain",
+                         f"outcome_without_allow: call_id {_shown(cid)} at seq {_shown(_int_or(oc.get('seq')))} has no allow in this chain",
                          seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
             continue
         node_ok = allow_e.get("node") == oc.get("node")
@@ -1453,8 +1482,8 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
                    and oc["seq"] > allow_e["seq"])
         if not order_ok:
             failures.add("outcome_before_allow",
-                         f"outcome_before_allow: call_id {_shown(cid)} outcome seq {_shown(oc.get('seq'))} "
-                         f"not after allow seq {_shown(allow_e.get('seq'))}",
+                         f"outcome_before_allow: call_id {_shown(cid)} outcome seq {_shown(_int_or(oc.get('seq')))} "
+                         f"not after allow seq {_shown(_int_or(allow_e.get('seq')))}",
                          seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
         ah, ih = allow_e.get("authorized_params_hash"), oc.get("invoked_params_hash")
         if ah is not None and ih is not None and ah != ih:
@@ -1534,15 +1563,15 @@ def _integrity_break(entries: list[dict]):
     `AuditLog.verify` stays the authority on WHETHER the chain is broken and on the message this
     module reports; this walk exists so the structured twin of that message can say WHERE, which
     the message's own text does not expose in a parseable form. Mirrors `AuditLog.verify`'s walk
-    exactly (same seq/prev_hash/hash order, and the same rule that a seq is an integer and never
-    a bool: `True == 1` in Python, and a re-hashed chain with `"seq": true` at index 1 verified
-    clean). None when nothing entry-local is wrong — a consistently re-hashed ledger fails
+    exactly (same seq/prev_hash/hash order, and the same rule that a seq is an integral number
+    and never a bool, `_integral`: `True == 1` in Python, and a re-hashed chain with
+    `"seq": true` at index 1 verified clean). None when nothing entry-local is wrong — a consistently re-hashed ledger fails
     against the signed anchor, not here, and that failure is chain-level."""
     prev = _GENESIS
     for i, e in enumerate(entries):
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
-            broken = (not _is_seq(e.get("seq")) or e.get("seq") != i
+            broken = (_integral(e.get("seq")) != i
                       or payload.get("prev_hash") != prev
                       or _rehash(prev, payload) != e.get("hash"))
         except Exception:  # noqa: BLE001 - an unhashable payload is itself the break, at this entry
@@ -1603,15 +1632,18 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
 
     # (0) version: the bundle must declare a schema version this build understands, and — when an
     # anchor is present — the anchor must be anchoring THAT version, not a different one.
-    bundle_v = bundle.get("v")
+    # A version is read by the same rule as a seq (`_integral`): `1.0` is 1, and `true` is not,
+    # although `True in {1, 2}` holds in Python and a bundle declaring `"v": true` was read as v1.
+    raw_v = bundle.get("v")
+    bundle_v = _integral(raw_v)
     version_ok = bundle_v in SUPPORTED_BUNDLE_VERSIONS
     if not version_ok:
         log.add("unsupported_version",
-                f"unsupported_version: bundle v={bundle_v!r} not in {sorted(SUPPORTED_BUNDLE_VERSIONS)}")
-    if anchor and anchor.get("v") != bundle_v:
+                f"unsupported_version: bundle v={_int_or(raw_v)!r} not in {sorted(SUPPORTED_BUNDLE_VERSIONS)}")
+    if anchor and not _same_number(anchor.get("v"), raw_v):
         version_ok = False
         log.add("anchor_version_mismatch",
-                f"anchor_version_mismatch: anchor v={anchor.get('v')!r} != bundle v={bundle_v!r}")
+                f"anchor_version_mismatch: anchor v={_int_or(anchor.get('v'))!r} != bundle v={_int_or(raw_v)!r}")
 
     # (0a) exactly one root: a rootless bundle (or one splicing in a second root) would otherwise
     # sail through monotonicity/containment trivially — there is nothing to anchor those checks to.
@@ -1624,19 +1656,19 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
 
     # 0.9.0: a chain is created at ONE schema version and never mixes (spec section 9) — the root
     # entry's v must equal the bundle's declared v, and no OTHER entry may carry a different v.
-    if root_entry is not None and root_entry.get("v") != bundle_v:
+    if root_entry is not None and not _same_number(root_entry.get("v"), raw_v):
         version_ok = False
         log.add("root_version_mismatch",
-                f"root_version_mismatch: root v={root_entry.get('v')!r} != bundle v={bundle_v!r}",
+                f"root_version_mismatch: root v={_int_or(root_entry.get('v'))!r} != bundle v={_int_or(raw_v)!r}",
                 seq=root_entry.get("seq"), node=root_entry.get("node"), entry=root_entry)
-    mixed_entries = [e for e in entries if e.get("v") != bundle_v]
-    mixed = sorted({e.get("v") for e in mixed_entries})
+    mixed_entries = [e for e in entries if not _same_number(e.get("v"), raw_v)]
+    mixed = sorted({_int_or(e.get("v")) for e in mixed_entries}, key=_version_order)
     if mixed:
         version_ok = False
         # One aggregate message over every offending entry (unchanged); the twin is positioned on
         # the first of them, which is where a reader looks.
         log.add("mixed_entry_versions",
-                f"mixed_entry_versions: entries declare v in {mixed}, bundle v={bundle_v!r}",
+                f"mixed_entry_versions: entries declare v in {mixed}, bundle v={_int_or(raw_v)!r}",
                 seq=mixed_entries[0].get("seq"), node=mixed_entries[0].get("node"),
                 entry=mixed_entries[0])
     checks["version"] = version_ok
@@ -1681,7 +1713,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
         if expected_anchor is not None:
             if (expected_anchor.get("seq") != actual_seq or expected_anchor.get("head") != actual_head
                     or expected_anchor.get("chain_id") != bundle.get("chain_id")
-                    or expected_anchor.get("v") != bundle_v):
+                    or not _same_number(expected_anchor.get("v"), raw_v)):
                 ok = False
                 log.add("expected_anchor_mismatch",
                     "expected_anchor_mismatch: the bundle's actual (seq, head, chain_id, v) does not match "

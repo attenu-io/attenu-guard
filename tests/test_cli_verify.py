@@ -747,11 +747,32 @@ class TestEntriesAttribution(unittest.TestCase):
         self.assertIn("\n  seq=1 event=spawn node=vectors:n1 state=process-asserted "
                       "failed=envelope_duplicate_subject\n", out)
 
+    def test_an_integral_seq_is_that_integer_in_the_ledger(self):
+        # The schema's integer type (JSON Schema 2020-12) counts 1.0 as an integer, and JCS writes
+        # 1.0 as 1, so the chain hashes exactly as it did: the ledger verifies, and --entries
+        # prints the integer.
+        from attenu_guard import Authority, AuditLog, Guard
+        g = Guard.issue("a", Authority(scopes={"x.read"}), chain_id="c")
+        g.delegate("b", Authority(scopes={"x.read"}), task="t")
+        for index, value, printed in ((1, 1.0, "1"), (0, -0.0, "0")):
+            with self.subTest(seq=repr(value)):
+                entries = [dict(e) for e in g.audit_log().entries]
+                entries[index]["seq"] = value
+                _rehashed(entries)          # a forger's re-hash changes nothing: JCS writes it as before
+                self.assertEqual([e["hash"] for e in entries],
+                                 [e["hash"] for e in g.audit_log().entries])
+                self.assertEqual(AuditLog.verify(entries), (True, None))
+                log = self.td / "l.jsonl"
+                log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+                rc, out = run("verify", str(log), "--entries")
+                self.assertEqual(rc, 0, out)
+                self.assertIn(f"\n  seq={printed} event=", out)
+
     def test_a_seq_that_is_not_an_integer_is_a_gap_in_the_ledger_itself(self):
         from attenu_guard import Authority, AuditLog, Guard
         g = Guard.issue("a", Authority(scopes={"x.read"}), chain_id="c")
         g.delegate("b", Authority(scopes={"x.read"}), task="t")
-        for bad, printed in ((True, "True"), (1.0, "1.0"), ("1", "1")):
+        for bad, printed in ((True, "True"), (1.5, "1.5"), ("1", "1")):
             with self.subTest(seq=repr(bad)):
                 entries = [dict(e) for e in g.audit_log().entries]
                 entries[1]["seq"] = bad
