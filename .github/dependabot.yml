@@ -3,7 +3,16 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
+    groups:
+      codeql-action:
+        # init, analyze and upload-sarif must run the same version; one PR for all three.
+        patterns: ["github/codeql-action*"]
   - package-ecosystem: pip
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    ignore:
+      # The [camel] extra pins mcp<2 on purpose: camel-ai 0.2.90 (latest) imports
+      # mcp.server.FastMCP, which mcp 2.x renamed. Widening the bound breaks the adapter.
+      - dependency-name: "mcp"
+        versions: [">=2"]
