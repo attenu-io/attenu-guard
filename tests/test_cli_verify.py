@@ -935,6 +935,51 @@ class TestNonStringLeaves(unittest.TestCase):
 
 
 # =========================================================================
+# A widened child fails whatever its parent field says, through the CLI too
+# =========================================================================
+class TestDelegationStructureCli(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _run(self, edit) -> tuple:
+        from attenu_guard import vectors
+        case = next(c for c in vectors.load_bundle_vectors()["cases"] if c["name"] == "valid_bundle_v2")
+        bundle = copy.deepcopy(case["bundle"])
+        edit(bundle["entries"])
+        _rehashed(bundle["entries"])
+        del bundle["anchor"]
+        path = self.td / "bundle.json"
+        path.write_text(json.dumps(bundle))
+        return run("verify", str(path), "--entries")
+
+    def test_a_widened_child_with_its_parent_removed_fails(self):
+        # 0.17.0 and 0.18.0 printed OK for this bundle.
+        def widen_and_orphan(entries):
+            entries[1]["granted"]["scopes"] = ["admin.delete", "crm.read"]
+            del entries[1]["parent"]
+        rc, out = self._run(widen_and_orphan)
+        self.assertEqual(rc, 2)
+        self.assertIn("\n  - monotonicity: vectors:n1 names no parent defined earlier in this "
+                      "bundle (parent None)\nFAILED\n", out)
+        self.assertIn("\n  seq=1 event=spawn node=vectors:n1 state=process-asserted "
+                      "failed=monotonicity\n", out)
+
+    def test_a_node_that_is_not_a_string_is_a_finding_not_a_traceback(self):
+        def listed(entries):
+            entries[0]["node"] = [1]
+        rc, out = self._run(listed)
+        self.assertEqual(rc, 2)
+        self.assertIn("\n  - root [1]: unreadable authority (node is not a string)\n", out)
+        self.assertIn("\n  seq=0 event=root node=[1] state=process-asserted "
+                      "failed=unreadable_authority\n", out)
+
+
+# =========================================================================
 # The display rule itself
 # =========================================================================
 class TestDisplayRule(unittest.TestCase):

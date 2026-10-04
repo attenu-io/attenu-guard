@@ -637,6 +637,214 @@ class TestFailureDetailsTwin(unittest.TestCase):
 
 
 # =========================================================================
+# The delegation structure is read in ledger order, and nothing skips the checks
+# =========================================================================
+class TestDelegationStructure(unittest.TestCase):
+    """Through 0.18.0 a spawn whose `parent` was absent, null, or named no node in the bundle was
+    never checked for monotonicity, so a child widened past its parent verified OK; the watched
+    process writes that field. Every spawn's parent must now be a string naming a node the root
+    or an earlier spawn defined, not revoked by an earlier kill and not the spawn's own node; a
+    node is defined once; an allow is judged against a node defined earlier and not revoked; and
+    a node id that is not a string is a finding, never a raise."""
+
+    WIDENED = "admin.delete"
+
+    def setUp(self):
+        self.signer = HS256TestSigner(b"k", kid="k")
+        self.case = next(c for c in vectors.load_bundle_vectors()["cases"]
+                         if c["name"] == "valid_bundle_v2")
+
+    def _verify(self, bundle):
+        _rehash(bundle)
+        _reanchor(bundle, self.signer)
+        return evidence.verify_bundle(bundle, self.signer)
+
+    def _widened(self, set_parent):
+        """valid_bundle_v2 with the spawn granted a scope the root does not hold, and its parent
+        member set by `set_parent(spawn_entry)`."""
+        bundle = copy.deepcopy(self.case["bundle"])
+        spawn = bundle["entries"][1]
+        self.assertEqual((spawn["event"], spawn["node"], spawn["parent"]),
+                         ("spawn", "vectors:n1", "vectors:n0"))
+        spawn["granted"]["scopes"] = sorted(set(spawn["granted"]["scopes"]) | {self.WIDENED})
+        set_parent(spawn)
+        return bundle
+
+    @staticmethod
+    def _chain(depth=2, schema_version=1):
+        """root t:n0 -> t:n1 (-> t:n2), each holding crm.read, and an allow by the deepest."""
+        root = Guard.issue("root", Authority({"crm.read"}, [], ttl=600), chain_id="t",
+                           schema_version=schema_version)
+        guard = root
+        for i in range(depth - 1):
+            guard = guard.delegate(f"agent{i}", Authority({"crm.read"}, [], ttl=600), task="t")
+        guard.check("crm.read")
+        return root, guard
+
+    def _bundle_of(self, root):
+        return evidence.export_bundle(root.audit_log(), self.signer)
+
+    def _monotonicity(self, report):
+        return [f for f in report["failures"] if f.startswith("monotonicity")]
+
+    def test_a_widened_child_fails_whatever_its_parent_field_says(self):
+        stated = "names no parent defined earlier in this bundle"
+        for label, set_parent, message in (
+                ("intact", lambda s: None,
+                 "monotonicity: vectors:n1 not ⊆ parent vectors:n0 (child scopes "
+                 "['admin.delete', 'crm.read'] not held by parent)"),
+                ("absent", lambda s: s.pop("parent"),
+                 f"monotonicity: vectors:n1 {stated} (parent None)"),
+                ("null", lambda s: s.update(parent=None),
+                 f"monotonicity: vectors:n1 {stated} (parent None)"),
+                ("unknown", lambda s: s.update(parent="vectors:n9"),
+                 f"monotonicity: vectors:n1 {stated} (parent vectors:n9)"),
+                ("empty", lambda s: s.update(parent=""),
+                 f'monotonicity: vectors:n1 {stated} (parent "")'),
+                ("its own node", lambda s: s.update(parent="vectors:n1"),
+                 f"monotonicity: vectors:n1 {stated} (parent vectors:n1)"),
+                ("a number", lambda s: s.update(parent=5),
+                 f"monotonicity: vectors:n1 {stated} (parent 5)"),
+                ("a bool", lambda s: s.update(parent=True),
+                 f"monotonicity: vectors:n1 {stated} (parent True)"),
+                ("a list", lambda s: s.update(parent=["vectors:n0"]),
+                 f"monotonicity: vectors:n1 {stated} (parent ['vectors:n0'])"),
+                ("an object", lambda s: s.update(parent={"node": "vectors:n0"}),
+                 f'monotonicity: vectors:n1 {stated} (parent {{"node":"vectors:n0"}})')):
+            with self.subTest(parent=label):
+                report = self._verify(self._widened(set_parent))
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"]["monotonicity"])
+                self.assertEqual(self._monotonicity(report), [message])
+                at = report["failures"].index(message)
+                self.assertEqual(report["failure_entries"][at], 1)        # the spawn, by index
+
+    def test_a_parent_defined_only_later_is_no_parent(self):
+        root, _leaf = self._chain(depth=3)
+        bundle = self._bundle_of(root)
+        self.assertEqual([(e["node"], e.get("parent")) for e in bundle["entries"][:3]],
+                         [("t:n0", None), ("t:n1", "t:n0"), ("t:n2", "t:n1")])
+        bundle["entries"][1]["parent"] = "t:n2"
+        report = self._verify(bundle)
+        self.assertEqual(self._monotonicity(report), [
+            "monotonicity: t:n1 names no parent defined earlier in this bundle (parent t:n2)"])
+
+    def test_a_node_is_defined_once(self):
+        # The second definition of t:n1, widened and from the root, would have been the only
+        # one read; a spawn reusing the root's own node is the same defect.
+        root, _leaf = self._chain(depth=2)
+        bundle = self._bundle_of(root)
+        again = dict(bundle["entries"][1], seq=len(bundle["entries"]),
+                     granted=dict(bundle["entries"][1]["granted"], scopes=["crm.read", self.WIDENED]))
+        reroot = dict(bundle["entries"][1], node="t:n0", seq=len(bundle["entries"]) + 1)
+        bundle["entries"] += [again, reroot]
+        report = self._verify(bundle)
+        self.assertEqual(self._monotonicity(report), [
+            "monotonicity: t:n1 is defined a second time in this bundle (first at seq 1)",
+            "monotonicity: t:n0 is defined a second time in this bundle (first at seq 0)"])
+
+    def test_a_spawn_from_a_revoked_parent_fails(self):
+        root, leaf = self._chain(depth=2)
+        root.revoke(leaf.node_id)
+        bundle = self._bundle_of(root)
+        kill_seq = next(e["seq"] for e in bundle["entries"] if e["event"] == "kill")
+        bundle["entries"].append(dict(bundle["entries"][1], node="t:n2", parent="t:n1",
+                                      seq=len(bundle["entries"])))
+        report = self._verify(bundle)
+        self.assertEqual(self._monotonicity(report), [
+            f"monotonicity: t:n2 is spawned from t:n1 after t:n1 was revoked at seq {kill_seq}"])
+
+    def test_an_allow_on_a_revoked_node_fails_containment(self):
+        root, leaf = self._chain(depth=2)
+        root.revoke(leaf.node_id)
+        bundle = self._bundle_of(root)
+        allow = next(e for e in bundle["entries"] if e["event"] == "allow")
+        kill_seq = next(e["seq"] for e in bundle["entries"] if e["event"] == "kill")
+        bundle["entries"].append(dict(allow, seq=len(bundle["entries"])))
+        report = self._verify(bundle)
+        self.assertEqual(report["failures"], [
+            f"containment: allow of 'crm.read' on t:n1 after t:n1 was revoked at seq {kill_seq}"])
+        self.assertEqual(report["failure_entries"], [len(bundle["entries"]) - 1])
+
+    def test_an_allow_before_its_node_is_defined_is_on_an_unknown_node(self):
+        root, _leaf = self._chain(depth=2)
+        bundle = self._bundle_of(root)
+        entries = bundle["entries"]
+        self.assertEqual([e["event"] for e in entries[:3]], ["root", "spawn", "allow"])
+        entries[1], entries[2] = entries[2], entries[1]
+        for i, e in enumerate(entries):
+            e["seq"] = i
+        report = self._verify(bundle)
+        self.assertEqual(report["failures"], ["containment: allow on unknown node t:n1"])
+        self.assertEqual(report["failure_entries"], [1])
+
+    def test_a_context_that_is_not_an_object_fails_containment(self):
+        root, _leaf = self._chain(depth=1)
+        bundle = self._bundle_of(root)
+        bundle["entries"][1]["context"] = [1]
+        report = self._verify(bundle)
+        self.assertEqual(report["failures"], [
+            "containment: allow of 'crm.read' on t:n0 outside its authority ['crm.read']"])
+
+    def test_a_node_that_is_not_a_string_is_a_finding_and_never_a_raise(self):
+        for bad in ([1], {"a": 1}, 5, True):
+            for event in ("root", "spawn", "allow", "deny", "done", "outcome"):
+                with self.subTest(event=event, node=repr(bad)):
+                    bundle = copy.deepcopy(self.case["bundle"])
+                    at = next(i for i, e in enumerate(bundle["entries"]) if e["event"] == event)
+                    bundle["entries"][at]["node"] = bad
+                    report = self._verify(bundle)
+                    self.assertFalse(report["ok"])
+                    reasons = {d["reason"] for d in report["failure_details"]}
+                    expected = {"root": "unreadable_authority", "spawn": "unreadable_granted",
+                                "allow": "containment"}.get(event, "invalid_node")
+                    self.assertIn(expected, reasons)
+                    self.assertIn(at, report["failure_entries"])
+        # A kill naming nodes that are not strings revokes nothing and raises nothing.
+        root, leaf = self._chain(depth=2)
+        root.revoke(leaf.node_id)
+        bundle = self._bundle_of(root)
+        next(e for e in bundle["entries"] if e["event"] == "kill")["revoked"] = [[1], {"a": 1}, 5]
+        self.assertTrue(self._verify(bundle)["ok"])
+
+    def test_the_exact_strings_for_a_node_that_is_not_a_string(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["entries"][0]["node"] = [1]
+        self.assertIn("root [1]: unreadable authority (node is not a string)",
+                      self._verify(bundle)["failures"])
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["entries"][1]["node"] = {"a": 1}
+        self.assertIn('spawn {"a":1}: unreadable granted (node is not a string)',
+                      self._verify(bundle)["failures"])
+        bundle = copy.deepcopy(self.case["bundle"])
+        deny_at = next(i for i, e in enumerate(bundle["entries"]) if e["event"] == "deny")
+        bundle["entries"][deny_at]["node"] = 5
+        self.assertIn(f"invalid_node: seq={deny_at} event='deny' carries node 5, which is not a string",
+                      self._verify(bundle)["failures"])
+
+    def test_fuzz_a_widened_child_never_verifies_ok_whatever_its_parent_says(self):
+        # Deterministic: one seed, and every draw is a parent value a ledger writer could put
+        # there, including well-formed node ids, the child's own id and nodes that do not exist.
+        import random
+        rng = random.Random(20261005)
+        pool = [None, True, False, 0, 1, -1, 1.0, 1.5, "", " ", "vectors:n0", "vectors:n1",
+                "vectors:n2", "vectors:n9", "VECTORS:N0", "vectors:n0 ", ["vectors:n0"], [],
+                {"node": "vectors:n0"}, {}, "\u0000", "vectors:n0\n"]
+        for trial in range(400):
+            draw = rng.choice(pool + ["DELETE"] + ["".join(rng.choice("vectors:n0129*.")
+                                                           for _ in range(rng.randint(0, 12)))])
+            def set_parent(spawn, draw=draw):
+                if draw == "DELETE":
+                    spawn.pop("parent")
+                else:
+                    spawn["parent"] = copy.deepcopy(draw)
+            with self.subTest(trial=trial, parent=repr(draw)):
+                report = self._verify(self._widened(set_parent))
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"]["monotonicity"])
+
+
+# =========================================================================
 # Monotonicity across EVERY dimension of the lattice, not just scopes
 # =========================================================================
 class TestMonotonicityDimensions(unittest.TestCase):

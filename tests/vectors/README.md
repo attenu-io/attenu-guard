@@ -340,8 +340,8 @@ envelope v1's set, and a v2 declares its own.
 |---|---|---|
 | `integrity` | an entry's hash chain does not verify (a rehashed, reordered, or altered entry) | the first entry that fails |
 | `integrity(anchor)` | the signed anchor does not verify against the bundle head | chain level, no `{seq, node}` |
-| `monotonicity` | a spawned node's authority is not a subset of its parent's on some dimension (scopes, ttl, a ceiling, an omitted ceiling); the message names the dimension | the spawn entry of that node |
-| `containment` | an `allow` names a node the bundle never spawned, or a scope outside that node's authority | the allow entry |
+| `monotonicity` | a spawned node's authority is not a subset of its parent's on some dimension (scopes, ttl, a ceiling, an omitted ceiling), and the message names the dimension; or the spawn names no parent defined earlier in the bundle (`parent` absent, null, not a string, unknown, defined only later, or the spawn's own node), or a parent an earlier `kill` revoked; or a root or spawn defines a node already defined | the spawn entry of that node, or the second definition |
+| `containment` | an `allow` names a node not defined earlier in the bundle, or a node an earlier `kill` revoked, or a scope outside that node's authority; a `scope` that is not a string, or a `context` that is not an object, is outside it | the allow entry |
 | `chain_id_mismatch` | an entry, or the anchor, names a different chain than the bundle | the foreign entry; chain level for the anchor |
 | `missing_root` | the bundle has zero or more than one root event | chain level |
 | `unsupported_version` | the bundle's `v` is not one this verifier supports | chain level |
@@ -351,8 +351,9 @@ envelope v1's set, and a v2 declares its own.
 | `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS` (the 39 names under Entry fields), so the verifier would be reporting success on an entry it did not fully read | that entry |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
-| `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
-| `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority | that spawn entry |
+| `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority, or its `node` is not a string | that root entry |
+| `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority, or its `node` is not a string | that spawn entry |
+| `invalid_node` | an entry other than a root, a spawn or an allow carries a `node` that is not a string; a null `node` counts as absent | that entry |
 | `invalid_policy` | on a `schema_version=1` chain, an `allow` carries a `policy` value this format does not define (`unlisted` is the only one v1 defines). On a v2 chain the v2 record check owns that entry and reports it as `invalid_allow` (see `reject_unknown_policy_value`) | that allow entry |
 | `policy_on_non_allow` | an entry other than an `allow` carries `policy`, which is an allow-only field | that entry |
 

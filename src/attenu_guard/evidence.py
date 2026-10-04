@@ -246,27 +246,58 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dict]:
     """(node -> Authority, node -> parent, failures, node -> defining entry) reconstructed from
-    root/spawn events, no engine state.
+    root/spawn events in ledger order, no engine state.
+
+    A node id is a string, and a node is defined once, by the root or by one spawn. A root or a
+    spawn whose `node` is not a string defines nothing and is reported unreadable here (a list or
+    an object as a node raised, unhashable, out of the verifier). A second definition of a node
+    is left out of these maps, so every later check reads the first one, and `verify_bundle`'s
+    monotonicity check reports it. `parent` maps a spawned node to its `parent` member as
+    written, whatever its type; whether that names a node defined earlier is judged there too.
 
     The fourth element is the `root`/`spawn` entry each node was DEFINED by, so a node-level
     failure (monotonicity) can name the seq of the delegation that caused it, not only the node.
     These two failures are the one place where the historical string does not start with a
     reason token — it names the node — so their `reason` is stated explicitly rather than parsed
     out of the message."""
-    auth: dict[str, Authority] = {}; parent: dict[str, str] = {}; fail = _FailureLog()
+    auth: dict[str, Authority] = {}; parent: dict[str, object] = {}; fail = _FailureLog()
     defined_by: dict[str, dict] = {}
     for e in entries:
         ev = e.get("event")
+        if ev not in ("root", "spawn"):
+            continue
+        node = e.get("node")
+        if not isinstance(node, str):
+            if ev == "root":
+                fail.add("unreadable_authority",
+                         f"root {_shown(node)}: unreadable authority (node is not a string)",
+                         seq=e.get("seq"), node=node, entry=e)
+            else:
+                fail.add("unreadable_granted",
+                         f"spawn {_shown(node)}: unreadable granted (node is not a string)",
+                         seq=e.get("seq"), node=node, entry=e)
+            continue
+        if node in defined_by:
+            continue                          # defined twice: verify_bundle reports it
+        defined_by[node] = e
         if ev == "root":
-            defined_by[e.get("node")] = e
-            try: auth[e["node"]] = Authority.from_wire(e["authority"])
-            except Exception as exc: fail.add("unreadable_authority", f"root {_shown(e.get('node'))}: unreadable authority ({exc})", seq=e.get("seq"), node=e.get("node"), entry=e)  # noqa: BLE001
-        elif ev == "spawn":
-            defined_by[e.get("node")] = e
-            parent[e["node"]] = e.get("parent")
-            try: auth[e["node"]] = Authority.from_wire(e["granted"])
-            except Exception as exc: fail.add("unreadable_granted", f"spawn {_shown(e.get('node'))}: unreadable granted ({exc})", seq=e.get("seq"), node=e.get("node"), entry=e)  # noqa: BLE001
+            try: auth[node] = Authority.from_wire(e["authority"])
+            except Exception as exc: fail.add("unreadable_authority", f"root {_shown(node)}: unreadable authority ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
+        else:
+            parent[node] = e.get("parent")
+            try: auth[node] = Authority.from_wire(e["granted"])
+            except Exception as exc: fail.add("unreadable_granted", f"spawn {_shown(node)}: unreadable granted ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
     return auth, parent, fail, defined_by
+
+
+def _note_revoked(entry: dict, revoked_at: dict) -> None:
+    """Record the nodes a `kill` entry revokes, node -> that kill's seq; the first kill stands.
+    Only string ids in a list count: anything else names no node."""
+    revoked = entry.get("revoked")
+    if isinstance(revoked, list):
+        for node in revoked:
+            if isinstance(node, str) and node not in revoked_at:
+                revoked_at[node] = entry.get("seq")
 
 
 def _ceiling_in_finding(ceiling) -> str:
@@ -344,7 +375,11 @@ def delegation_graph(bundle: dict) -> dict:
     meta: dict[str, dict] = {}
     for e in entries:
         ev = e.get("event"); n = e.get("node")
+        if not isinstance(n, str) and ev != "kill":
+            continue                          # a node id is a string; anything else names no node
         if ev in ("root", "spawn"):
+            if n in meta:
+                continue                      # defined once: the first definition stands
             meta[n] = {"agent": e.get("agent"), "task": e.get("task"), "parent": e.get("parent"),
                        "scopes": sorted(auth[n].scopes) if n in auth else [], "allows": 0, "denies": 0, "revoked": False, "complete": False,
                        "denials_by_disposition": {}}
@@ -355,7 +390,9 @@ def delegation_graph(bundle: dict) -> dict:
             meta[n]["denials_by_disposition"][d] = meta[n]["denials_by_disposition"].get(d, 0) + 1
         elif ev == "done" and n in meta: meta[n]["complete"] = True
         elif ev == "kill":
-            for r in (e.get("revoked") or []):
+            revoked: dict = {}
+            _note_revoked(e, revoked)
+            for r in revoked:
                 if r in meta: meta[r]["revoked"] = True
     return {"chain_id": bundle.get("chain_id"), "nodes": meta,
             "edges": [{"parent": p, "child": c} for c, p in parent.items() if p]}
@@ -1400,17 +1437,22 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
     for e in entries:
         ev = e.get("event")
         if ev == "root":
-            nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                nodes.add(e["node"])
             err = _validate_root(e)
             if err:
                 failures.add("invalid_root", f"invalid_root: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), entry=e)
         elif ev == "spawn":
-            nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                nodes.add(e["node"])
         elif ev == "done":
-            finalized_nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                finalized_nodes.add(e["node"])
         elif ev == "kill":
-            revoked_nodes.update(e.get("revoked") or [])
+            killed: dict = {}
+            _note_revoked(e, killed)
+            revoked_nodes.update(killed)
             err = _validate_kill(e)
             if err:
                 failures.add("invalid_kill", f"invalid_kill: {err} (seq {_shown(_int_or(e.get('seq')))})",
@@ -1512,7 +1554,8 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             per_call[cid] = "unobserved"
         else:
             per_call[cid] = "unaccounted"
-            node_pending.setdefault(allow_e.get("node"), []).append(cid)
+            pending_node = allow_e.get("node") if isinstance(allow_e.get("node"), str) else None
+            node_pending.setdefault(pending_node, []).append(cid)
 
     # Per-node lifecycle. "revoked" (clean kill, nothing pending) is not one of the spec's three
     # named states (finalized/in_progress/revoked_with_pending) — it names the gap those three
@@ -1698,6 +1741,19 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
                     seq=e.get("seq"), node=e.get("node"), entry=e)
     checks["ledger_fields"] = unknown_ok
 
+    # (0b3) a node id is a string (the schema's `node`). A root, a spawn and an allow are judged
+    # by the checks that read their node, below; any other entry that carries a node which is a
+    # list, an object, a number or a bool is reported here, never read by projection and never
+    # used as a key, where a list or an object raised.
+    for e in entries:
+        if e.get("event") in ("root", "spawn", "allow") or e.get("node") is None:
+            continue
+        if not isinstance(e["node"], str):
+            log.add("invalid_node",
+                    f"invalid_node: seq={_shown(_int_or(e.get('seq')))} event={e.get('event')!r} "
+                    f"carries node {_shown(e['node'])}, which is not a string",
+                    seq=e.get("seq"), node=e["node"], entry=e)
+
     # (0c) independently retained expected anchor/head: verified against the BUNDLE's actual
     # computed head, never against its own (possibly forged) enclosed anchor.
     if expected_anchor is not None or expected_head is not None:
@@ -1757,22 +1813,59 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     auth, parent, afail, defined_by = _node_authorities(entries)
     log.extend(afail)
 
-    # (2) monotonicity: every child ⊆ its parent
+    # (2) monotonicity: every child ⊆ its parent, read in ledger order. Every spawn is checked,
+    # and the node it names as `parent` has to be one the root or an EARLIER spawn defined, not
+    # revoked by an earlier kill, and not the spawn's own node. Through 0.18.0 a spawn whose
+    # parent was absent, null, or named no node in the bundle was skipped, so a child widened past
+    # the authority it was really given verified OK; the process being watched writes that field.
+    # A node is defined once: a second definition is a failure too, since only one of the two
+    # could be read.
     mono = True
-    for node, pid in parent.items():
-        if pid is None or pid not in auth or node not in auth:
+    defined_at: dict = {}         # node -> the entry that defined it, as of this point
+    revoked_at: dict = {}         # node -> the seq of the kill that revoked it
+    for e in entries:
+        ev = e.get("event")
+        if ev == "kill":
+            _note_revoked(e, revoked_at)
             continue
-        # 0.11.x: the subsumption relation ALONE decides. This used to be gated on a literal,
-        # non-wildcard-aware scope difference, which silently accepted a delegation that widened
-        # only ttl or a ceiling whenever the child's scopes happened to be literally a subset of
-        # the parent's — the child was more powerful and the bundle verified clean. The relation
-        # already compares every dimension; `_monotonicity_detail` names the one that failed.
-        if not auth[node].is_narrower_than(auth[pid]):
+        if ev not in ("root", "spawn"):
+            continue
+        node = e.get("node")
+        if not isinstance(node, str):
+            continue                          # unreadable, reported by _node_authorities
+        if node in defined_at:
             mono = False
-            spawn_e = defined_by.get(node) or {}
             log.add("monotonicity",
-                    f"monotonicity: {_shown(node)} not ⊆ parent {_shown(pid)} ({_monotonicity_detail(auth[node], auth[pid])})",
-                    seq=spawn_e.get("seq"), node=node, entry=defined_by.get(node))
+                    f"monotonicity: {_shown(node)} is defined a second time in this bundle "
+                    f"(first at seq {_shown(_int_or(defined_at[node].get('seq')))})",
+                    seq=e.get("seq"), node=node, entry=e)
+            continue
+        if ev == "spawn":
+            pid = e.get("parent")
+            if not isinstance(pid, str) or pid not in defined_at:
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} names no parent defined earlier in this "
+                        f"bundle (parent {_shown(pid)})",
+                        seq=e.get("seq"), node=node, entry=e)
+            elif pid in revoked_at:
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} is spawned from {_shown(pid)} after "
+                        f"{_shown(pid)} was revoked at seq {_shown(_int_or(revoked_at[pid]))}",
+                        seq=e.get("seq"), node=node, entry=e)
+            # 0.11.x: the subsumption relation ALONE decides. This used to be gated on a literal,
+            # non-wildcard-aware scope difference, which silently accepted a delegation that
+            # widened only ttl or a ceiling whenever the child's scopes happened to be literally a
+            # subset of the parent's. The relation compares every dimension, and
+            # `_monotonicity_detail` names the one that failed. An unreadable authority on either
+            # side is reported by _node_authorities and fails this check on its own.
+            elif pid in auth and node in auth and not auth[node].is_narrower_than(auth[pid]):
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} not ⊆ parent {_shown(pid)} ({_monotonicity_detail(auth[node], auth[pid])})",
+                        seq=e.get("seq"), node=node, entry=e)
+        defined_at[node] = e
     checks["monotonicity"] = mono and not afail
 
     # (3) containment: every allow action's scope within the acting node's authority.
@@ -1782,9 +1875,21 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # would report a violation the entry never asserted. Such entries are counted as UNGATED and
     # reported as their own number instead: a reader sees how much of the run was actually
     # measured, which is the honest answer and never a silent one.
+    # Read in ledger order, like monotonicity: an allow is judged against a node defined EARLIER
+    # (one defined only later is unknown at that point), and an allow on a node an earlier kill
+    # revoked is outside its authority, since a revoked node holds none.
     contained = True; actions = 0; ungated = 0
+    known: set = set(); killed_at: dict = {}
     for e in entries:
-        if e.get("event") != "allow":
+        ev = e.get("event")
+        if ev in ("root", "spawn"):
+            if isinstance(e.get("node"), str):
+                known.add(e["node"])
+            continue
+        if ev == "kill":
+            _note_revoked(e, killed_at)
+            continue
+        if ev != "allow":
             continue
         if _is_known_policy(e.get("policy")):
             # Only a policy value the format DEFINES buys the exemption. An entry carrying
@@ -1794,16 +1899,25 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             continue
         actions += 1
         node = e.get("node"); scope = e.get("scope"); ctx = e.get("context") or {}
-        a = auth.get(node)
+        a = auth.get(node) if isinstance(node, str) and node in known else None
         if a is None:
             contained = False
             log.add("containment", f"containment: allow on unknown node {_shown(node)}",
                     seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
             continue
+        if node in killed_at:
+            contained = False
+            log.add("containment",
+                    f"containment: allow of {scope!r} on {_shown(node)} after {_shown(node)} was "
+                    f"revoked at seq {_shown(_int_or(killed_at[node]))}",
+                    seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
+            continue
         # A scope that is not a string is no scope the node can hold. Against a wildcard it
         # raised (`startswith` on an int or a None), out of the verifier; against a plain scope
-        # it already failed here. It is this finding either way.
-        if not isinstance(scope, str) or not a.permits(scope, ctx):
+        # it already failed here. A context that is not an object cannot be read against the
+        # node's ceilings (`dict(ctx)` raised on a list). Either is this finding.
+        if (not isinstance(scope, str) or not isinstance(ctx, Mapping)
+                or not a.permits(scope, ctx)):
             contained = False
             log.add("containment",
                     f"containment: allow of {scope!r} on {_shown(node)} outside its authority {sorted(a.scopes)}",
