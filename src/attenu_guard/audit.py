@@ -200,7 +200,14 @@ class AuditLog:
         except KeyError as exc:
             return False, f"anchor missing field {exc.args[0]}"
         body = {k: v for k, v in anchor.items() if k not in ("kid", "sig", "verified")}
-        signing_input = canonical.dumps(body)
+        try:
+            signing_input = canonical.dumps(body)
+        except canonical.UnsafeIntegerError:
+            # An integer past 2**53 has no RFC 8785 form, so no signer produced an anchor carrying
+            # one (`anchor()` refuses to): what arrived is not a signed anchor, and the verdict is
+            # that its signature does not verify. Raising here crashed the verifier on input from
+            # the bundle. Signing still raises, in `anchor()` and `evidence.export_bundle`.
+            return False, "anchor signature invalid"
         try:
             sig = bytes.fromhex(anchor.get("sig", ""))
         except ValueError:
@@ -239,7 +246,15 @@ class AuditLog:
             payload = {k: v for k, v in e.items() if k != "hash"}
             if payload.get("prev_hash") != prev:
                 return False, f"prev_hash mismatch at seq {expected_seq}"
-            if _hash(prev, payload) != stored:
+            try:
+                computed = _hash(prev, payload)
+            except canonical.UnsafeIntegerError:
+                # An integer past 2**53 has no RFC 8785 form, so this entry cannot be the one its
+                # hash was computed over (`append` refuses to write one): the chain does not
+                # reproduce here, which is the existing finding, at this entry. Raising crashed
+                # the verifier on input from the bundle; writing still raises.
+                return False, f"hash mismatch at seq {expected_seq}"
+            if computed != stored:
                 return False, f"hash mismatch at seq {expected_seq}"
             prev = stored
             expected_seq += 1

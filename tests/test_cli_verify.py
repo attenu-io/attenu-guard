@@ -787,6 +787,86 @@ class TestEntriesAttribution(unittest.TestCase):
 
 
 # =========================================================================
+# An integer past 2**53 from the bundle fails closed, in one line, never a traceback
+# =========================================================================
+class TestUnsafeIntegers(unittest.TestCase):
+    """RFC 8785 has no form for an integer past 2**53, so `canonical.dumps` refuses one, and
+    under verification that refusal escaped as a traceback (exit 1: closed, but a crash). A
+    producer never writes such a value, so verification reports what it is: an anchor whose
+    signature does not verify, or a ledger entry the chain does not reproduce at. Writing and
+    signing still raise."""
+
+    BIG = 2 ** 53 + 1                     # 9007199254740993
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _bundle(self, edit) -> str:
+        bundle = json.loads((SAMPLES / "clean.bundle.json").read_text())
+        edit(bundle)
+        path = self.td / "bundle.json"
+        path.write_text(json.dumps(bundle))
+        return str(path)
+
+    def test_an_anchor_integer_past_2_53_is_a_signature_that_does_not_verify(self):
+        head_ok = "integrity=True monotonicity=True containment=True anchor=not checked nodes=3 actions_checked=2"
+        head_failed = "integrity=False monotonicity=True containment=True anchor=FAILED nodes=3 actions_checked=2"
+        for member, with_key, without_key in (
+                ("seq",
+                 [head_failed, "  - integrity(anchor): anchor signature invalid", "FAILED"],
+                 (0, [head_ok, "OK"])),
+                ("v",
+                 [head_failed, f"  - anchor_version_mismatch: anchor v={self.BIG} != bundle v=1",
+                  "  - integrity(anchor): anchor signature invalid", "FAILED"],
+                 (2, [head_ok, f"  - anchor_version_mismatch: anchor v={self.BIG} != bundle v=1",
+                      "FAILED"]))):
+            with self.subTest(member=member):
+                path = self._bundle(lambda b: b["anchor"].update({member: self.BIG}))
+                rc, out = run("verify", path, "--hs256-key", KEY)
+                self.assertEqual((rc, out.splitlines()), (2, with_key))
+                # Without a key the anchor is not checked, so its seq is not read at all.
+                rc, out = run("verify", path)
+                self.assertEqual((rc, out.splitlines()), without_key)
+
+    def test_a_ledger_integer_past_2_53_is_a_hash_mismatch_at_its_entry(self):
+        from attenu_guard import AuditLog
+        path = self._bundle(lambda b: b["entries"][1].update(ts=self.BIG))
+        rc, out = run("verify", path, "--hs256-key", KEY)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.splitlines()[1:], ["  - integrity: hash mismatch at seq 1",
+                                                "  - integrity(anchor): hash mismatch at seq 1",
+                                                "FAILED"])
+        rc, out = run("verify", path, "--entries")
+        self.assertEqual(rc, 2)
+        self.assertIn("\n  - integrity: hash mismatch at seq 1\nFAILED\n", out)
+        self.assertEqual([line for line in out.splitlines() if "failed=" in line],
+                         ["  seq=1 event=spawn node=chain:n1 state=process-asserted failed=integrity"])
+        # The plain ledger, and the library call under both.
+        entries = json.loads(Path(path).read_text())["entries"]
+        self.assertEqual(AuditLog.verify(entries), (False, "hash mismatch at seq 1"))
+        log = self.td / "l.jsonl"
+        log.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        self.assertEqual(run("verify", str(log)), (2, "TAMPERED — hash mismatch at seq 1\n"))
+
+    def test_writing_and_signing_still_refuse_it(self):
+        from attenu_guard import AuditLog, canonical
+        log = AuditLog()
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            log.append("allow", self.BIG)
+        self.assertEqual(log.entries, [])                 # nothing was committed
+        log.append("root", 0, chain_id="c", node="c:n0")
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            log.anchor(HS256TestSigner(b"k", kid="k"), ts=self.BIG)
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            evidence.export_bundle(log, HS256TestSigner(b"k", kid="k"), ts=self.BIG)
+
+
+# =========================================================================
 # The display rule itself
 # =========================================================================
 class TestDisplayRule(unittest.TestCase):
