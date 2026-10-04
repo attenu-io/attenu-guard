@@ -56,6 +56,29 @@ An envelope is a witness's signature over the identity of one ledger entry, carr
 `envelopes` array. Whose signature counts is yours to decide, so the keys come from you and never from the bundle:
 `witness_keys.json` is `[{"kid": "…", "alg": "EdDSA", "public_key_hex": "…"}]`. Without the flag every envelope
 fails `envelope_unknown_witness` — an unknown key is not a trusted one — and the output names the flag to pass.
+A row may also carry `"not_after": "2026-10-05T00:00:00Z"` (RFC 3339, UTC). From that time on the key is not trusted,
+and its envelopes fail `envelope_unknown_witness` with the expiry in the message. A row carries nothing else, and a kid
+has one row: a file that breaks either rule is refused in one line naming the file and the kid, with exit 2.
+
+A witness signature covers the entry's hash and chain position plus what the witness-key holder observed (result,
+time, method). It does not attest that the action was permitted, so an entry can be witness-signed and still fail
+containment. Add `--entries` to see, entry by entry, the envelope state and the checks that failed on it:
+
+```bash
+pipx run attenu-guard verify witnessed.bundle.json --witness-keys witness_keys.json --entries
+```
+
+After the usual output it prints `entries:` and one line per entry. In a bundle where the process appended an allow
+outside its node's authority, in chain order, and the witness signed it, that entry's line reads:
+
+```
+  seq=4 event=allow node=witness-custody-run:n1 scope=web.search state=witness-signed observed=indeterminate witness=<kid> failed=containment
+```
+
+Each line is `key=value` tokens split by single spaces, and the key is the text before the first `=`, so
+`scope=failed=containment` is the scope "failed=containment". A value never contains a space. A value that starts
+with `"` is a JSON string, which is how a value outside plain printable ASCII is printed, and an entry without a seq
+prints `seq=null`.
 
 ## What the bundle is
 

@@ -20,6 +20,10 @@ parse them); `failure_details` is its machine-readable twin, one dict per string
 count: `{"reason", "seq", "node", "call_id", "detail"}`. It exists so a conformance suite can assert
 WHICH check failed and WHERE, not merely that something did — see tests/vectors/bundles/.
 
+A value the bundle supplies and a message prints without quotes goes through `_display.shown`: as
+it is when it is printable ASCII without space, `"` or `\\`, as escaped JSON otherwise. No message
+spans two lines, so a node named "n1\\nOK" cannot print a line of its own under a failed check.
+
 Stdlib-only; `signer` is any `wire` signer (Ed25519 in production). No engine state is consulted — the bundle
 is the whole input, which is the point.
 """
@@ -29,7 +33,9 @@ import re
 from typing import Any, Mapping
 
 from attenu_guard import canonical
+from attenu_guard._display import escaped as _escaped, shown as _shown
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
+from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
 from attenu_guard.ceilings import describe as _describe_ceiling
 from attenu_guard.reasons import Capture, BodyState, Policy
@@ -83,7 +89,8 @@ class EvidenceLeakError(RuntimeError):
 
 
 class _FailureLog:
-    """The verifier's failure list, kept in two shapes that cannot drift apart.
+    """The verifier's failure list, kept in two shapes that cannot drift apart, and the entry
+    each failure is about.
 
     `messages` is the string list `verify_bundle` has always returned as `failures`; those exact
     strings are a published contract (other implementations parse them), so they are never
@@ -95,6 +102,13 @@ class _FailureLog:
          "call_id":<the call this failure is about, or None>,
          "detail": <the string, verbatim>}
 
+    `about` is a third list in step with those two: the ledger entry each failure is about (the
+    entry object itself), or None for a failure about no single entry. It stays out of
+    `details`, whose member set is the published contract, and `entry_indices` turns it into
+    positions in the bundle's `entries`, which `verify_bundle` reports as `failure_entries`. A
+    position is exact where a seq is not: an entry's seq can be missing, null, a bool or a
+    duplicate, and its index is still its own.
+
     Every failure in this module goes through `add()`, so a new check cannot add a message
     without its twin: tests/test_bundle_vectors.py greps this file for a direct append to a
     failure list and fails on one, and asserts the two lists stay in step at every site."""
@@ -102,15 +116,25 @@ class _FailureLog:
     def __init__(self) -> None:
         self.messages: list[str] = []
         self.details: list[dict] = []
+        self.about: list = []
 
-    def add(self, reason: str, detail: str, *, seq=None, node=None, call_id=None) -> None:
+    def add(self, reason: str, detail: str, *, seq=None, node=None, call_id=None,
+            entry=None) -> None:
         self.messages.append(detail)
-        self.details.append({"reason": reason, "seq": seq, "node": node,
+        self.details.append({"reason": reason, "seq": _int_or(seq), "node": node,
                              "call_id": call_id, "detail": detail})
+        self.about.append(entry)
 
     def extend(self, other: "_FailureLog") -> None:
         self.messages += other.messages
         self.details += other.details
+        self.about += other.about
+
+    def entry_indices(self, entries: list) -> list:
+        """For each failure, the index in `entries` of the entry it is about, or None. Found by
+        identity: every entry a check reports on is one of these objects, never a copy."""
+        at = {id(e): i for i, e in enumerate(entries)}
+        return [None if e is None else at.get(id(e)) for e in self.about]
 
     def __len__(self) -> int:
         return len(self.messages)
@@ -222,27 +246,84 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
 
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dict]:
     """(node -> Authority, node -> parent, failures, node -> defining entry) reconstructed from
-    root/spawn events, no engine state.
+    root/spawn events in ledger order, no engine state.
+
+    A node id is a string, and a node is defined once, by the root or by one spawn. A root or a
+    spawn whose `node` is not a string defines nothing and is reported unreadable here (a list or
+    an object as a node raised, unhashable, out of the verifier). A second definition of a node
+    is left out of these maps, so every later check reads the first one, and `verify_bundle`'s
+    monotonicity check reports it. `parent` maps a spawned node to its `parent` member as
+    written, whatever its type; whether that names a node defined earlier is judged there too.
 
     The fourth element is the `root`/`spawn` entry each node was DEFINED by, so a node-level
     failure (monotonicity) can name the seq of the delegation that caused it, not only the node.
     These two failures are the one place where the historical string does not start with a
     reason token — it names the node — so their `reason` is stated explicitly rather than parsed
     out of the message."""
-    auth: dict[str, Authority] = {}; parent: dict[str, str] = {}; fail = _FailureLog()
+    auth: dict[str, Authority] = {}; parent: dict[str, object] = {}; fail = _FailureLog()
     defined_by: dict[str, dict] = {}
     for e in entries:
         ev = e.get("event")
+        if ev not in ("root", "spawn"):
+            continue
+        node = e.get("node")
+        if not isinstance(node, str):
+            if ev == "root":
+                fail.add("unreadable_authority",
+                         f"root {_shown(node)}: unreadable authority (node is not a string)",
+                         seq=e.get("seq"), node=node, entry=e)
+            else:
+                fail.add("unreadable_granted",
+                         f"spawn {_shown(node)}: unreadable granted (node is not a string)",
+                         seq=e.get("seq"), node=node, entry=e)
+            continue
+        if node in defined_by:
+            continue                          # defined twice: verify_bundle reports it
+        defined_by[node] = e
         if ev == "root":
-            defined_by[e.get("node")] = e
-            try: auth[e["node"]] = Authority.from_wire(e["authority"])
-            except Exception as exc: fail.add("unreadable_authority", f"root {e.get('node')}: unreadable authority ({exc})", seq=e.get("seq"), node=e.get("node"))  # noqa: BLE001
-        elif ev == "spawn":
-            defined_by[e.get("node")] = e
-            parent[e["node"]] = e.get("parent")
-            try: auth[e["node"]] = Authority.from_wire(e["granted"])
-            except Exception as exc: fail.add("unreadable_granted", f"spawn {e.get('node')}: unreadable granted ({exc})", seq=e.get("seq"), node=e.get("node"))  # noqa: BLE001
+            try: auth[node] = Authority.from_wire(e["authority"])
+            except Exception as exc: fail.add("unreadable_authority", f"root {_shown(node)}: unreadable authority ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
+        else:
+            parent[node] = e.get("parent")
+            try: auth[node] = Authority.from_wire(e["granted"])
+            except Exception as exc: fail.add("unreadable_granted", f"spawn {_shown(node)}: unreadable granted ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
     return auth, parent, fail, defined_by
+
+
+def _note_revoked(entry: dict, revoked_at: dict) -> None:
+    """Record the nodes a `kill` entry revokes, node -> that kill's seq; the first kill stands.
+    Only string ids in a list count: anything else names no node."""
+    revoked = entry.get("revoked")
+    if isinstance(revoked, list):
+        for node in revoked:
+            if isinstance(node, str) and node not in revoked_at:
+                revoked_at[node] = entry.get("seq")
+
+
+def _ceiling_in_finding(ceiling) -> str:
+    """A ceiling as a finding message prints it: `ceilings.describe`'s text, with every value the
+    bundle supplied printed through `_shown`.
+
+    `describe()` itself is left alone, so dashboards and `Authority.describe()` print a region
+    called "São Paulo" as it is. The built-ins are rendered here in describe()'s own shape, and
+    for values in the bare set the two agree character for character (tests/test_cli_verify.py
+    pins that for each built-in). A ceiling this build does not define, or the fail-closed
+    unknown one, prints its own description as it is when that is printable ASCII, spaces
+    included, and as escaped JSON otherwise. Either way the finding stays on one line."""
+    from attenu_guard import ceilings as _c
+    kind = type(ceiling)
+    bound = {_c.RowLimit: "max_rows", _c.SpendCap: "max_spend", _c.CallLimit: "max_calls",
+             _c.EgressRank: "level"}.get(kind)
+    if bound is not None:
+        return f"{_shown(ceiling.key)}<={_shown(getattr(ceiling, bound))}"
+    if kind is _c.Allow or kind is _c.Deny:
+        members = ceiling.one_of if kind is _c.Allow else ceiling.not_one_of
+        listed = ", ".join(_shown(v) for v in sorted(members, key=str))
+        return f"{_shown(ceiling.key)} {'in' if kind is _c.Allow else 'not in'} [{listed}]"
+    if kind is _c.Prefix:
+        return f"{_shown(ceiling.key)} startswith {_shown(ceiling.prefix)}"
+    text = _describe_ceiling(ceiling)
+    return text if all(" " <= ch <= "~" for ch in text) else _escaped(text)
 
 
 def _monotonicity_detail(child: Authority, parent: Authority) -> str:
@@ -272,16 +353,16 @@ def _monotonicity_detail(child: Authority, parent: Authority) -> str:
     for key, parent_ceiling in sorted(((c.key, c) for c in parent.ceilings), key=lambda kv: kv[0]):
         child_ceiling = child_by_key.get(key)
         if child_ceiling is None:
-            return f"ceiling {key} unbounded, parent holds {_describe_ceiling(parent_ceiling)}"
+            return f"ceiling {_shown(key)} unbounded, parent holds {_ceiling_in_finding(parent_ceiling)}"
         if not parent_ceiling.subsumes(child_ceiling):
-            return (f"ceiling {_describe_ceiling(child_ceiling)} looser than parent "
-                    f"{_describe_ceiling(parent_ceiling)}")
+            return (f"ceiling {_ceiling_in_finding(child_ceiling)} looser than parent "
+                    f"{_ceiling_in_finding(parent_ceiling)}")
 
     if parent.ttl is not None:
         if child.ttl is None:
-            return f"ttl unbounded, parent {parent.ttl}"
+            return f"ttl unbounded, parent {_shown(parent.ttl)}"
         if child.ttl > parent.ttl:
-            return f"ttl {child.ttl} > parent {parent.ttl}"
+            return f"ttl {_shown(child.ttl)} > parent {_shown(parent.ttl)}"
 
     return "child not narrower than parent"
 
@@ -294,7 +375,11 @@ def delegation_graph(bundle: dict) -> dict:
     meta: dict[str, dict] = {}
     for e in entries:
         ev = e.get("event"); n = e.get("node")
+        if not isinstance(n, str) and ev != "kill":
+            continue                          # a node id is a string; anything else names no node
         if ev in ("root", "spawn"):
+            if n in meta:
+                continue                      # defined once: the first definition stands
             meta[n] = {"agent": e.get("agent"), "task": e.get("task"), "parent": e.get("parent"),
                        "scopes": sorted(auth[n].scopes) if n in auth else [], "allows": 0, "denies": 0, "revoked": False, "complete": False,
                        "denials_by_disposition": {}}
@@ -305,7 +390,9 @@ def delegation_graph(bundle: dict) -> dict:
             meta[n]["denials_by_disposition"][d] = meta[n]["denials_by_disposition"].get(d, 0) + 1
         elif ev == "done" and n in meta: meta[n]["complete"] = True
         elif ev == "kill":
-            for r in (e.get("revoked") or []):
+            revoked: dict = {}
+            _note_revoked(e, revoked)
+            for r in revoked:
                 if r in meta: meta[r]["revoked"] = True
     return {"chain_id": bundle.get("chain_id"), "nodes": meta,
             "edges": [{"parent": p, "child": c} for c, p in parent.items() if p]}
@@ -358,6 +445,13 @@ def denials(bundle: dict) -> list[dict]:
 # An envelope is never REQUIRED. An absent one is the status quo and changes
 # nothing. A present one has to verify: a broken envelope lands in the same
 # failure list as the chain-level checks and the bundle rejects.
+#
+# What a witness signature covers: the entry's hash and its chain position
+# (`chain_id`, `node`, `seq`, `event`, and `call_id` on an allow), plus what the
+# witness-key holder observed (`observed`: result, time, method). It does not
+# attest that the action was permitted. Whether an entry was within its node's
+# authority is answered by containment and monotonicity, from the ledger, and a
+# `witness-signed` entry can fail either of them.
 # =========================================================================
 
 #: The only envelope version this build knows. The version commits the exact signed member set
@@ -384,9 +478,11 @@ ENVELOPE_WITNESS_MEMBERS = frozenset({"kid", "alg"})
 ENVELOPE_RESULTS = ("matched", "not_matched", "indeterminate")
 #: The JOSE identifier for Ed25519, and the only `witness.alg` v1 defines.
 ENVELOPE_ALG = "EdDSA"
-#: The two per-entry states a verifier reports. `witness-signed` says where the signature came
-#: from and NOTHING about authority — the witness is whoever holds the key `witness.kid` names,
-#: which nothing in the envelope makes the delegation parent.
+#: The two per-entry states a verifier reports. `witness-signed` says an envelope over the entry
+#: verified under the trusted key `witness.kid` names. That signature covers the entry's hash and
+#: chain position plus what the witness-key holder observed (result, time, method); it does not
+#: attest that the action was permitted. The witness is whoever holds that key, which nothing in
+#: the envelope makes the delegation parent.
 WITNESS_SIGNED = "witness-signed"
 #: No envelope, or one that does not verify. Every entry in a bundle without envelopes is this.
 #: It covers two facts a bundle does not separate — a hop nobody undertook to cover, and a hop a
@@ -448,38 +544,87 @@ def envelope_signing_input(envelope: Mapping) -> bytes:
     return canonical.dumps({k: v for k, v in envelope.items() if k != "sig"})
 
 
-def _recomputed_hashes(entries: list[dict]) -> dict:
-    """seq -> the entry's hash RECOMPUTED from the bundle, never read off the entry.
+def _recomputed_hashes(entries: list[dict]) -> list:
+    """Each entry's hash RECOMPUTED from the bundle, by index, never read off the entry.
 
     `entry_hash` in a subject is checked against this. The recomputation walks the ledger from
     GENESIS exactly as `AuditLog.verify` does, so an entry whose stored `hash` was replaced does
-    not get to supply the value it is compared against."""
-    out: dict = {}
+    not get to supply the value it is compared against. By index, not by seq: an entry's seq
+    can be missing, another entry's, or a bool that Python takes for an integer."""
+    out: list = []
     prev = _GENESIS
-    for i, e in enumerate(entries):
+    for e in entries:
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
             computed = _rehash(prev, payload)
         except Exception:  # noqa: BLE001 - an unhashable payload has no recomputable hash
             computed = None
-        out[e.get("seq", i)] = computed
+        out.append(computed)
         prev = computed if computed is not None else _GENESIS
     return out
+
+
+def _subject_index(entries: list[dict]) -> dict:
+    """subject.seq -> the index of the entry an envelope naming that seq covers.
+
+    An entry is keyed by its own seq when that is an integral number and not a bool, as the
+    schema's integer type defines (`_integral`: `1.0` is 1), and by its index when it has no seq
+    member at all. An entry whose seq is a bool, a string, null, or a number that is fractional
+    or not finite is keyed by nothing, so no envelope covers it: keyed by the raw value,
+    `"seq": true` took the envelope written for seq 1, because `True == 1` and
+    `hash(True) == hash(1)` in Python. Where two entries share a key the later one is covered,
+    as it always was."""
+    keyed: dict = {}
+    for i, e in enumerate(entries):
+        if "seq" not in e:
+            keyed[i] = i
+        else:
+            seq = _integral(e["seq"])
+            if seq is not None:
+                keyed[seq] = i
+    return keyed
+
+
+def _same_number(a, b) -> bool:
+    """Two `seq` or `v` values are the same: equal integers when either is integral
+    (`_integral`), so `1.0` is 1; otherwise the same value of the same type, so `true` is not 1
+    and `"1"` is not 1, where Python's `==` says both are."""
+    ia, ib = _integral(a), _integral(b)
+    if ia is not None or ib is not None:
+        return ia == ib
+    return type(a) is type(b) and a == b
+
+
+def _version_order(value):
+    """Sort key for the versions `mixed_entry_versions` lists: numbers in numeric order, as
+    before, and anything else after them by its text, so a bool beside a string cannot raise."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (0, value, "")
+    return (1, 0, repr(value))
+
+
+def _state_key(entry: dict, index: int):
+    """Where `states` and `results` file an entry: its seq when it has one, as the integer when
+    it is integral, and its index when it has none."""
+    return _int_or(entry["seq"]) if "seq" in entry else index
 
 
 def envelope_subject(entries: list[dict], seq: int) -> dict:
     """The v1 subject for the entry at `seq`, recomputed from the ledger.
 
-    Raises `ValueError` when `seq` names no entry, or names one whose `event` v1 defines no
-    subject for."""
-    entry = next((e for e in entries if e.get("seq") == seq), None)
-    if entry is None:
+    `seq` finds its entry the way a verifier finds it (`_subject_index`), so the subject is the
+    one the verifier will check it against. Raises `ValueError` when `seq` names no entry, or
+    names one whose `event` v1 defines no subject for."""
+    at = _subject_index(entries).get(_integral(seq)) if _is_seq(seq) else None
+    if at is None:
         raise ValueError(f"no entry at seq {seq!r}")
+    seq = _integral(seq)
+    entry = entries[at]
     event = entry.get("event")
     if event not in ENVELOPE_SUBJECT_MEMBERS:
         raise ValueError(f"envelope v{ENVELOPE_VERSION} defines no subject for event {event!r}")
     subject = {"chain_id": entry.get("chain_id"), "node": entry.get("node"), "seq": seq,
-               "entry_hash": _recomputed_hashes(entries)[seq], "event": event}
+               "entry_hash": _recomputed_hashes(entries)[at], "event": event}
     if event == "allow":
         subject["call_id"] = entry.get("call_id")
     return subject
@@ -531,33 +676,129 @@ def _witness_public_key(kid, value) -> bytes:
     raise ValueError(f"witness key {kid!r}: expected 64 hex characters or 32 bytes")
 
 
-def _trusted_witnesses(witness_keys) -> dict:
-    """kid -> (alg, raw public key bytes), from the vector file's own `witness_keys` shape
-    (`[{"kid", "alg", "public_key_hex"}]`) or from a plain `{kid: public_key_bytes}` mapping.
+#: RFC 3339 `date-time` in UTC: `YYYY-MM-DDTHH:MM:SS`, an optional fraction, and `Z`. RFC 3339
+#: allows `t` and `z` in lower case, so they are accepted too. A numeric offset, even `+00:00`, is
+#: not: a trust-set row says UTC in the one spelling that cannot be misread as local time. The
+#: digits are `[0-9]`, never `\d`: in a str pattern `\d` matches every Unicode decimal digit, and
+#: `int()` reads them, so "２０２６-…" in fullwidth digits would have parsed. RFC 3339's DIGIT is
+#: ASCII, and the TypeScript implementation refuses the rest.
+_RFC3339_UTC = re.compile(
+    r"([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt]([0-9]{2}):([0-9]{2}):([0-9]{2})(\.[0-9]+)?[Zz]")
+
+
+def _rfc3339_utc(value):
+    """`value` as an aware UTC `datetime`, or None when it is not an RFC 3339 UTC date-time.
+
+    Hand-parsed rather than `datetime.fromisoformat`, which reads a trailing `Z` only from
+    Python 3.11 and this package supports 3.9. A fraction is kept to the microsecond and the
+    digits past it are dropped. An out-of-range field (month 13, February 30, second 60) is
+    None: `datetime` cannot represent a leap second, so this does not accept one."""
+    from datetime import datetime, timezone
+    m = _RFC3339_UTC.fullmatch(value) if isinstance(value, str) else None
+    if m is None:
+        return None
+    micro = int((m.group(7)[1:] + "000000")[:6]) if m.group(7) else 0
+    try:
+        return datetime(*(int(m.group(i)) for i in range(1, 7)), micro, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _verification_time(now):
+    """The time a trust-set row's `not_after` is compared with, as an aware UTC `datetime`.
+
+    `None` is the current UTC time. Otherwise a timezone-aware `datetime`, an RFC 3339 UTC
+    string in the `not_after` grammar, or seconds since the Unix epoch. A naive `datetime` is
+    refused: whether it meant UTC or local time is exactly what the comparison cannot guess."""
+    from datetime import datetime, timezone
+    if now is None:
+        return datetime.now(timezone.utc)
+    if isinstance(now, datetime):
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be a timezone-aware datetime, not a naive one")
+        return now
+    if isinstance(now, (int, float)) and not isinstance(now, bool):
+        try:
+            return datetime.fromtimestamp(now, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            raise ValueError(f"now={now!r} is not a representable time in seconds since the "
+                             "epoch") from None
+    parsed = _rfc3339_utc(now)
+    if parsed is None:
+        raise ValueError(f"now must be an aware datetime, an RFC 3339 UTC date-time such as "
+                         f"'2026-10-05T00:00:00Z', or seconds since the epoch; got {now!r}")
+    return parsed
+
+
+#: A trust-set row's members. A row is read whole: anything else in it is refused.
+_TRUST_ROW_MEMBERS = frozenset({"kid", "alg", "public_key_hex", "not_after"})
+
+
+def _trusted_witnesses(witness_keys, now=None) -> tuple:
+    """`(trusted, expired)` from the vector file's own `witness_keys` shape
+    (`[{"kid", "alg", "public_key_hex"}]`, each row optionally with `not_after`) or from a plain
+    `{kid: public_key_bytes}` mapping. `trusted` is kid -> (alg, raw public key bytes); `expired`
+    is kid -> the `not_after` string of a row that was left out because it had expired.
 
     `None` means no trust anchor is configured, which is an EMPTY set, not an absent check: an
     envelope naming a kid nobody trusts is `envelope_unknown_witness`, and that is the honest
     answer whether the trust set is empty or merely does not contain it.
 
+    `not_after` is the row's own validity, an RFC 3339 UTC date-time such as
+    "2026-10-05T00:00:00Z". A row whose `not_after` is at or before `now` (`_verification_time`:
+    the current UTC time by default) is left out of the trust set, so an envelope naming its kid
+    is `envelope_unknown_witness`, and the message says the key expired and when. A row without
+    `not_after` is trusted with no time limit, as before.
+
     Every row is validated here and a bad one raises `ValueError` naming its kid. This is the one
     envelope input that is NOT attacker-supplied — the deployment chose these keys — so a mistake
     in them is reported to the caller rather than folded into a finding about the bundle. v1
-    defines Ed25519 and no other algorithm, so a row declaring anything else is refused too."""
+    defines Ed25519 and no other algorithm, so a row declaring anything else is refused too. A
+    `not_after` that is not an RFC 3339 UTC date-time, `null` included, is refused the same way,
+    and so is an expired row that is otherwise malformed: expiry never excuses a bad row.
+
+    A row is read whole and a kid has one row. A member outside kid, alg, public_key_hex and
+    not_after is refused, because a row read by projection lets a misspelled `notAfter` leave a
+    key that never expires. A kid named by a second row is refused, because the later row used to
+    win: a row added to expire a key could leave it trusted, and an expired row beside a live one
+    did. In the `{kid: row}` form a row may repeat its kid, and must agree with it."""
+    at = _verification_time(now)
     if witness_keys is None:
-        return {}
+        return {}, {}
     rows = (witness_keys.items() if isinstance(witness_keys, Mapping)
             else [(k.get("kid") if isinstance(k, Mapping) else None, k) for k in witness_keys])
-    trusted = {}
+    trusted, expired, seen = {}, {}, set()
     for kid, value in rows:
         if not isinstance(kid, str):
             raise ValueError("witness key kid must be a string")
+        if kid in seen:
+            raise ValueError(f"witness key {kid!r}: more than one row names this kid")
+        seen.add(kid)
+        not_after = until = None
         if isinstance(value, Mapping):
+            unknown = sorted((m for m in value if m not in _TRUST_ROW_MEMBERS), key=str)
+            if unknown:
+                raise ValueError(f"witness key {kid!r}: the row carries members this build does "
+                                 f"not evaluate and will not ignore: {', '.join(map(repr, unknown))}")
+            if "kid" in value and value["kid"] != kid:
+                raise ValueError(f"witness key {kid!r}: its row names a different kid, "
+                                 f"{value['kid']!r}")
             alg = value.get("alg")
             if alg != ENVELOPE_ALG:
                 raise ValueError(f"witness key {kid!r}: alg must be {ENVELOPE_ALG!r}, got {alg!r}")
+            if "not_after" in value:
+                not_after = value["not_after"]
+                until = _rfc3339_utc(not_after)
+                if until is None:
+                    raise ValueError(f"witness key {kid!r}: not_after must be an RFC 3339 UTC "
+                                     f"date-time such as '2026-10-05T00:00:00Z', got {not_after!r}")
             value = value.get("public_key_hex")
-        trusted[kid] = (ENVELOPE_ALG, _witness_public_key(kid, value))
-    return trusted
+        key = _witness_public_key(kid, value)
+        if until is not None and until <= at:
+            expired[kid] = not_after
+            continue
+        trusted[kid] = (ENVELOPE_ALG, key)
+    return trusted, expired
 
 
 def _envelope_raw_bytes(raw):
@@ -578,12 +819,12 @@ def _envelope_raw_bytes(raw):
 
 
 def _is_seq(value) -> bool:
-    """A subject `seq` this build will look an entry up by: a JSON integer, and never a bool.
-
-    `True` hashes equal to `1` in Python, so an unguarded lookup would find the entry at seq 1
-    for `"seq": true`; a dict or a list is not hashable at all and would raise. The type check
-    comes first, and every use of `seq` is behind it."""
-    return isinstance(value, int) and not isinstance(value, bool)
+    """A `seq` or `v` this build reads as an integer: an integral number that is not a bool, as
+    the schema's integer type defines (`_integral`). `1.0` is 1, and JCS writes it as 1, so it
+    hashes as 1. `True == 1` and `hash(True) == hash(1)` in Python, so a bool is refused by type
+    before it can be compared or used as a key; so are a string, null, and a number that is
+    fractional or not finite. A dict or a list is not hashable at all and would raise."""
+    return _integral(value) is not None
 
 
 def _envelope_line(state: str, result) -> str:
@@ -593,7 +834,7 @@ def _envelope_line(state: str, result) -> str:
 
 
 def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
-               raw_bytes) -> tuple[dict, _FailureLog]:
+               raw_bytes, expired: dict | None = None) -> tuple[dict, _FailureLog]:
     """Score every envelope in the bundle and derive the per-entry state.
 
     Returns the summary `verify_bundle` reports as `report["envelopes"]`, plus the failures,
@@ -606,52 +847,66 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     this array already named is `envelope_duplicate_subject`, and the entry falls back to
     `process-asserted`: two observations of one event contradict each other by construction —
     whoever appends the second decides what the first said, and an entry whose coverage is
-    disputed must not read as clean."""
+    disputed must not read as clean.
+
+    `expired` is the kid -> `not_after` map `_trusted_witnesses` left out of `trusted`; it only
+    changes the wording of the `envelope_unknown_witness` an expired key gets."""
     fail = _FailureLog()
-    states = {e.get("seq", i): PROCESS_ASSERTED for i, e in enumerate(entries)}
+    states = {_state_key(e, i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
+    #: entry index -> the `witness.kid` of the envelope that verified for it, for every entry
+    #: whose state is witness-signed. By index, not by seq: the index is the entry the subject
+    #: resolved to, the one `failure_entries` names, so of two entries sharing a seq only the
+    #: one the witness signed is in it. An entry whose coverage two envelopes dispute is not.
+    witnesses: dict = {}
     # The hash walk is what an envelope's binding member is checked against; a bundle carrying
     # none does not pay for it. Every entry is process-asserted in that case, which is the
     # status quo and exactly what this reports.
-    by_seq = {e.get("seq", i): e for i, e in enumerate(entries)} if envelopes else {}
-    recomputed = _recomputed_hashes(entries) if envelopes else {}
-    #: seq -> how many envelopes in this array named it, valid or not. `_score_envelope` counts
-    #: an envelope in as soon as its subject names an entry this bundle has.
+    subject_index = _subject_index(entries) if envelopes else {}
+    recomputed = _recomputed_hashes(entries) if envelopes else []
+    #: entry index -> how many envelopes in this array named it, valid or not. `_score_envelope`
+    #: counts an envelope in as soon as its subject names an entry this bundle has.
     claims: dict = {}
 
     for index, envelope in enumerate(envelopes):
         raw = raw_bytes[index] if raw_bytes and index < len(raw_bytes) else None
-        seq, node, result = _score_envelope(envelope, index, by_seq, recomputed, trusted, raw,
-                                            fail, claims)
-        if seq is None:
+        at, _node, result = _score_envelope(envelope, index, entries, subject_index, recomputed,
+                                            trusted, raw, fail, claims, expired)
+        if at is None:
             continue
-        states[seq] = WITNESS_SIGNED
-        results[seq] = result
+        key = _state_key(entries[at], at)
+        states[key] = WITNESS_SIGNED
+        results[key] = result
+        # A string by now: `_score_envelope` refuses an envelope whose kid is not one.
+        witnesses[at] = envelope["witness"]["kid"]
 
     # The first envelope's result stands in `results` — it is what that witness said, and the
     # duplicate does not erase it — but the STATE falls back, so a contradicted entry never
-    # reports witness-signed and the bundle rejects.
-    for seq, count in claims.items():
+    # reports witness-signed and the bundle rejects; and it leaves `witnesses`.
+    for at, count in claims.items():
         if count > 1:
-            states[seq] = PROCESS_ASSERTED
+            states[_state_key(entries[at], at)] = PROCESS_ASSERTED
+            witnesses.pop(at, None)
 
     lines = {seq: _envelope_line(state, results.get(seq)) for seq, state in states.items()}
     return ({"status": "verified" if not fail else "FAILED",
              "count": len(envelopes),
              "witness_signed": sorted(s for s, st in states.items() if st == WITNESS_SIGNED),
-             "states": states, "results": results, "lines": lines,
+             "states": states, "results": results, "witnesses": witnesses, "lines": lines,
              "failures": list(fail.messages)}, fail)
 
 
-def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, trusted: dict,
-                    raw, fail: _FailureLog, claims: dict):
+def _score_envelope(envelope, index: int, entries: list, subject_index: dict, recomputed: list,
+                    trusted: dict, raw, fail: _FailureLog, claims: dict,
+                    expired: dict | None = None):
     """One envelope, checked in the order the seven named failures are defined in.
 
-    Returns `(seq, node, result)` for an envelope that verified, and `(None, None, None)` for
-    one that did not. Every failure is positioned on the entry the envelope COVERS, found by
-    `subject.seq` — the locators are checked against that entry, not used to find it.
+    Returns `(at, node, result)` for an envelope that verified, `at` being the index in
+    `entries` of the entry it covers, and `(None, None, None)` for one that did not. Every
+    failure is positioned on the entry the envelope COVERS, found by `subject.seq` through
+    `_subject_index` — the locators are checked against that entry, not used to find it.
 
-    `claims` is the caller's seq -> count of the envelopes that have named each entry so far,
+    `claims` is the caller's entry index -> count of the envelopes that have named it so far,
     and this function updates it. An envelope claims its entry as soon as `subject.seq` finds
     one, BEFORE the rest of the subject is checked, so a second envelope over an entry an
     earlier one already named is `envelope_duplicate_subject` whether either of them is
@@ -659,20 +914,21 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     said by appending after it."""
     def position(subject):
         # Every failure is positioned by `subject.seq`, and `subject` is attacker-supplied, so
-        # the lookup is guarded: a dict or a list is not hashable and `by_seq.get` would raise
-        # on it. A seq that is not an integer positions nothing, which is honest — it names no
-        # entry — and it is never used as a key.
-        s = subject.get("seq") if isinstance(subject, Mapping) else None
-        if not _is_seq(s):
-            return None, None
-        entry = by_seq.get(s)
-        if entry is None:
-            return s, None
-        return entry.get("seq"), entry.get("node")
+        # the lookup is guarded: a dict or a list is not hashable and `subject_index.get` would
+        # raise on it. A seq that is not an integer positions nothing, which is honest — it
+        # names no entry — and it is never used as a key.
+        s = _integral(subject.get("seq")) if isinstance(subject, Mapping) else None
+        if s is None:
+            return None, None, None
+        at = subject_index.get(s)
+        if at is None:
+            return s, None, None
+        entry = entries[at]
+        return entry.get("seq"), entry.get("node"), entry
 
     def report(reason: str, detail: str, subject) -> tuple:
-        seq, node = position(subject)
-        fail.add(reason, f"{reason}: {detail}", seq=seq, node=node)
+        seq, node, entry = position(subject)
+        fail.add(reason, f"{reason}: {detail}", seq=seq, node=node, entry=entry)
         return seq, node
 
     if not isinstance(envelope, Mapping):
@@ -686,10 +942,9 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     # `_is_seq` guards the version too: `True == 1` in Python, so a boolean `v` would otherwise
     # pass a version check the TypeScript implementation refuses, and the two would disagree
     # about the same bundle. Found by the cross-language hostile-value matrix.
-    if (not _is_seq(envelope.get("v")) or envelope.get("v") != ENVELOPE_VERSION
-            or envelope.get("typ") != ENVELOPE_TYP):
+    if _integral(envelope.get("v")) != ENVELOPE_VERSION or envelope.get("typ") != ENVELOPE_TYP:
         report("envelope_unknown_version",
-               f"envelope v={envelope.get('v')!r} typ={envelope.get('typ')!r}, this build "
+               f"envelope v={_int_or(envelope.get('v'))!r} typ={envelope.get('typ')!r}, this build "
                f"knows v={ENVELOPE_VERSION} typ={ENVELOPE_TYP!r}", subject)
         return None, None, None
 
@@ -744,18 +999,19 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
     if not _is_seq(subject.get("seq")):
         report("envelope_subject_mismatch", "subject seq is not an integer", subject)
         return None, None, None
-    entry = by_seq.get(subject.get("seq"))
-    if entry is None:
+    at = subject_index.get(_integral(subject.get("seq")))
+    if at is None:
         report("envelope_subject_mismatch",
-               f"no entry at seq {subject.get('seq')!r} in this bundle", subject)
+               f"no entry at seq {_int_or(subject.get('seq'))!r} in this bundle", subject)
         return None, None, None
-    seq, node = entry.get("seq"), entry.get("node")
+    entry = entries[at]
+    seq, node = _int_or(entry.get("seq")), entry.get("node")
 
     # (3a') one entry, at most one envelope. Counted here, before anything else about this
     # envelope is judged, so the rule cannot be sidestepped by making the second envelope
     # defective in some other way as well.
-    already = claims.get(seq, 0)
-    claims[seq] = already + 1
+    already = claims.get(at, 0)
+    claims[at] = already + 1
     if already:
         report("envelope_duplicate_subject",
                f"seq {seq} is already covered by an earlier envelope in this bundle; two "
@@ -763,7 +1019,7 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
                "is not witness-signed", subject)
         return None, None, None
 
-    computed = recomputed.get(seq)
+    computed = recomputed[at]
     if subject.get("entry_hash") != computed:
         report("envelope_subject_mismatch",
                f"subject entry_hash {subject.get('entry_hash')!r} != the hash recomputed for "
@@ -824,6 +1080,16 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
         return None, None, None
     known = trusted.get(kid)
     if known is None:
+        # A key whose trust-set row has expired is not in the trust set, so it is the same
+        # failure as any other untrusted kid. The message keeps that wording first and then says
+        # why, because "not trusted" and "trusted until a date that has passed" call for
+        # different fixes.
+        lapsed = (expired or {}).get(kid)
+        if lapsed is not None:
+            report("envelope_unknown_witness",
+                   f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
+                   f"({sorted(trusted)}): the key expired at not_after={lapsed!r}", subject)
+            return None, None, None
         report("envelope_unknown_witness",
                f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
                f"({sorted(trusted)})", subject)
@@ -854,25 +1120,37 @@ def _score_envelope(envelope, index: int, by_seq: dict, recomputed: dict, truste
         return None, None, None
     if non_canonical:
         return None, None, None
-    return seq, node, envelope.get("observed", {}).get("result")
+    return at, node, envelope.get("observed", {}).get("result")
 
 
-def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None) -> dict:
+def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, now=None) -> dict:
     """Score a bundle's observer envelopes on their own, without the ledger checks.
 
     `witness_keys` is the trust set: the vector file's `[{"kid", "alg", "public_key_hex"}]`, or
-    a `{kid: public_key_bytes}` mapping. `envelope_bytes` is the list of envelope bytes AS
-    RECEIVED, positionally aligned with `bundle["envelopes"]` (entries may be None) — only
-    `envelope_non_canonical` needs them, and only where a deployment kept them.
+    a `{kid: public_key_bytes}` mapping. A row may carry `not_after`, an RFC 3339 UTC date-time;
+    a row whose `not_after` is at or before `now` (default: the current UTC time) is left out of
+    the trust set, and its envelopes fail `envelope_unknown_witness`, with the expiry in the
+    message. `envelope_bytes` is the list of envelope bytes AS RECEIVED, positionally aligned
+    with `bundle["envelopes"]` (entries may be None) — only `envelope_non_canonical` needs them,
+    and only where a deployment kept them.
 
-    Returns `{ok, status, count, states, results, lines, witness_signed, failures,
-    failure_details}`. `states` maps every entry's seq to `witness-signed` or
+    Returns `{ok, status, count, states, results, witnesses, lines, witness_signed, failures,
+    failure_details, failure_entries}`. `states` maps every entry's seq to `witness-signed` or
     `process-asserted`; `lines` is the report line for each, `witness-signed (matched)` and so
-    on, with no result on a process-asserted entry."""
+    on, with no result on a process-asserted entry. `results` maps a covered seq to the
+    verifying envelope's `observed.result`. `witnesses` maps the index in `bundle["entries"]` of
+    every witness-signed entry to that envelope's `witness.kid`: the entry the subject resolved
+    to, by index, the one `failure_entries` names, so of two entries sharing a seq only the one
+    the witness signed is in it. A `witness-signed`
+    state means that signature covers the entry's hash and chain position plus what the
+    witness-key holder observed (result, time, method); it does not attest that the action was
+    permitted."""
     entries = bundle.get("entries") or []
-    summary, fail = _envelopes(entries, bundle.get("envelopes") or [],
-                               _trusted_witnesses(witness_keys), envelope_bytes)
-    return {"ok": not fail, **summary, "failure_details": fail.details}
+    trusted, expired = _trusted_witnesses(witness_keys, now)
+    summary, fail = _envelopes(entries, bundle.get("envelopes") or [], trusted,
+                               envelope_bytes, expired)
+    return {"ok": not fail, **summary, "failure_details": fail.details,
+            "failure_entries": fail.entry_indices(entries)}
 
 
 # =========================================================================
@@ -1075,9 +1353,9 @@ def _v2_field_leaks_on_v1(entries: list[dict]) -> _FailureLog:
         leaked = sorted(_V2_ONLY_FIELDS & e.keys())
         if leaked:
             failures.add("v2_field_on_v1",
-                         f"v2_field_on_v1: seq={e.get('seq')} event={e.get('event')!r} "
+                         f"v2_field_on_v1: seq={_shown(_int_or(e.get('seq')))} event={e.get('event')!r} "
                          f"carries v2-only field(s) {leaked} on a schema_version=1 entry",
-                         seq=e.get("seq"), node=e.get("node"))
+                         seq=e.get("seq"), node=e.get("node"), entry=e)
     return failures
 
 
@@ -1120,16 +1398,16 @@ def _policy_failures(entries: list[dict], bundle_v) -> _FailureLog:
                 continue                    # _validate_allow owns this entry's message
             if not _is_known_policy(e.get("policy")):
                 failures.add("invalid_policy",
-                             f"invalid_policy: seq={e.get('seq')} allow carries policy "
+                             f"invalid_policy: seq={_shown(_int_or(e.get('seq')))} allow carries policy "
                              f"{e.get('policy')!r}, not a value this format defines",
-                             seq=e.get("seq"), node=e.get("node"))
+                             seq=e.get("seq"), node=e.get("node"), entry=e)
         else:
             if ev == "deny" and bundle_v == 2:
                 continue                    # _validate_deny owns this entry's message
             failures.add("policy_on_non_allow",
-                         f"policy_on_non_allow: seq={e.get('seq')} event={ev!r} carries "
+                         f"policy_on_non_allow: seq={_shown(_int_or(e.get('seq')))} event={ev!r} carries "
                          f"`policy`, which is an allow-only field",
-                         seq=e.get("seq"), node=e.get("node"))
+                         seq=e.get("seq"), node=e.get("node"), entry=e)
     return failures
 
 
@@ -1159,21 +1437,26 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
     for e in entries:
         ev = e.get("event")
         if ev == "root":
-            nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                nodes.add(e["node"])
             err = _validate_root(e)
             if err:
-                failures.add("invalid_root", f"invalid_root: {err} (seq {e.get('seq')})",
-                             seq=e.get("seq"), node=e.get("node"))
+                failures.add("invalid_root", f"invalid_root: {err} (seq {_shown(_int_or(e.get('seq')))})",
+                             seq=e.get("seq"), node=e.get("node"), entry=e)
         elif ev == "spawn":
-            nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                nodes.add(e["node"])
         elif ev == "done":
-            finalized_nodes.add(e.get("node"))
+            if isinstance(e.get("node"), str):
+                finalized_nodes.add(e["node"])
         elif ev == "kill":
-            revoked_nodes.update(e.get("revoked") or [])
+            killed: dict = {}
+            _note_revoked(e, killed)
+            revoked_nodes.update(killed)
             err = _validate_kill(e)
             if err:
-                failures.add("invalid_kill", f"invalid_kill: {err} (seq {e.get('seq')})",
-                             seq=e.get("seq"), node=e.get("node"))
+                failures.add("invalid_kill", f"invalid_kill: {err} (seq {_shown(_int_or(e.get('seq')))})",
+                             seq=e.get("seq"), node=e.get("node"), entry=e)
 
         if ev in ("allow", "deny"):
             cid = e.get("call_id")
@@ -1183,16 +1466,16 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
                     # Positioned on the SECOND sighting: the entry that re-used a call_id is the
                     # offending record, the first one having been legitimate when it was written.
                     failures.add("duplicate_call_id",
-                                 f"duplicate_call_id: call_id {cid} on seq {e.get('seq')} ({ev}) "
-                                 f"already used at seq {prior[2]} ({prior[0]})",
-                                 seq=e.get("seq"), node=e.get("node"), call_id=cid)
+                                 f"duplicate_call_id: call_id {_shown(cid)} on seq {_shown(_int_or(e.get('seq')))} ({ev}) "
+                                 f"already used at seq {_shown(_int_or(prior[2]))} ({prior[0]})",
+                                 seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 else:
                     seen_call_ids[cid] = (ev, e.get("node"), e.get("seq"))
             validator = _validate_allow if ev == "allow" else _validate_deny
             err = validator(e)
             if err:
-                failures.add(f"invalid_{ev}", f"invalid_{ev}: {err} (seq {e.get('seq')})",
-                             seq=e.get("seq"), node=e.get("node"), call_id=cid)
+                failures.add(f"invalid_{ev}", f"invalid_{ev}: {err} (seq {_shown(_int_or(e.get('seq')))})",
+                             seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 if ev == "allow" and cid is not None:
                     invalid_allow_ids.add(cid)
                 continue
@@ -1202,14 +1485,14 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             cid = e.get("call_id")
             err = _validate_outcome(e)
             if err:
-                failures.add("invalid_outcome", f"invalid_outcome: {err} (seq {e.get('seq')})",
-                             seq=e.get("seq"), node=e.get("node"), call_id=cid)
+                failures.add("invalid_outcome", f"invalid_outcome: {err} (seq {_shown(_int_or(e.get('seq')))})",
+                             seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 continue
             if cid in outcomes:
                 failures.add("duplicate_outcome",
-                             f"duplicate_outcome: call_id {cid} at seq {e.get('seq')} "
-                             f"(first at seq {outcomes[cid].get('seq')})",
-                             seq=e.get("seq"), node=e.get("node"), call_id=cid)
+                             f"duplicate_outcome: call_id {_shown(cid)} at seq {_shown(_int_or(e.get('seq')))} "
+                             f"(first at seq {_shown(_int_or(outcomes[cid].get('seq')))})",
+                             seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 continue
             outcomes[cid] = e
 
@@ -1228,27 +1511,27 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
         allow_e = allows.get(cid)
         if allow_e is None:
             failures.add("outcome_without_allow",
-                         f"outcome_without_allow: call_id {cid} at seq {oc.get('seq')} has no allow in this chain",
-                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid)
+                         f"outcome_without_allow: call_id {_shown(cid)} at seq {_shown(_int_or(oc.get('seq')))} has no allow in this chain",
+                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
             continue
         node_ok = allow_e.get("node") == oc.get("node")
         if not node_ok:
             failures.add("cross_ref",
-                         f"cross_ref: call_id {cid} allow on node {allow_e.get('node')!r} "
+                         f"cross_ref: call_id {_shown(cid)} allow on node {allow_e.get('node')!r} "
                          f"but outcome on node {oc.get('node')!r}",
-                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid)
+                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
         order_ok = (oc.get("seq") is not None and allow_e.get("seq") is not None
                    and oc["seq"] > allow_e["seq"])
         if not order_ok:
             failures.add("outcome_before_allow",
-                         f"outcome_before_allow: call_id {cid} outcome seq {oc.get('seq')} "
-                         f"not after allow seq {allow_e.get('seq')}",
-                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid)
+                         f"outcome_before_allow: call_id {_shown(cid)} outcome seq {_shown(_int_or(oc.get('seq')))} "
+                         f"not after allow seq {_shown(_int_or(allow_e.get('seq')))}",
+                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
         ah, ih = allow_e.get("authorized_params_hash"), oc.get("invoked_params_hash")
         if ah is not None and ih is not None and ah != ih:
             failures.add("params_mismatch",
-                         f"params_mismatch: call_id {cid} authorized_params_hash {ah} != invoked_params_hash {ih}",
-                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid)
+                         f"params_mismatch: call_id {_shown(cid)} authorized_params_hash {_shown(ah)} != invoked_params_hash {_shown(ih)}",
+                         seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
         if node_ok and order_ok:
             bound_ok.add(cid)
 
@@ -1271,7 +1554,8 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
             per_call[cid] = "unobserved"
         else:
             per_call[cid] = "unaccounted"
-            node_pending.setdefault(allow_e.get("node"), []).append(cid)
+            pending_node = allow_e.get("node") if isinstance(allow_e.get("node"), str) else None
+            node_pending.setdefault(pending_node, []).append(cid)
 
     # Per-node lifecycle. "revoked" (clean kill, nothing pending) is not one of the spec's three
     # named states (finalized/in_progress/revoked_with_pending) — it names the gap those three
@@ -1316,32 +1600,34 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
     }, failures
 
 
-def _integrity_position(entries: list[dict]) -> tuple:
-    """(seq, node) of the FIRST entry the hash chain does not reproduce at — position only.
+def _integrity_break(entries: list[dict]):
+    """The index of the FIRST entry the hash chain does not reproduce at — position only.
 
     `AuditLog.verify` stays the authority on WHETHER the chain is broken and on the message this
     module reports; this walk exists so the structured twin of that message can say WHERE, which
     the message's own text does not expose in a parseable form. Mirrors `AuditLog.verify`'s walk
-    exactly (same seq/prev_hash/hash order). (None, None) when nothing entry-local is wrong — a
-    consistently re-hashed ledger fails against the signed anchor, not here, and that failure is
-    chain-level."""
+    exactly (same seq/prev_hash/hash order, and the same rule that a seq is an integral number
+    and never a bool, `_integral`: `True == 1` in Python, and a re-hashed chain with
+    `"seq": true` at index 1 verified clean). None when nothing entry-local is wrong — a consistently re-hashed ledger fails
+    against the signed anchor, not here, and that failure is chain-level."""
     prev = _GENESIS
     for i, e in enumerate(entries):
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
-            broken = (e.get("seq") != i or payload.get("prev_hash") != prev
+            broken = (_integral(e.get("seq")) != i
+                      or payload.get("prev_hash") != prev
                       or _rehash(prev, payload) != e.get("hash"))
         except Exception:  # noqa: BLE001 - an unhashable payload is itself the break, at this entry
-            return e.get("seq"), e.get("node")
+            return i
         if broken:
-            return e.get("seq"), e.get("node")
+            return i
         prev = e["hash"]
-    return None, None
+    return None
 
 
 def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = None,
                   expected_head: tuple | None = None, witness_keys=None,
-                  envelope_bytes=None) -> dict:
+                  envelope_bytes=None, now=None) -> dict:
     """Verify integrity, monotonicity and containment from the bundle alone. Returns
     {ok, checks, failures, failure_details, ...}.
 
@@ -1360,14 +1646,25 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     `witness_keys` is the trust set for the bundle's observer envelopes, if it carries any:
     `[{"kid", "alg", "public_key_hex"}]` (the envelope vector file's own shape) or a
     `{kid: public_key_bytes}` mapping. `None` is an EMPTY trust set, not a skipped check — an
-    envelope naming a key nobody trusts is `envelope_unknown_witness`. `envelope_bytes` supplies
+    envelope naming a key nobody trusts is `envelope_unknown_witness`. A row may carry
+    `not_after`, an RFC 3339 UTC date-time such as "2026-10-05T00:00:00Z"; a row whose
+    `not_after` is at or before `now` is left out of the trust set, so its envelopes fail
+    `envelope_unknown_witness` with the expiry in the message. `now` defaults to the current
+    UTC time and may be an aware `datetime`, an RFC 3339 UTC string or epoch seconds; a
+    malformed `not_after` raises `ValueError` naming the kid. `envelope_bytes` supplies
     the envelope bytes AS RECEIVED, positionally aligned with `bundle["envelopes"]`, which only
     `envelope_non_canonical` needs and only where a deployment kept them. A bundle with no
     `envelopes` array reports every entry `process-asserted` and verifies exactly as before.
+    `report["envelopes"]` carries the per-entry state; a `witness-signed` entry's signature
+    covers the entry's hash and chain position plus what the witness-key holder observed
+    (result, time, method), and does not attest that the action was permitted.
 
     `failure_details` is the structured twin of `failures`: same order, same count, one
     `{"reason", "seq", "node", "call_id", "detail"}` dict per string, so a conformance suite can
     assert the reason AND the position of every failure instead of matching prose.
+    `failure_entries`, in the same order again, is the index in `bundle["entries"]` of the entry
+    each failure is about, or None for a failure about no single entry: exact where a seq is
+    not, since a forged entry's seq can be missing, null, a bool or a duplicate.
     """
     entries = bundle.get("entries") or []
     anchor = bundle.get("anchor") or {}
@@ -1378,15 +1675,18 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
 
     # (0) version: the bundle must declare a schema version this build understands, and — when an
     # anchor is present — the anchor must be anchoring THAT version, not a different one.
-    bundle_v = bundle.get("v")
+    # A version is read by the same rule as a seq (`_integral`): `1.0` is 1, and `true` is not,
+    # although `True in {1, 2}` holds in Python and a bundle declaring `"v": true` was read as v1.
+    raw_v = bundle.get("v")
+    bundle_v = _integral(raw_v)
     version_ok = bundle_v in SUPPORTED_BUNDLE_VERSIONS
     if not version_ok:
         log.add("unsupported_version",
-                f"unsupported_version: bundle v={bundle_v!r} not in {sorted(SUPPORTED_BUNDLE_VERSIONS)}")
-    if anchor and anchor.get("v") != bundle_v:
+                f"unsupported_version: bundle v={_int_or(raw_v)!r} not in {sorted(SUPPORTED_BUNDLE_VERSIONS)}")
+    if anchor and not _same_number(anchor.get("v"), raw_v):
         version_ok = False
         log.add("anchor_version_mismatch",
-                f"anchor_version_mismatch: anchor v={anchor.get('v')!r} != bundle v={bundle_v!r}")
+                f"anchor_version_mismatch: anchor v={_int_or(anchor.get('v'))!r} != bundle v={_int_or(raw_v)!r}")
 
     # (0a) exactly one root: a rootless bundle (or one splicing in a second root) would otherwise
     # sail through monotonicity/containment trivially — there is nothing to anchor those checks to.
@@ -1399,20 +1699,21 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
 
     # 0.9.0: a chain is created at ONE schema version and never mixes (spec section 9) — the root
     # entry's v must equal the bundle's declared v, and no OTHER entry may carry a different v.
-    if root_entry is not None and root_entry.get("v") != bundle_v:
+    if root_entry is not None and not _same_number(root_entry.get("v"), raw_v):
         version_ok = False
         log.add("root_version_mismatch",
-                f"root_version_mismatch: root v={root_entry.get('v')!r} != bundle v={bundle_v!r}",
-                seq=root_entry.get("seq"), node=root_entry.get("node"))
-    mixed_entries = [e for e in entries if e.get("v") != bundle_v]
-    mixed = sorted({e.get("v") for e in mixed_entries})
+                f"root_version_mismatch: root v={_int_or(root_entry.get('v'))!r} != bundle v={_int_or(raw_v)!r}",
+                seq=root_entry.get("seq"), node=root_entry.get("node"), entry=root_entry)
+    mixed_entries = [e for e in entries if not _same_number(e.get("v"), raw_v)]
+    mixed = sorted({_int_or(e.get("v")) for e in mixed_entries}, key=_version_order)
     if mixed:
         version_ok = False
         # One aggregate message over every offending entry (unchanged); the twin is positioned on
         # the first of them, which is where a reader looks.
         log.add("mixed_entry_versions",
-                f"mixed_entry_versions: entries declare v in {mixed}, bundle v={bundle_v!r}",
-                seq=mixed_entries[0].get("seq"), node=mixed_entries[0].get("node"))
+                f"mixed_entry_versions: entries declare v in {mixed}, bundle v={_int_or(raw_v)!r}",
+                seq=mixed_entries[0].get("seq"), node=mixed_entries[0].get("node"),
+                entry=mixed_entries[0])
     checks["version"] = version_ok
 
     # (0b2) every entry must be read WHOLE. `LEDGER_FIELDS` was enforced only on the EXPORT path
@@ -1436,9 +1737,22 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             unknown_ok = False
             log.add("unknown_ledger_fields",
                     f"unknown_ledger_fields: entry carries fields this verifier does not "
-                    f"evaluate and will not ignore: {', '.join(extra)}",
-                    seq=e.get("seq"), node=e.get("node"))
+                    f"evaluate and will not ignore: {', '.join(_shown(f) for f in extra)}",
+                    seq=e.get("seq"), node=e.get("node"), entry=e)
     checks["ledger_fields"] = unknown_ok
+
+    # (0b3) a node id is a string (the schema's `node`). A root, a spawn and an allow are judged
+    # by the checks that read their node, below; any other entry that carries a node which is a
+    # list, an object, a number or a bool is reported here, never read by projection and never
+    # used as a key, where a list or an object raised.
+    for e in entries:
+        if e.get("event") in ("root", "spawn", "allow") or e.get("node") is None:
+            continue
+        if not isinstance(e["node"], str):
+            log.add("invalid_node",
+                    f"invalid_node: seq={_shown(_int_or(e.get('seq')))} event={e.get('event')!r} "
+                    f"carries node {_shown(e['node'])}, which is not a string",
+                    seq=e.get("seq"), node=e["node"], entry=e)
 
     # (0c) independently retained expected anchor/head: verified against the BUNDLE's actual
     # computed head, never against its own (possibly forged) enclosed anchor.
@@ -1450,12 +1764,12 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             if actual_seq != exp_seq or actual_head != exp_hash:
                 ok = False
                 log.add("expected_head_mismatch",
-                    f"expected_head_mismatch: bundle head is (seq={actual_seq}, hash={actual_head}) but the "
+                    f"expected_head_mismatch: bundle head is (seq={actual_seq}, hash={_shown(actual_head)}) but the "
                     f"independently retained expected head is (seq={exp_seq}, hash={exp_hash})")
         if expected_anchor is not None:
             if (expected_anchor.get("seq") != actual_seq or expected_anchor.get("head") != actual_head
                     or expected_anchor.get("chain_id") != bundle.get("chain_id")
-                    or expected_anchor.get("v") != bundle_v):
+                    or not _same_number(expected_anchor.get("v"), raw_v)):
                 ok = False
                 log.add("expected_anchor_mismatch",
                     "expected_anchor_mismatch: the bundle's actual (seq, head, chain_id, v) does not match "
@@ -1471,7 +1785,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     if not entries_ok:
         log.add("chain_id_mismatch",
                 f"chain_id_mismatch: an entry does not carry chain_id={bundle_chain_id!r}",
-                seq=foreign.get("seq"), node=foreign.get("node"))
+                seq=foreign.get("seq"), node=foreign.get("node"), entry=foreign)
     anchor_chain_ok = not anchor or anchor.get("chain_id") == bundle_chain_id
     if not anchor_chain_ok:
         log.add("chain_id_mismatch",
@@ -1481,8 +1795,11 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # (1) integrity: hash chain (+ the signed anchor, when a verifier key is given)
     ok_chain, err = AuditLog.verify(entries)
     if not ok_chain:
-        bad_seq, bad_node = _integrity_position(entries)
-        log.add("integrity", f"integrity: {err}", seq=bad_seq, node=bad_node)
+        bad = _integrity_break(entries)
+        bad_e = entries[bad] if bad is not None else None
+        log.add("integrity", f"integrity: {err}",
+                seq=bad_e.get("seq") if bad_e is not None else None,
+                node=bad_e.get("node") if bad_e is not None else None, entry=bad_e)
     if signer is not None:
         ok_anchor, aerr = AuditLog.verify_anchor(entries, anchor, signer)
         checks["anchor"] = "verified" if ok_anchor else "FAILED"
@@ -1496,22 +1813,60 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     auth, parent, afail, defined_by = _node_authorities(entries)
     log.extend(afail)
 
-    # (2) monotonicity: every child ⊆ its parent
+    # (2) monotonicity: every child ⊆ its parent, read in ledger order. Every spawn is checked,
+    # and the node it names as `parent` has to be one the root or an EARLIER spawn defined, not
+    # revoked by an earlier kill, and not the spawn's own node. Through 0.18.0 a spawn whose
+    # parent was absent, null, a number or a boolean, or a node not in the bundle was skipped, so
+    # a child widened past the authority it was really given verified OK (a list or an object
+    # there raised TypeError instead); the process being watched writes that field.
+    # A node is defined once: a second definition is a failure too, since only one of the two
+    # could be read.
     mono = True
-    for node, pid in parent.items():
-        if pid is None or pid not in auth or node not in auth:
+    defined_at: dict = {}         # node -> the entry that defined it, as of this point
+    revoked_at: dict = {}         # node -> the seq of the kill that revoked it
+    for e in entries:
+        ev = e.get("event")
+        if ev == "kill":
+            _note_revoked(e, revoked_at)
             continue
-        # 0.11.x: the subsumption relation ALONE decides. This used to be gated on a literal,
-        # non-wildcard-aware scope difference, which silently accepted a delegation that widened
-        # only ttl or a ceiling whenever the child's scopes happened to be literally a subset of
-        # the parent's — the child was more powerful and the bundle verified clean. The relation
-        # already compares every dimension; `_monotonicity_detail` names the one that failed.
-        if not auth[node].is_narrower_than(auth[pid]):
+        if ev not in ("root", "spawn"):
+            continue
+        node = e.get("node")
+        if not isinstance(node, str):
+            continue                          # unreadable, reported by _node_authorities
+        if node in defined_at:
             mono = False
-            spawn_e = defined_by.get(node) or {}
             log.add("monotonicity",
-                    f"monotonicity: {node} not ⊆ parent {pid} ({_monotonicity_detail(auth[node], auth[pid])})",
-                    seq=spawn_e.get("seq"), node=node)
+                    f"monotonicity: {_shown(node)} is defined a second time in this bundle "
+                    f"(first at seq {_shown(_int_or(defined_at[node].get('seq')))})",
+                    seq=e.get("seq"), node=node, entry=e)
+            continue
+        if ev == "spawn":
+            pid = e.get("parent")
+            if not isinstance(pid, str) or pid not in defined_at:
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} names no parent defined earlier in this "
+                        f"bundle (parent {_shown(pid)})",
+                        seq=e.get("seq"), node=node, entry=e)
+            elif pid in revoked_at:
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} is spawned from {_shown(pid)} after "
+                        f"{_shown(pid)} was revoked at seq {_shown(_int_or(revoked_at[pid]))}",
+                        seq=e.get("seq"), node=node, entry=e)
+            # 0.11.x: the subsumption relation ALONE decides. This used to be gated on a literal,
+            # non-wildcard-aware scope difference, which silently accepted a delegation that
+            # widened only ttl or a ceiling whenever the child's scopes happened to be literally a
+            # subset of the parent's. The relation compares every dimension, and
+            # `_monotonicity_detail` names the one that failed. An unreadable authority on either
+            # side is reported by _node_authorities and fails this check on its own.
+            elif pid in auth and node in auth and not auth[node].is_narrower_than(auth[pid]):
+                mono = False
+                log.add("monotonicity",
+                        f"monotonicity: {_shown(node)} not ⊆ parent {_shown(pid)} ({_monotonicity_detail(auth[node], auth[pid])})",
+                        seq=e.get("seq"), node=node, entry=e)
+        defined_at[node] = e
     checks["monotonicity"] = mono and not afail
 
     # (3) containment: every allow action's scope within the acting node's authority.
@@ -1521,9 +1876,21 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # would report a violation the entry never asserted. Such entries are counted as UNGATED and
     # reported as their own number instead: a reader sees how much of the run was actually
     # measured, which is the honest answer and never a silent one.
+    # Read in ledger order, like monotonicity: an allow is judged against a node defined EARLIER
+    # (one defined only later is unknown at that point), and an allow on a node an earlier kill
+    # revoked is outside its authority, since a revoked node holds none.
     contained = True; actions = 0; ungated = 0
+    known: set = set(); killed_at: dict = {}
     for e in entries:
-        if e.get("event") != "allow":
+        ev = e.get("event")
+        if ev in ("root", "spawn"):
+            if isinstance(e.get("node"), str):
+                known.add(e["node"])
+            continue
+        if ev == "kill":
+            _note_revoked(e, killed_at)
+            continue
+        if ev != "allow":
             continue
         if _is_known_policy(e.get("policy")):
             # Only a policy value the format DEFINES buys the exemption. An entry carrying
@@ -1533,17 +1900,29 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             continue
         actions += 1
         node = e.get("node"); scope = e.get("scope"); ctx = e.get("context") or {}
-        a = auth.get(node)
+        a = auth.get(node) if isinstance(node, str) and node in known else None
         if a is None:
             contained = False
-            log.add("containment", f"containment: allow on unknown node {node}",
-                    seq=e.get("seq"), node=node, call_id=e.get("call_id"))
+            log.add("containment", f"containment: allow on unknown node {_shown(node)}",
+                    seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
             continue
-        if not a.permits(scope, ctx):
+        if node in killed_at:
             contained = False
             log.add("containment",
-                    f"containment: allow of {scope!r} on {node} outside its authority {sorted(a.scopes)}",
-                    seq=e.get("seq"), node=node, call_id=e.get("call_id"))
+                    f"containment: allow of {scope!r} on {_shown(node)} after {_shown(node)} was "
+                    f"revoked at seq {_shown(_int_or(killed_at[node]))}",
+                    seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
+            continue
+        # A scope that is not a string is no scope the node can hold. Against a wildcard it
+        # raised (`startswith` on an int or a None), out of the verifier; against a plain scope
+        # it already failed here. A context that is not an object cannot be read against the
+        # node's ceilings (`dict(ctx)` raised on a list). Either is this finding.
+        if (not isinstance(scope, str) or not isinstance(ctx, Mapping)
+                or not a.permits(scope, ctx)):
+            contained = False
+            log.add("containment",
+                    f"containment: allow of {scope!r} on {_shown(node)} outside its authority {sorted(a.scopes)}",
+                    seq=e.get("seq"), node=node, call_id=e.get("call_id"), entry=e)
     checks["containment"] = contained
 
     execution_binding, eb_failures = (_execution_binding(entries, bundle_v) if version_ok
@@ -1556,8 +1935,9 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # nothing — but a PRESENT one has to verify, and a broken one lands in this same list. The
     # per-entry state is reported either way, so a reader sees which hops were covered before
     # reading which one failed.
-    envelopes = _envelopes(entries, bundle.get("envelopes") or [],
-                           _trusted_witnesses(witness_keys), envelope_bytes)
+    trusted, expired = _trusted_witnesses(witness_keys, now)
+    envelopes = _envelopes(entries, bundle.get("envelopes") or [], trusted, envelope_bytes,
+                           expired)
     if "envelopes" in bundle:
         envelope_summary, envelope_failures = envelopes
         checks["envelopes"] = envelope_summary["status"]
@@ -1568,6 +1948,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     excluded = ("anchor", "expected_anchor", "envelopes")
     return {"ok": all(v for k, v in checks.items() if k not in excluded) and not log,
             "checks": checks, "failures": log.messages, "failure_details": log.details,
+            "failure_entries": log.entry_indices(entries),
             "nodes": len(auth), "actions_checked": actions, "ungated": ungated, "chain_id": bundle.get("chain_id"),
             "execution_binding": execution_binding, "envelopes": envelope_summary,
             "verified_against": "expected_anchor" if (expected_anchor is not None or expected_head is not None)

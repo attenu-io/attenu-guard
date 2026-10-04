@@ -14,14 +14,45 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import canonical
+from ._display import shown as _shown
 
 SCHEMA_VERSION = 1
 GENESIS = "0" * 64
+
+
+def _integral(value):
+    """`value` as the integer it is, or None when it is not one.
+
+    The rule for every `seq` and `v` this package reads off a ledger, a bundle or an envelope:
+    an integral number that is not a bool, as the schema's `integer` type defines it (JSON
+    Schema 2020-12, schema/agent-audit.schema.json). `1.0` is 1 and `-0.0` is 0, and RFC 8785
+    writes both as the integer, so they hash alike. A bool is not a number here although
+    Python's `bool` is an `int` (`True == 1`), and neither is a string, null, or a number that
+    is fractional or not finite."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value == int(value):
+        return int(value)
+    return None
+
+
+def _int_or(value):
+    """`value` as a message prints it: the integer when it is integral (`_integral`) and inside
+    the I-JSON safe range, so `1.0` reads 1 as JavaScript and the TypeScript implementation print
+    it, and the value unchanged otherwise. Past ±(2**53 - 1) a number is not exact across
+    implementations, and it is left as Python prints it."""
+    integral = _integral(value)
+    if integral is None or abs(integral) > canonical.MAX_SAFE_INTEGER:
+        return value
+    return integral
 
 
 def _canonical(obj: dict) -> bytes:
@@ -169,9 +200,23 @@ class AuditLog:
         except KeyError as exc:
             return False, f"anchor missing field {exc.args[0]}"
         body = {k: v for k, v in anchor.items() if k not in ("kid", "sig", "verified")}
-        signing_input = canonical.dumps(body)
         try:
-            sig = bytes.fromhex(anchor.get("sig", ""))
+            signing_input = canonical.dumps(body)
+        except canonical.UnsafeIntegerError:
+            # An integer past 2**53 has no RFC 8785 form, so no signer produced an anchor carrying
+            # one (`anchor()` refuses to): what arrived is not a signed anchor, and the verdict is
+            # that its signature does not verify. Raising here crashed the verifier on input from
+            # the bundle. Signing still raises, in `anchor()` and `evidence.export_bundle`.
+            return False, "anchor signature invalid"
+        sig_hex = anchor.get("sig")
+        if sig_hex is None:
+            sig_hex = ""                    # a null sig reads as an absent one: nothing verifies
+        if not isinstance(sig_hex, str):
+            # A number, a bool, a list or an object is not hex, and `bytes.fromhex` raised a
+            # TypeError on it, out of the verifier, where only a ValueError was expected.
+            return False, "anchor signature not hex"
+        try:
+            sig = bytes.fromhex(sig_hex)
         except ValueError:
             return False, "anchor signature not hex"
         if not signer.verify(signing_input, sig, anchor.get("kid")):
@@ -180,11 +225,12 @@ class AuditLog:
         if not ok:
             return False, err
         if not entries:
-            return (anchor["seq"] == -1), None
+            return (_integral(anchor["seq"]) == -1), None
         entry_chain_id = next((e["chain_id"] for e in entries if e.get("chain_id")), None)
         if anchor["chain_id"] != entry_chain_id:
             return False, "anchor chain_id does not match the ledger entries"
-        if entries[-1]["hash"] != anchor["head"] or entries[-1]["seq"] != anchor["seq"]:
+        if (entries[-1]["hash"] != anchor["head"]
+                or _integral(entries[-1]["seq"]) != _integral(anchor["seq"])):
             return False, "anchor head does not match the ledger head (ledger rewritten?)"
         return True, None
 
@@ -194,13 +240,28 @@ class AuditLog:
         prev = GENESIS
         expected_seq = 0
         for e in entries:
-            if e.get("seq") != expected_seq:
-                return False, f"seq gap at {expected_seq} (got {e.get('seq')})"
+            seq = e.get("seq")
+            # An integral number and never a bool (`_integral`): `True == 1` in Python, so a
+            # re-hashed chain carrying `"seq": true` at index 1 used to verify with no failure.
+            # `1.0` is 1, as the schema's integer type and RFC 8785 both have it.
+            if _integral(seq) != expected_seq:
+                # `seq` is the entry's own value, which a forged ledger chooses: printed by the
+                # one rule (`_display.shown`) so it cannot end the reader's line and start another,
+                # and an integral one as its integer.
+                return False, f"seq gap at {expected_seq} (got {_shown(_int_or(seq))})"
             stored = e.get("hash")
             payload = {k: v for k, v in e.items() if k != "hash"}
             if payload.get("prev_hash") != prev:
                 return False, f"prev_hash mismatch at seq {expected_seq}"
-            if _hash(prev, payload) != stored:
+            try:
+                computed = _hash(prev, payload)
+            except canonical.UnsafeIntegerError:
+                # An integer past 2**53 has no RFC 8785 form, so this entry cannot be the one its
+                # hash was computed over (`append` refuses to write one): the chain does not
+                # reproduce here, which is the existing finding, at this entry. Raising crashed
+                # the verifier on input from the bundle; writing still raises.
+                return False, f"hash mismatch at seq {expected_seq}"
+            if computed != stored:
                 return False, f"hash mismatch at seq {expected_seq}"
             prev = stored
             expected_seq += 1

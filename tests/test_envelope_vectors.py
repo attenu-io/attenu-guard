@@ -32,6 +32,7 @@ from attenu_guard import canonical, evidence, vectors  # noqa: E402
 from attenu_guard.wire import HS256TestSigner  # noqa: E402
 
 import generate_envelopes  # tests/vectors/generate_envelopes.py  # noqa: E402
+import generate_bundles  # tests/vectors/generate_bundles.py  # noqa: E402
 
 _REPO_FILE = _ROOT / "tests" / "vectors" / "envelopes" / "envelope_vectors_v1.json"
 _PACKAGE_FILE = _ROOT / "src" / "attenu_guard" / "vectors" / "envelopes" / "envelope_vectors_v1.json"
@@ -850,6 +851,326 @@ class TestWitnessAlgorithm(unittest.TestCase):
                 self.assertTrue(evidence.verify_envelopes(
                     self.case["bundle"], witness_keys=self.case["witness_keys"],
                     envelope_bytes=[raw])["ok"])
+
+
+# =========================================================================
+# Trust-row expiry: `not_after` on a witness_keys row (attenu-io/attenu-guard#22)
+# =========================================================================
+class TestTrustRowExpiry(unittest.TestCase):
+    """A `witness_keys` row may carry `not_after`, an RFC 3339 UTC date-time. At or after it the
+    row is left out of the trust set, so its envelopes fail the existing
+    `envelope_unknown_witness`, and the message says the key expired and when. A malformed
+    `not_after` raises `ValueError` naming the kid, like any other bad row. A row without one
+    is trusted at any time, as before."""
+
+    NOT_AFTER = "2026-10-05T00:00:00Z"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])   # valid_spawn_envelope
+        cls.kid = generate_envelopes.WITNESS_KID
+        cls.other = generate_envelopes.WITNESS_KID_B
+
+    def _rows(self, **fields):
+        rows = [dict(k) for k in self.case["witness_keys"]]
+        rows[0].update(fields)                      # the row of the kid that signed the envelope
+        self.assertEqual(rows[0]["kid"], self.kid)
+        return rows
+
+    def _report(self, rows, now):
+        return evidence.verify_envelopes(self.case["bundle"], witness_keys=rows, now=now)
+
+    def test_a_row_inside_its_validity_is_trusted(self):
+        report = self._report(self._rows(not_after=self.NOT_AFTER), now="2026-10-04T23:59:59Z")
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "witness-signed")
+        self.assertEqual(report["witnesses"], {generate_envelopes.SPAWN_SEQ: self.kid})
+
+    def test_an_expired_row_is_left_out_and_the_message_says_when(self):
+        for now in (self.NOT_AFTER, "2026-10-05T00:00:01Z"):     # at, and after
+            with self.subTest(now=now):
+                report = self._report(self._rows(not_after=self.NOT_AFTER), now=now)
+                self.assertFalse(report["ok"])
+                self.assertEqual(
+                    [(d["reason"], d["seq"], d["node"]) for d in report["failure_details"]],
+                    [("envelope_unknown_witness", generate_envelopes.SPAWN_SEQ,
+                      self.case["bundle"]["entries"][generate_envelopes.SPAWN_SEQ]["node"])])
+                self.assertEqual(
+                    report["failures"],
+                    [f"envelope_unknown_witness: witness kid={self.kid!r} alg='EdDSA' is not in "
+                     f"the trusted witness keys ({[self.other]!r}): the key expired at "
+                     f"not_after={self.NOT_AFTER!r}"])
+                self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ],
+                                 "process-asserted")
+                self.assertEqual(report["witnesses"], {})
+
+    def test_verify_bundle_takes_now_and_reports_the_expiry_in_its_own_list(self):
+        signer = HS256TestSigner(bytes.fromhex(self.case["signer"]["secret_hex"]),
+                                 kid=self.case["signer"]["kid"])
+        rows = self._rows(not_after=self.NOT_AFTER)
+        before = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=rows,
+                                        now="2026-10-04T00:00:00Z")
+        after = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=rows,
+                                       now="2026-10-06T00:00:00Z")
+        self.assertTrue(before["ok"], before["failures"])
+        self.assertFalse(after["ok"])
+        self.assertEqual(after["checks"]["envelopes"], "FAILED")
+        self.assertEqual([d["reason"] for d in after["failure_details"]],
+                         ["envelope_unknown_witness"])
+        self.assertIn("the key expired at not_after='2026-10-05T00:00:00Z'", after["failures"][0])
+
+    def test_a_row_without_not_after_is_trusted_at_any_time(self):
+        for now in (None, "1970-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+            with self.subTest(now=now):
+                self.assertTrue(self._report(self._rows(), now=now)["ok"])
+
+    def test_the_default_now_is_the_current_utc_time(self):
+        self.assertFalse(self._report(self._rows(not_after="2000-01-01T00:00:00Z"), None)["ok"])
+        self.assertTrue(self._report(self._rows(not_after="9999-12-31T23:59:59Z"), None)["ok"])
+
+    def test_a_malformed_not_after_raises_naming_the_kid(self):
+        for bad in ("2026-10-05", "2026-10-05T00:00:00", "2026-10-05T00:00:00+00:00",
+                    "2026-10-05 00:00:00Z", "2026-13-01T00:00:00Z", "2026-02-30T00:00:00Z",
+                    "2026-10-05T24:00:00Z", "2026-10-05T00:00:60Z", "2026-10-05T00:00:00Z\n",
+                    " 2026-10-05T00:00:00Z", "", None, 1759622400, True, ["2026-10-05T00:00:00Z"],
+                    # Unicode decimal digits that are not ASCII: `\d` and `int()` both took
+                    # them, and RFC 3339's DIGIT does not.
+                    "\uff12\uff10\uff12\uff16-10-05T00:00:00Z", "2026-10-05T00:00:00.\uff15Z",
+                    "\u0662\u0660\u0662\u0666-10-05T00:00:00Z"):
+            with self.subTest(not_after=repr(bad)):
+                with self.assertRaises(ValueError) as raised:
+                    self._report(self._rows(not_after=bad), now=None)
+                self.assertIn(repr(self.kid), str(raised.exception))
+                self.assertIn("not_after", str(raised.exception))
+
+    def test_expiry_never_excuses_a_malformed_row(self):
+        # An expired row is still configuration, and still checked whole.
+        for fields in ({"public_key_hex": "zz" * 32}, {"alg": "none"}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    self._report(self._rows(not_after="2000-01-01T00:00:00Z", **fields), now=None)
+
+    def test_rfc3339_fractions_and_lower_case_are_accepted(self):
+        rows = self._rows(not_after="2026-10-05t00:00:00.5z")
+        self.assertTrue(self._report(rows, now="2026-10-05T00:00:00.4Z")["ok"])
+        self.assertFalse(self._report(rows, now="2026-10-05T00:00:00.5Z")["ok"])
+
+    def test_now_may_be_an_aware_datetime_a_string_or_epoch_seconds(self):
+        from datetime import datetime, timedelta, timezone
+        rows = self._rows(not_after=self.NOT_AFTER)
+        instant = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        for now in (instant, self.NOT_AFTER, instant.timestamp(), int(instant.timestamp()),
+                    instant.astimezone(timezone(timedelta(hours=3)))):
+            with self.subTest(now=repr(now)):
+                self.assertFalse(self._report(rows, now=now)["ok"])
+        self.assertTrue(self._report(rows, now=instant - timedelta(seconds=1))["ok"])
+        for bad in (datetime(2026, 10, 5), "yesterday", True, float("nan"), float("inf"), [0]):
+            with self.subTest(now=repr(bad)):
+                with self.assertRaises(ValueError):
+                    self._report(rows, now=bad)
+
+    def test_the_mapping_form_honours_not_after_too(self):
+        row = self._rows(not_after="2000-01-01T00:00:00Z")[0]
+        report = evidence.verify_envelopes(self.case["bundle"], witness_keys={self.kid: row})
+        self.assertEqual([d["reason"] for d in report["failure_details"]],
+                         ["envelope_unknown_witness"])
+        self.assertIn("the key expired at not_after='2000-01-01T00:00:00Z'", report["failures"][0])
+
+    def test_a_kid_named_by_two_rows_is_refused_whichever_row_comes_first(self):
+        # The later row used to win: a row added to expire a key left it trusted when it came
+        # first, and an expired row beside a live one trusted the key anyway. One kid, one row.
+        live = self._rows()[0]
+        expired = dict(live, not_after="2000-01-01T00:00:00Z")
+        for rows in ([live, expired], [expired, live], [live, dict(live)]):
+            with self.subTest(rows=[r.get("not_after") for r in rows]):
+                with self.assertRaises(ValueError) as raised:
+                    evidence.verify_envelopes(self.case["bundle"], witness_keys=rows)
+                self.assertEqual(str(raised.exception),
+                                 f"witness key {self.kid!r}: more than one row names this kid")
+
+    def test_a_row_member_outside_the_four_is_refused(self):
+        # A row is read whole. Read by projection, a misspelled `notAfter` was a key that never
+        # expired and a `not_before` was a bound nobody checked.
+        for member in ("notAfter", "not_before", "comment"):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError) as raised:
+                    evidence.verify_envelopes(self.case["bundle"],
+                                              witness_keys=self._rows(**{member: "x"}))
+                self.assertEqual(str(raised.exception),
+                                 f"witness key {self.kid!r}: the row carries members this build "
+                                 f"does not evaluate and will not ignore: {member!r}")
+
+    def test_in_the_mapping_form_a_row_may_repeat_its_kid_and_must_agree(self):
+        row = self._rows()[0]
+        self.assertTrue(evidence.verify_envelopes(self.case["bundle"],
+                                                  witness_keys={self.kid: row})["ok"])
+        with self.assertRaises(ValueError) as raised:
+            evidence.verify_envelopes(self.case["bundle"],
+                                      witness_keys={self.kid: dict(row, kid=self.other)})
+        self.assertEqual(str(raised.exception),
+                         f"witness key {self.kid!r}: its row names a different kid, {self.other!r}")
+
+
+class TestWitnessesMap(unittest.TestCase):
+    """`report["envelopes"]["witnesses"]`: the index in `bundle["entries"]` of every
+    witness-signed entry -> the kid of the envelope that verified for it. By index, the entry the
+    subject resolved to, which is what `attenu-guard verify --entries` reads `state=` from."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])      # one envelope, seq 1
+        cls.seed = generate_envelopes.SEEDS[generate_envelopes.WITNESS_KID]
+
+    def _sign(self, entries, seq):
+        return evidence.sign_envelope(entries, seq, self.seed,
+                                      kid=generate_envelopes.WITNESS_KID,
+                                      at=generate_envelopes.OBSERVED_AT,
+                                      method=generate_envelopes.OBSERVED_METHOD)
+
+    def _report(self, bundle):
+        return evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+
+    def test_a_verified_envelope_names_its_entry_by_index_and_no_other_entry(self):
+        # The vector ledger numbers its entries from 0, so the index and the seq agree here.
+        self.assertEqual(self._report(self.case["bundle"])["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+    def test_a_disputed_entry_is_not_witness_signed_and_not_in_the_map(self):
+        # Two envelopes over one entry: the state falls back and the entry leaves `witnesses`.
+        # `results` still keeps what the first witness said.
+        bundle = copy.deepcopy(self.case["bundle"])
+        envelope = self._sign(bundle["entries"], generate_envelopes.SPAWN_SEQ)
+        bundle["envelopes"] = [envelope, copy.deepcopy(envelope)]
+        report = self._report(bundle)
+        self.assertEqual(report["states"][generate_envelopes.SPAWN_SEQ], "process-asserted")
+        self.assertEqual(report["witnesses"], {})
+        self.assertEqual(report["results"][generate_envelopes.SPAWN_SEQ], "matched")
+
+    def test_of_two_entries_sharing_a_seq_only_the_signed_copy_is_witness_signed(self):
+        # A copy of the spawn appended with the spawn's seq. A subject naming that seq covers the
+        # later entry, and `sign_envelope` resolves it the same way, so the witness signed the
+        # copy. Keyed by seq, the map could not say which of the two that was.
+        bundle = copy.deepcopy(self.case["bundle"])
+        entries = bundle["entries"]
+        entries.append(dict(entries[generate_envelopes.SPAWN_SEQ]))
+        generate_bundles._rehash_chain(entries)
+        copy_at = len(entries) - 1
+        bundle["envelopes"] = [self._sign(entries, generate_envelopes.SPAWN_SEQ)]
+        self.assertEqual(bundle["envelopes"][0]["subject"]["entry_hash"], entries[copy_at]["hash"])
+        report = self._report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"], {copy_at: generate_envelopes.WITNESS_KID})
+
+    def test_a_seq_that_is_not_an_integer_takes_no_envelope(self):
+        # c51: an entry whose seq is `true` took the envelope written for seq 1, because True == 1
+        # and hash(True) == hash(1) in Python. The envelope here is signed over that very entry,
+        # so before the lookup took the schema's integer rule it verified and the entry read
+        # witness-signed. A bool, a fractional number or a string seq names nothing.
+        for bad in (True, 1.5, "1"):
+            with self.subTest(seq=repr(bad)):
+                bundle = copy.deepcopy(self.case["bundle"])
+                entries = bundle["entries"]
+                entries[generate_envelopes.SPAWN_SEQ]["seq"] = bad
+                generate_bundles._rehash_chain(entries)
+                envelope = copy.deepcopy(bundle["envelopes"][0])
+                envelope["subject"]["entry_hash"] = entries[generate_envelopes.SPAWN_SEQ]["hash"]
+                bundle["envelopes"] = [_resign(envelope)]
+                report = self._report(bundle)
+                self.assertEqual([(d["reason"], d["seq"], d["node"])
+                                  for d in report["failure_details"]],
+                                 [("envelope_subject_mismatch", generate_envelopes.SPAWN_SEQ, None)])
+                self.assertEqual(report["failures"],
+                                 ["envelope_subject_mismatch: no entry at seq 1 in this bundle"])
+                self.assertEqual(report["failure_entries"], [None])
+                self.assertEqual(report["witnesses"], {})
+
+    def test_an_entry_without_a_seq_is_covered_by_its_index(self):
+        # Absent means the index, as it always did. The subject names the index, and the hash it
+        # is checked against is that entry's own, recomputed by index rather than looked up by a
+        # seq the entry does not have.
+        bundle = copy.deepcopy(self.case["bundle"])
+        entries = bundle["entries"]
+        del entries[generate_envelopes.SPAWN_SEQ]["seq"]
+        generate_bundles._rehash_chain(entries)
+        envelope = copy.deepcopy(bundle["envelopes"][0])
+        envelope["subject"]["entry_hash"] = entries[generate_envelopes.SPAWN_SEQ]["hash"]
+        bundle["envelopes"] = [_resign(envelope)]
+        report = self._report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+
+class TestIntegralSeqAndVersion(unittest.TestCase):
+    """A `seq` or `v` is an integral number that is not a bool, as the schema's integer type
+    defines: `1.0` is 1 and `-0.0` is 0, and RFC 8785 writes both as the integer, so an honest
+    envelope or anchor still verifies over them with no re-signing. A bool, a string, and a
+    number that is fractional or not finite are not integers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])      # one envelope, seq 1
+        cls.signer = HS256TestSigner(bytes.fromhex(cls.case["signer"]["secret_hex"]),
+                                     kid=cls.case["signer"]["kid"])
+
+    def _envelopes_report(self, bundle):
+        return evidence.verify_envelopes(bundle, witness_keys=self.case["witness_keys"])
+
+    def test_an_entry_whose_seq_is_1_0_is_the_entry_at_seq_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["entries"][generate_envelopes.SPAWN_SEQ]["seq"] = 1.0
+        report = evidence.verify_bundle(bundle, self.signer, witness_keys=self.case["witness_keys"])
+        self.assertTrue(report["ok"], report["failures"])          # same hash, same anchor
+        self.assertEqual(report["envelopes"]["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+        self.assertEqual(report["envelopes"]["states"][generate_envelopes.SPAWN_SEQ],
+                         "witness-signed")
+
+    def test_a_subject_seq_of_1_0_covers_the_entry_at_seq_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"][0]["subject"]["seq"] = 1.0        # not re-signed: JCS writes it as 1
+        report = self._envelopes_report(bundle)
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"],
+                         {generate_envelopes.SPAWN_SEQ: generate_envelopes.WITNESS_KID})
+
+    def test_an_envelope_v_of_1_0_is_version_1(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["envelopes"][0]["v"] = 1.0                     # not re-signed: JCS writes it as 1
+        self.assertTrue(self._envelopes_report(bundle)["ok"])
+
+    def test_an_envelope_v_that_is_not_an_integer_is_an_unknown_version(self):
+        for bad in (True, 1.5, "1"):
+            with self.subTest(v=repr(bad)):
+                bundle = copy.deepcopy(self.case["bundle"])
+                bundle["envelopes"][0]["v"] = bad
+                report = self._envelopes_report(bundle)
+                self.assertEqual([d["reason"] for d in report["failure_details"]],
+                                 ["envelope_unknown_version"])
+                self.assertIn(f"envelope v={bad!r} typ=", report["failures"][0])
+
+    def test_a_bundle_v_of_2_0_is_version_2_and_true_is_not_a_version(self):
+        bundle = copy.deepcopy(self.case["bundle"])
+        bundle["v"] = 2.0
+        self.assertTrue(evidence.verify_bundle(bundle, self.signer,
+                                               witness_keys=self.case["witness_keys"])["ok"])
+        bundle["v"] = True
+        report = evidence.verify_bundle(bundle, self.signer, witness_keys=self.case["witness_keys"])
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["checks"]["version"])
+        self.assertEqual(report["failures"][0], "unsupported_version: bundle v=True not in [1, 2]")
+
+    def test_a_message_prints_an_integral_seq_as_its_integer(self):
+        # A subject naming seq 9.0 in a nine-entry bundle (seqs 0-8) finds no entry; the message
+        # names it as 9, the way JavaScript and the TypeScript implementation print it.
+        bundle = copy.deepcopy(self.case["bundle"])
+        envelope = copy.deepcopy(bundle["envelopes"][0])
+        envelope["subject"]["seq"] = 9.0
+        bundle["envelopes"] = [_resign(envelope)]
+        report = self._envelopes_report(bundle)
+        self.assertEqual(report["failures"],
+                         ["envelope_subject_mismatch: no entry at seq 9 in this bundle"])
+        self.assertEqual((report["failure_details"][0]["seq"], report["failure_entries"]), (9, [None]))
 
 
 def _resign(envelope):

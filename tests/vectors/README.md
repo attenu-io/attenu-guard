@@ -310,7 +310,12 @@ for case in vectors.load_bundle_vectors()["cases"]:
 rather parse it yourself. This repository's own verifier returns the same
 information as `verify_bundle(bundle, signer)["failure_details"]`, a list of
 `{"reason", "seq", "node", "call_id", "detail"}` that is the structured twin
-of the human-readable `failures` list.
+of the human-readable `failures` list. A value the bundle supplies and a message
+prints without quotes (a node, a seq, a call id, a field name, a ceiling value)
+is printed as it is when it is printable ASCII 0x21-0x7E other than `"` and
+`\`, and otherwise as `json.dumps` with `ensure_ascii=True` and compact
+separators, then every space written as `\u0020`. No message spans two
+lines, whatever the bundle holds.
 
 ### Reason vocabulary
 
@@ -335,8 +340,8 @@ envelope v1's set, and a v2 declares its own.
 |---|---|---|
 | `integrity` | an entry's hash chain does not verify (a rehashed, reordered, or altered entry) | the first entry that fails |
 | `integrity(anchor)` | the signed anchor does not verify against the bundle head | chain level, no `{seq, node}` |
-| `monotonicity` | a spawned node's authority is not a subset of its parent's on some dimension (scopes, ttl, a ceiling, an omitted ceiling); the message names the dimension | the spawn entry of that node |
-| `containment` | an `allow` names a node the bundle never spawned, or a scope outside that node's authority | the allow entry |
+| `monotonicity` | a spawned node's authority is not a subset of its parent's on some dimension (scopes, ttl, a ceiling, an omitted ceiling), and the message names the dimension; or the spawn names no parent defined earlier in the bundle (`parent` absent, null, not a string, unknown, defined only later, or the spawn's own node), or a parent an earlier `kill` revoked; or a root or spawn defines a node already defined | the spawn entry of that node, or the second definition |
+| `containment` | an `allow` names a node not defined earlier in the bundle, or a node an earlier `kill` revoked, or a scope outside that node's authority; a `scope` that is not a string, or a `context` that is not an object, is outside it | the allow entry |
 | `chain_id_mismatch` | an entry, or the anchor, names a different chain than the bundle | the foreign entry; chain level for the anchor |
 | `missing_root` | the bundle has zero or more than one root event | chain level |
 | `unsupported_version` | the bundle's `v` is not one this verifier supports | chain level |
@@ -346,8 +351,9 @@ envelope v1's set, and a v2 declares its own.
 | `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS` (the 39 names under Entry fields), so the verifier would be reporting success on an entry it did not fully read | that entry |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
-| `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority | that root entry |
-| `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority | that spawn entry |
+| `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority, or its `node` is not a string | that root entry |
+| `unreadable_granted` | a `spawn` entry's `granted` cannot be read back as an authority, or its `node` is not a string | that spawn entry |
+| `invalid_node` | an entry other than a root, a spawn or an allow carries a `node` that is not a string; a null `node` counts as absent | that entry |
 | `invalid_policy` | on a `schema_version=1` chain, an `allow` carries a `policy` value this format does not define (`unlisted` is the only one v1 defines). On a v2 chain the v2 record check owns that entry and reports it as `invalid_allow` (see `reject_unknown_policy_value`) | that allow entry |
 | `policy_on_non_allow` | an entry other than an `allow` carries `policy`, which is an allow-only field | that entry |
 
@@ -407,7 +413,7 @@ observer-envelope section below is their full treatment.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` or `event` that is not an integer or a string, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry, or nowhere when `seq` names no entry |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named | the covered entry |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all | the covered entry |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA | the covered entry |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row has a `not_after` at or before the verification time is not in `witness_keys` | the covered entry |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string | the covered entry |
 
 `tests/test_bundle_vectors.py` asserts that this vocabulary and the reasons `evidence.py` can
@@ -761,9 +767,12 @@ states:
 - **`witness-signed`**: an envelope exists whose `subject` matches the entry
   recomputed from the bundle, and whose signature verifies under the trusted key
   its `witness.kid` names. A signature that verifies under some *other* trusted
-  key is not witness-signed. The state says where the signature came from and
-  nothing about authority: the witness is whoever holds that key, and nothing in
-  the envelope makes that the delegation parent.
+  key is not witness-signed. A witness signature covers the entry's hash and
+  chain position plus what the witness-key holder observed (result, time,
+  method); it does not attest that the action was permitted. An entry can be
+  witness-signed and still fail containment or monotonicity. The witness is
+  whoever holds that key, and nothing in the envelope makes that the delegation
+  parent.
 - **`process-asserted`**: no envelope, or one that does not verify. This covers
   two facts a bundle does not separate — a hop nobody undertook to cover, and a
   hop a witness undertook to cover and never did. v1 takes the weaker reading
@@ -864,8 +873,16 @@ no anchor. `witness_keys` is the trust set: `public_key_hex` is the raw 32-byte
 Ed25519 public key in lowercase hex and `alg` is `EdDSA`, the JOSE identifier
 both implementations use for Ed25519. Carrying the keys in the file is what
 makes `reject_bad_signature` and `reject_unknown_witness` checkable from the
-file alone. `expect_states` covers **every** entry in the chain, so an
-accepting case asserts a state and not merely the absence of a failure.
+file alone. A row may also carry `not_after`, an RFC 3339 UTC date-time such as
+`2026-10-05T00:00:00Z`. A row whose `not_after` is at or before the verification
+time is left out of the trust set, so its envelopes fail
+`envelope_unknown_witness`; a `not_after` that is not an RFC 3339 UTC date-time
+is a malformed row. A row is read whole: a member other than `kid`, `alg`,
+`public_key_hex` and `not_after`, or a second row naming a kid already named, is
+a malformed row too. No row in this file carries `not_after`, so every case
+scores the same at any time. `expect_states` covers **every** entry in the
+chain, so an accepting case asserts a state and not merely the absence of a
+failure.
 
 Two more fields appear on one case each:
 
@@ -907,7 +924,14 @@ evidence of *which* entry the witness signed, because the hash covers
 verifier finds the entry at `seq`, recomputes its hash from the bundle, and
 compares; the locators are then checked against **that same entry**, and one
 that disagrees is the same failure at the same position. `seq` is the lookup
-key, so there is nothing to compare it against.
+key, so there is nothing to compare it against. The entry at `seq` is the one
+whose own `seq` is that integer, or, for an entry with no `seq` member at all,
+the one at that index. An integer here is an integral number that is not a
+bool, as the schema's integer type defines, so `1.0` is 1 and `true` is not;
+the same rule reads every `seq` and `v` in a bundle, an anchor and an envelope.
+An entry whose `seq` is a bool, a string, null, or a fractional or non-finite
+number is at no `seq`, so no envelope covers it. Where two entries are at one
+`seq`, the later one is covered.
 
 `observed.result` is a closed vocabulary of three. `matched` means the witness
 saw the event and it agrees with what it independently observed.
@@ -934,7 +958,7 @@ is reported on its own.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` that is not an integer or an `event` that is not a string, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row has a `not_after` at or before the verification time is not in `witness_keys` |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string |
 
 ### Scoring, and the two rules on where a failure may land
