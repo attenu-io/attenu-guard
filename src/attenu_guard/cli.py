@@ -15,10 +15,10 @@ attenu-guard — command-line tool.
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 
+from . import _display
 from .audit import AuditLog
 
 # A ledger with no entries has nothing to verify. Reporting it OK would be a fail-open: a
@@ -78,22 +78,29 @@ def _witness_keys(path: str):
     """The trust set for a bundle's observer envelopes, read from `--witness-keys FILE`.
 
     The file is the `witness_keys` array the interop vectors carry — `[{"kid", "alg",
-    "public_key_hex"}]` — or one whole vector case, in which case its `witness_keys` member is
-    used. Without a trust set every envelope in a bundle fails `envelope_unknown_witness`, which
-    is correct (an unknown key is not a trusted one) and useless as a default, so this is how a
-    bundle carrying envelopes is verified from the command line."""
-    import json
-    parsed = json.loads(Path(path).read_text(encoding="utf-8"))
+    "public_key_hex"}]`, each row optionally with `not_after` — or one whole vector case, in
+    which case its `witness_keys` member is used. Without a trust set every envelope in a bundle
+    fails `envelope_unknown_witness`, which is correct (an unknown key is not a trusted one) and
+    useless as a default, so this is how a bundle carrying envelopes is verified from the
+    command line.
+
+    Every row is validated here, by the same `_trusted_witnesses` the verifier runs, so a bad
+    row is reported against this file before any bundle is read. Raises `OSError` when the file
+    cannot be read, and `ValueError` when it is not a trust set: not JSON, not an array of rows,
+    or a row the verifier refuses, whose message names the kid. The messages say nothing a
+    particular JSON parser or language would phrase differently."""
+    from attenu_guard import evidence
+    try:
+        parsed = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):   # JSON is UTF-8 text, so both mean "not JSON"
+        raise ValueError("the file is not valid JSON") from None
     if isinstance(parsed, dict) and "witness_keys" in parsed:
         parsed = parsed["witness_keys"]
     if not isinstance(parsed, list):
-        raise ValueError(f"{path}: expected a list of {{kid, alg, public_key_hex}}, "
-                         f"got {type(parsed).__name__}")
+        raise ValueError("expected a JSON array of {kid, alg, public_key_hex} rows, "
+                         "or a vector case carrying one as witness_keys")
+    evidence._trusted_witnesses(parsed)
     return parsed
-
-
-#: A value printed as it is on an `--entries` line: printable ASCII other than space, `"` and `\`.
-_BARE_VALUE = re.compile(r'[!#-\[\]-~]+')
 
 
 def _entry_value(value) -> str:
@@ -105,12 +112,13 @@ def _entry_value(value) -> str:
     `failed=` attached to it. So a value is printed as it is only when it is printable ASCII
     with no space, `"` or `\\`, and an integer in decimal. Anything else is printed as JSON
     with every character outside printable ASCII escaped as \\uXXXX and spaces as \\u0020, so
-    it never contains whitespace and `json.loads` gives the value back."""
-    if isinstance(value, str) and _BARE_VALUE.fullmatch(value):
+    it never contains whitespace and `json.loads` gives the value back (`_display.escaped`, the
+    rule the finding messages use too)."""
+    if isinstance(value, str) and _display.BARE.fullmatch(value):
         return value
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":")).replace(" ", "\\u0020")
+    return _display.escaped(value)
 
 
 def _same(a, b) -> bool:
@@ -191,9 +199,11 @@ def _verify(args: list):
     and reported as "not checked" otherwise. `--witness-keys FILE` supplies the trusted witness keys for a
     bundle carrying observer envelopes; without it every envelope fails `envelope_unknown_witness`, and the
     output says which flag to pass. A row in that file may carry `not_after` (RFC 3339 UTC); past it the key is
-    no longer trusted. A ledger with zero events is reported EMPTY, not OK. `--entries` prints, after all of
-    that, `entries:` and one line per entry (`_entry_lines`); without it the output is unchanged. Exit 0 = ok,
-    2 = a check failed or there was nothing to check, 1 = usage."""
+    no longer trusted. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
+    refuses) is one line naming the file and, for a bad row, the kid. A ledger with zero events is reported
+    EMPTY, not OK. `--entries` prints, after all of that, `entries:` and one line per entry (`_entry_lines`);
+    without it the output is unchanged. Exit 0 = ok, 2 = a check failed, there was nothing to check, or the
+    trust file is malformed, 1 = usage (a missing argument or a file that cannot be read)."""
     path, key_hex, pub_hex, kid, witness_path, per_entry = None, None, None, None, None, False
     it = iter(args)
     for a in it:
@@ -224,7 +234,14 @@ def _verify(args: list):
         elif pub_hex:
             from attenu_guard.wire import Ed25519Verifier
             signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
-        witness_keys = _witness_keys(witness_path) if witness_path else None
+        witness_keys = None
+        if witness_path:
+            try:
+                witness_keys = _witness_keys(witness_path)
+            except OSError as e:                       # unreadable, as for the bundle path above
+                print(f"cannot read {witness_path}: {e.strerror or e}"); return 1
+            except ValueError as e:                    # read, and not a trust set; a bad row names its kid
+                print(f"cannot use --witness-keys {witness_path}: {e}"); return 2
         rep = evidence.verify_bundle(bundle, signer, witness_keys=witness_keys)
         c = rep["checks"]
         print(f"integrity={c['integrity']} monotonicity={c['monotonicity']} containment={c['containment']} anchor={c['anchor']} "

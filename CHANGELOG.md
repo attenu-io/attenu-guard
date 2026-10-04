@@ -17,6 +17,8 @@ Versions follow semantic versioning.
 
 ### Fixed
 - **The MCP server-verifier recipe did not run on mcp 2.x** (#12). mcp 2.x removed the in-memory session helper the demo and its tests imported, renamed `FastMCP` to `MCPServer` and snake-cased the result fields (`is_error`), and `pip install 'attenu-guard[mcp]'` resolves to 2.x. The recipe now connects with `mcp.Client(server)` on 2.x and keeps the 1.x path, and CI runs its demo and tests pinned on mcp 1.28.1 and on 2.3.0
+- **A bundle value could add lines to the `attenu-guard verify` output.** Finding messages printed node names, seqs, call ids, ledger field names, ttl values and ceiling values without quotes, so a value carrying a line break ended its line and started a forged one: a node named `run\nOK\nx` printed a line reading `OK` above the real `FAILED`, and a forged `seq` did the same to a plain ledger's `TAMPERED` line. Each such value is now printed by one rule, the one `--entries` uses: as it always has when it is printable ASCII without space, `"` or `\`, and as escaped JSON otherwise. Clean bundles print byte for byte as before, and the `failures` strings change only for values outside that set. `ceilings.describe()`, and with it `Authority.describe()`, prints ceiling values the same way
+- **A malformed `--witness-keys` file ended in a traceback.** A row with a bad `not_after`, key or `alg` now prints one line naming the file and the kid, `cannot use --witness-keys FILE: witness key 'K': …`, and exits 2. A file that is not JSON, or not an array of rows, is reported in the same form, and one that cannot be read is `cannot read FILE: …` with exit 1, as for the bundle path
 
 ## [0.18.0] - 2026-09-28
 

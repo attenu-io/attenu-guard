@@ -310,7 +310,12 @@ for case in vectors.load_bundle_vectors()["cases"]:
 rather parse it yourself. This repository's own verifier returns the same
 information as `verify_bundle(bundle, signer)["failure_details"]`, a list of
 `{"reason", "seq", "node", "call_id", "detail"}` that is the structured twin
-of the human-readable `failures` list.
+of the human-readable `failures` list. A value the bundle supplies and a message
+prints without quotes (a node, a seq, a call id, a field name, a ceiling value)
+is printed as it is when it is printable ASCII 0x21-0x7E other than `"` and
+`\`, and as JSON otherwise, with every character outside printable ASCII
+escaped as `\uXXXX` and every space as ` `. No message spans two lines,
+whatever the bundle holds.
 
 ### Reason vocabulary
 

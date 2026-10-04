@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import canonical
+from ._display import shown as _shown
 
 SCHEMA_VERSION = 1
 GENESIS = "0" * 64
@@ -195,7 +196,9 @@ class AuditLog:
         expected_seq = 0
         for e in entries:
             if e.get("seq") != expected_seq:
-                return False, f"seq gap at {expected_seq} (got {e.get('seq')})"
+                # `seq` is the entry's own value, which a forged ledger chooses: printed by the
+                # one rule (`_display.shown`) so it cannot end the reader's line and start another.
+                return False, f"seq gap at {expected_seq} (got {_shown(e.get('seq'))})"
             stored = e.get("hash")
             payload = {k: v for k, v in e.items() if k != "hash"}
             if payload.get("prev_hash") != prev:

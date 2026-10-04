@@ -169,17 +169,18 @@ def _witness_keys(not_after=None) -> list:
     return [row]
 
 
-def _forged_allow_bundle(scope: str = "web.search") -> dict:
+def _forged_allow_bundle(scope: str = "web.search", chain_id: str = "witness-custody-run") -> dict:
     """The separated-custody run of 2026-09-30, bundle (d), rebuilt with the public API.
 
     A supervisor holding {web.search, docs.write} delegates {docs.write} to a brief-writer. The
     child's docs.write is allowed and its web.search denied. Then the process appends an allow
     of `scope` on the child's node, in chain order, and the witness signs it exactly as it
     signed the honest spawn and allow: it signs what it receives in chain order. The chain,
-    the anchor and every envelope verify; containment is the only check that catches it."""
+    the anchor and every envelope verify; containment is the only check that catches it.
+    The node ids are `<chain_id>:n0` and `<chain_id>:n1`."""
     from attenu_guard import Authority, Guard
     sup = Guard.issue("supervisor", Authority(scopes={"web.search", "docs.write"}),
-                      task="research and write a brief", chain_id="witness-custody-run")
+                      task="research and write a brief", chain_id=chain_id)
     child = sup.delegate("brief-writer", Authority(scopes={"docs.write"}), task="write the brief")
     child.check("docs.write")
     child.check("web.search")
@@ -369,6 +370,185 @@ class TestVerifyEntries(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertNotIn("envelope_", out)
         self.assertIn("containment=False", out)
+
+
+# =========================================================================
+# The default output: a bundle value cannot end a line or start a forged one
+# =========================================================================
+class TestDefaultOutputEscaping(unittest.TestCase):
+    """Finding messages print bundle values through `_display.shown`: as they always have when
+    the value is printable ASCII without space, `"` or `\\`, as escaped JSON otherwise. Clean
+    bundles print byte for byte as before (the walkthrough pin above, the forged-allow pin, and
+    tests/test_cli_first_minute.py); these are the bundles that are not clean."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _write(self, name: str, obj) -> str:
+        path = self.td / name
+        path.write_text(json.dumps(obj))
+        return str(path)
+
+    def test_a_forged_node_name_cannot_add_a_line_to_the_default_output(self):
+        # Printed raw, this node name turns the containment finding into three lines, the
+        # middle one reading `OK`, above the real FAILED.
+        chain_id = "run\nOK\nx"
+        bundle = self._write("bundle.json", _forged_allow_bundle(chain_id=chain_id))
+        keys = self._write("keys.json", _witness_keys())
+        args = (bundle, "--hs256-key", ANCHOR_SECRET.hex(), "--witness-keys", keys)
+        rc, out = run("verify", *args)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.splitlines(), [
+            "integrity=True monotonicity=True containment=False anchor=verified nodes=2 "
+            "actions_checked=2",
+            "  - containment: allow of 'web.search' on \"run\\nOK\\nx:n1\" outside its "
+            "authority ['docs.write']",
+            "FAILED",
+        ])
+        token = out.splitlines()[1].split(" on ", 1)[1].split(" outside", 1)[0]
+        self.assertEqual(json.loads(token), f"{chain_id}:n1")
+        # --entries adds exactly the header and one line per entry, nothing more.
+        rc, with_entries = run("verify", *args, "--entries")
+        self.assertEqual(len(with_entries.splitlines()), 3 + 1 + 5)
+
+    def test_a_ceiling_value_cannot_add_a_line_to_a_monotonicity_finding(self):
+        # A spawn the process wrote itself, granting a looser region allow-list than the parent
+        # holds, with one region carrying a line break. The ceiling description prints it.
+        from attenu_guard import Allow, Authority, Guard
+        root = Guard.issue("root", Authority(scopes={"docs.write"}, ceilings=[Allow("region", {"us"})]),
+                           chain_id="mono")
+        ledger = root.audit_log()
+        wider = Authority(scopes={"docs.write"}, ceilings=[Allow("region", {"us", "eu\nOK"})])
+        ledger.append("spawn", 1, chain_id="mono", node="mono:n1", parent=ledger.entries[0]["node"],
+                      agent="child", task="t", granted=wider.to_wire())
+        signer = HS256TestSigner(b"mono", kid="mono")
+        bundle = self._write("bundle.json", evidence.export_bundle(ledger, signer))
+        rc, out = run("verify", bundle, "--hs256-key", b"mono".hex())
+        self.assertEqual(rc, 2)
+        self.assertEqual(out.splitlines(), [
+            "integrity=True monotonicity=False containment=True anchor=verified nodes=2 "
+            "actions_checked=0",
+            "  - monotonicity: mono:n1 not ⊆ parent mono:n0 (ceiling region in "
+            "[\"eu\\nOK\", us] looser than parent region in [us])",
+            "FAILED",
+        ])
+
+    def test_a_forged_seq_cannot_add_a_line_to_a_plain_ledger_verdict(self):
+        from attenu_guard import Authority, Guard
+        log = self.td / "l.jsonl"
+        Guard.issue("a", Authority(scopes={"x.read"}), audit_path=log)
+        rows = [json.loads(line) for line in log.read_text().splitlines()]
+        rows[0]["seq"] = "0\nOK"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        rc, out = run("verify", str(log))
+        self.assertEqual((rc, out), (2, 'TAMPERED — seq gap at 0 (got "0\\nOK")\n'))
+
+
+# =========================================================================
+# A malformed trust file is one line naming the file and the kid, exit 2
+# =========================================================================
+class TestMalformedTrustFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+        self.bundle = self.td / "bundle.json"
+        self.bundle.write_text(json.dumps(_forged_allow_bundle()))
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _keys(self, content) -> str:
+        path = self.td / "keys.json"
+        path.write_text(content if isinstance(content, str) else json.dumps(content))
+        return str(path)
+
+    def _row(self, **fields) -> list:
+        rows = _witness_keys()
+        rows[0].update(fields)
+        return rows
+
+    def test_a_bad_row_is_one_line_naming_the_file_and_the_kid(self):
+        cases = [
+            (self._row(not_after="2026-10-05"),
+             f"witness key '{WITNESS_KID}': not_after must be an RFC 3339 UTC date-time such as "
+             "'2026-10-05T00:00:00Z', got '2026-10-05'"),
+            (self._row(not_after=None),
+             f"witness key '{WITNESS_KID}': not_after must be an RFC 3339 UTC date-time such as "
+             "'2026-10-05T00:00:00Z', got None"),
+            (self._row(public_key_hex="zz" * 32),
+             f"witness key '{WITNESS_KID}': public_key_hex is not hexadecimal"),
+            (self._row(alg="none"),
+             f"witness key '{WITNESS_KID}': alg must be 'EdDSA', got 'none'"),
+        ]
+        for rows, reason in cases:
+            with self.subTest(reason=reason):
+                path = self._keys(rows)
+                rc, out = run("verify", str(self.bundle), "--witness-keys", path)
+                self.assertEqual((rc, out), (2, f"cannot use --witness-keys {path}: {reason}\n"))
+
+    def test_a_file_that_is_not_a_trust_set_says_so_in_one_line(self):
+        for content, reason in (
+                ("{not json", "the file is not valid JSON"),
+                ({"kid": WITNESS_KID}, "expected a JSON array of {kid, alg, public_key_hex} rows, "
+                                       "or a vector case carrying one as witness_keys")):
+            with self.subTest(reason=reason):
+                path = self._keys(content)
+                rc, out = run("verify", str(self.bundle), "--witness-keys", path)
+                self.assertEqual((rc, out), (2, f"cannot use --witness-keys {path}: {reason}\n"))
+
+    def test_a_trust_file_that_cannot_be_read_is_a_usage_error(self):
+        missing = self.td / "no-such-keys.json"
+        rc, out = run("verify", str(self.bundle), "--witness-keys", str(missing))
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, f"cannot read {missing}: No such file or directory\n")
+
+    def test_no_traceback_over_a_real_subprocess(self):
+        path = self._keys(self._row(not_after="2026-10-05T00:00:00+00:00"))
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        proc = subprocess.run([sys.executable, "-m", "attenu_guard.cli", "verify", str(self.bundle),
+                               "--witness-keys", path], env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(len(proc.stdout.splitlines()), 1)
+        self.assertIn(f"witness key '{WITNESS_KID}': not_after", proc.stdout)
+
+    def test_a_good_file_still_verifies(self):
+        rc, out = run("verify", str(self.bundle), "--witness-keys", self._keys(_witness_keys()))
+        self.assertEqual(rc, 2)                       # the forged allow, and nothing about the keys
+        self.assertNotIn("cannot use", out)
+        self.assertIn("containment=False", out)
+
+
+# =========================================================================
+# The display rule itself
+# =========================================================================
+class TestDisplayRule(unittest.TestCase):
+    def test_bare_values_print_as_they_always_have(self):
+        from attenu_guard import _display
+        for value, printed in (("docs.write", "docs.write"), ("vectors:n1", "vectors:n1"),
+                               ("max_calls[fs.write]", "max_calls[fs.write]"), (7, "7"),
+                               (-3, "-3"), (1.5, "1.5"), (None, "None"), (True, "True")):
+            with self.subTest(value=value):
+                self.assertEqual(_display.shown(value), printed)
+
+    def test_anything_else_prints_as_whitespace_free_ascii_json(self):
+        from attenu_guard import _display
+        for value, printed in (("", '""'), ("a b", '"a\\u0020b"'), ("x\ny", '"x\\ny"'),
+                               ('q"', '"q\\""'), ("back\\slash", '"back\\\\slash"'),
+                               ("é", '"\\u00e9"'), (" ", '"\\u2028"'),
+                               ("‮", '"\\u202e"'), ("\x7f", '"\\u007f"'),
+                               ({"a": [1, "b c"]}, '{"a":[1,"b\\u0020c"]}')):
+            with self.subTest(value=value):
+                shown = _display.shown(value)
+                self.assertEqual(shown, printed)
+                self.assertTrue(all(0x21 <= ord(c) <= 0x7e for c in shown), shown)
+                self.assertEqual(json.loads(shown), value)
 
 
 if __name__ == "__main__":
