@@ -46,9 +46,9 @@ def _integral(value):
 
 def _int_or(value):
     """`value` as a message prints it: the integer when it is integral (`_integral`) and inside
-    the I-JSON safe range, so `1.0` reads 1 as it does in every other implementation, and the
-    value unchanged otherwise. Past ±(2**53 - 1) a number is not exact across implementations,
-    and it is left as Python prints it."""
+    the I-JSON safe range, so `1.0` reads 1 as JavaScript and the TypeScript implementation print
+    it, and the value unchanged otherwise. Past ±(2**53 - 1) a number is not exact across
+    implementations, and it is left as Python prints it."""
     integral = _integral(value)
     if integral is None or abs(integral) > canonical.MAX_SAFE_INTEGER:
         return value

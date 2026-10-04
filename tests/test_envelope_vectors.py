@@ -1162,7 +1162,7 @@ class TestIntegralSeqAndVersion(unittest.TestCase):
 
     def test_a_message_prints_an_integral_seq_as_its_integer(self):
         # A subject naming seq 9.0 in a nine-entry bundle (seqs 0-8) finds no entry; the message
-        # names it as 9, the way every other implementation prints that number.
+        # names it as 9, the way JavaScript and the TypeScript implementation print it.
         bundle = copy.deepcopy(self.case["bundle"])
         envelope = copy.deepcopy(bundle["envelopes"][0])
         envelope["subject"]["seq"] = 9.0
