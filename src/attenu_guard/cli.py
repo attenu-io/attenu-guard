@@ -199,7 +199,8 @@ def _verify(args: list):
     and reported as "not checked" otherwise. `--witness-keys FILE` supplies the trusted witness keys for a
     bundle carrying observer envelopes; without it every envelope fails `envelope_unknown_witness`, and the
     output says which flag to pass. A row in that file may carry `not_after` (RFC 3339 UTC); from that time on
-    the key is not trusted. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
+    the key is not trusted. The summary line ends `ungated=N` when N allows passed through un-gated (marked
+    `policy: "unlisted"`), which containment does not measure; with none, the field is left out. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
     refuses) is one line naming the file and, for a bad row, the kid. A ledger with zero events is reported
     EMPTY, not OK. `--entries` prints, after all of that, `entries:` and one line per entry (`_entry_lines`);
     without it the output is unchanged. Exit 0 = ok, 2 = a check failed, there was nothing to check, or the
@@ -244,8 +245,14 @@ def _verify(args: list):
                 print(f"cannot use --witness-keys {witness_path}: {e}"); return 2
         rep = evidence.verify_bundle(bundle, signer, witness_keys=witness_keys)
         c = rep["checks"]
-        print(f"integrity={c['integrity']} monotonicity={c['monotonicity']} containment={c['containment']} anchor={c['anchor']} "
-              f"nodes={rep['nodes']} actions_checked={rep['actions_checked']}")
+        summary = (f"integrity={c['integrity']} monotonicity={c['monotonicity']} containment={c['containment']} anchor={c['anchor']} "
+                   f"nodes={rep['nodes']} actions_checked={rep['actions_checked']}")
+        # An allow marked `policy: "unlisted"` passed through un-gated and is excused from
+        # containment, so `actions_checked` does not count it. Say how many there were, only
+        # when there were any: every other bundle prints this line exactly as it always has.
+        if rep["ungated"]:
+            summary += f" ungated={rep['ungated']}"
+        print(summary)
         for f in rep["failures"]:
             print(f"  - {f}")
         # A bundle carrying envelopes and no trust set fails every one of them, correctly and

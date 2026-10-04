@@ -980,6 +980,47 @@ class TestDelegationStructureCli(unittest.TestCase):
 
 
 # =========================================================================
+# The summary line says how many allows passed through un-gated, when any did
+# =========================================================================
+class TestUngatedCount(unittest.TestCase):
+    """An allow marked `policy: "unlisted"` is excused from containment, by design, so
+    `actions_checked` does not count it and a reader could not tell it was there. The summary line
+    now ends `ungated=N` when N > 0; a bundle without such allows prints exactly as before."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_a_bundle_with_unlisted_allows_says_how_many(self):
+        from attenu_guard import Authority, Guard
+        g = Guard.issue("a", Authority({"crm.read"}, [], ttl=600), chain_id="t")
+        g.check("crm.read")
+        g.record_passthrough("shell.exec")
+        g.record_passthrough("admin.delete")      # outside the node's authority, and not measured
+        path = self.td / "bundle.json"
+        path.write_text(json.dumps(evidence.export_bundle(g.audit_log(), HS256TestSigner(b"k", kid="k"))))
+        summary = ("integrity=True monotonicity=True containment=True anchor=verified nodes=1 "
+                   "actions_checked=1 ungated=2")
+        rc, out = run("verify", str(path), "--hs256-key", b"k".hex())
+        self.assertEqual((rc, out), (0, f"{summary}\nOK\n"))
+        rc, out = run("verify", str(path), "--hs256-key", b"k".hex(), "--entries")
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith(f"{summary}\nOK\nentries:\n"), out)
+        self.assertEqual(len(out.splitlines()), 3 + 4)
+
+    def test_a_bundle_without_them_prints_as_before(self):
+        rc, out = run("verify", str(SAMPLES / "clean.bundle.json"), "--hs256-key", KEY)
+        self.assertEqual((rc, out), (0, "integrity=True monotonicity=True containment=True "
+                                        "anchor=verified nodes=3 actions_checked=2\nOK\n"))
+        rc, out = run("verify", str(SAMPLES / "clean.bundle.json"), "--hs256-key", KEY, "--entries")
+        self.assertNotIn("ungated", out)
+
+
+# =========================================================================
 # The display rule itself
 # =========================================================================
 class TestDisplayRule(unittest.TestCase):
