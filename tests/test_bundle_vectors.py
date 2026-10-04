@@ -729,6 +729,26 @@ class TestDelegationStructure(unittest.TestCase):
         self.assertEqual(self._monotonicity(report), [
             "monotonicity: t:n1 names no parent defined earlier in this bundle (parent t:n2)"])
 
+    def test_a_cycle_of_widened_nodes_fails_without_any_missing_parent(self):
+        # X's parent is Y and Y's parent is X, both granted admin.delete, so each is ⊆ the other
+        # and neither is ever compared with the root, which holds only crm.read. No parent is
+        # missing, and through 0.18.0 this verified OK with an allow on admin.delete. A parent
+        # defined by an EARLIER entry is what breaks the cycle: X names Y before Y exists.
+        root, _leaf = self._chain(depth=3)
+        bundle = self._bundle_of(root)
+        entries = bundle["entries"]
+        x, y, allow = entries[1], entries[2], entries[3]
+        self.assertEqual((x["node"], x["parent"], y["node"], y["parent"], allow["event"]),
+                         ("t:n1", "t:n0", "t:n2", "t:n1", "allow"))
+        widened = dict(x["granted"], scopes=[self.WIDENED, "crm.read"])
+        x["parent"], x["granted"], y["granted"] = "t:n2", widened, dict(widened)
+        allow["scope"] = self.WIDENED
+        report = self._verify(bundle)
+        self.assertFalse(report["ok"])
+        message = "monotonicity: t:n1 names no parent defined earlier in this bundle (parent t:n2)"
+        self.assertEqual(report["failures"], [message])
+        self.assertEqual(report["failure_entries"], [1])
+
     def test_a_node_is_defined_once(self):
         # The second definition of t:n1, widened and from the root, would have been the only
         # one read; a spawn reusing the root's own node is the same defect.
