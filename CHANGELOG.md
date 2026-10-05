@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-10-05
+
 ### Changed
 - **`Allow.one_of` and `Deny.not_one_of` are no longer frozensets.** Each is a read-only `collections.abc.Set` whose members compare by JSON type and value (see Fixed): `in`, `len`, iteration, `<=`, `&` and `|` work as before, and the constructors still take any iterable. Compared with a plain `set` or `frozenset`, the plain set's own equality decides, and it still merges `true` and 1
 - **A deny-list now matches by JSON type, so it admits some values it refused before.** Through 0.19.0, `not_one_of: [true]` also refused 1 and 1.0, `[false]` refused 0, `[1]` refused `true` and `[0]` refused `false`, because `True == 1` in Python made each pair one member: measured on the 0.4.0, 0.10.0, 0.17.0, 0.18.0 and 0.19.0 wheels. Each member now refuses only a value of its own JSON type, as in attenu-guard-ts, in `Guard.check`, `VerifiedChain.permits` and `verify_bundle`'s containment check. To keep refusing both, list both: `not_one_of: [true, 1]`
