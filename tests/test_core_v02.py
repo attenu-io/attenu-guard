@@ -264,6 +264,154 @@ class TestDeny(unittest.TestCase):
         self.assertEqual(ceiling_from_wire(wire), c)
 
 
+def _typed(values):
+    """`values` with each one's type beside it: `[1] == [True]` in Python, and these tests
+    are about exactly that difference."""
+    return [(type(v).__name__, v) for v in values]
+
+
+class TestMembersAreKeyedByJsonType(unittest.TestCase):
+    """`one_of` / `not_one_of` members are JSON values, and a member is its JSON type plus its
+    value (attenu-ops#110). Python's `True == 1` and `hash(True) == hash(1)`, so a plain
+    frozenset merged them: an allow-list holding only the number 1 admitted `true`, and the
+    same signed deny-list built two members here and three in the TypeScript implementation.
+    Every expectation below is what the TypeScript implementation answers for the same input."""
+
+    def test_an_allow_list_of_1_refuses_true(self):
+        c = ceiling_from_wire({"key": "tier", "type": "allow", "one_of": [1]})
+        self.assertTrue(c.permits({"tier": 1}))
+        self.assertFalse(c.permits({"tier": True}))
+        self.assertFalse(Allow("tier", [True]).permits({"tier": 1}))
+        self.assertFalse(Allow("tier", [0]).permits({"tier": False}))
+        self.assertFalse(Allow("tier", [False]).permits({"tier": 0}))
+
+    def test_a_deny_list_of_1_does_not_deny_true(self):
+        c = Deny("tier", [1])
+        self.assertFalse(c.permits({"tier": 1}))
+        self.assertTrue(c.permits({"tier": True}))
+        both = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        for denied in ("secret", True, 1, 1.0):
+            with self.subTest(denied=denied):
+                self.assertFalse(both.permits({"region": denied}))
+        for allowed in ("1", "True", 2, False, 0):
+            with self.subTest(allowed=allowed):
+                self.assertTrue(both.permits({"region": allowed}))
+
+    def test_a_string_is_not_the_number_it_spells(self):
+        self.assertFalse(Allow("t", ["1"]).permits({"t": 1}))
+        self.assertFalse(Allow("t", [1]).permits({"t": "1"}))
+
+    def test_a_number_is_its_numeric_value(self):
+        c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": [1, 1.0]})
+        self.assertEqual(len(c.one_of), 1)
+        self.assertTrue(c.permits({"t": 1}))
+        self.assertTrue(c.permits({"t": 1.0}))
+        self.assertEqual(c.to_wire()["one_of"], [1])
+        self.assertEqual(Allow("t", [1]), Allow("t", [1.0]))
+        self.assertEqual(hash(Allow("t", [1])), hash(Allow("t", [1.0])))
+
+    def test_each_json_kind_is_its_own_member(self):
+        c = ceiling_from_wire({"key": "t", "type": "deny", "not_one_of": [0, False, None, "", "0"]})
+        self.assertEqual(len(c.not_one_of), 5)
+        self.assertEqual(_typed(c.to_wire()["not_one_of"]),
+                         _typed(["", 0, "0", False, None]))
+
+    def test_the_issue_deny_list_re_emits_three_members_in_the_typescript_order(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(len(c.not_one_of), 3)
+        self.assertEqual(_typed(c.to_wire()["not_one_of"]), _typed([1, True, "secret"]))
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()),
+                         b'{"key":"region","not_one_of":[1,true,"secret"],"type":"deny"}')
+
+    def test_members_that_print_alike_keep_the_order_they_arrived_in(self):
+        # The wire order is sorted by each member's printed text, and a tie keeps the order the
+        # members arrived in, as a stable sort over a JavaScript Set does.
+        for given in (["1", 1], [1, "1"], ["True", True], [True, "True"]):
+            with self.subTest(given=given):
+                c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": given})
+                self.assertEqual(_typed(c.to_wire()["one_of"]), _typed(given))
+
+    def test_an_integral_float_sorts_and_prints_as_the_integer(self):
+        # `1.0` is 1 (the integral-number rule), so it sorts as "1", before "1+", and prints as 1.
+        c = Allow("t", [1.0, "1+"])
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()), b'{"key":"t","one_of":[1,"1+"],"type":"allow"}')
+        self.assertEqual(c.describe(), "t in [1, 1+]")
+        self.assertEqual(Allow("t", ["1000000000000000.", 1e15]).to_wire()["one_of"],
+                         [1e15, "1000000000000000."])
+
+    def test_a_negative_zero_member_is_0(self):
+        # A JavaScript Set holds -0 as +0, so the TypeScript implementation sorts and prints a
+        # member read from `-0.0` as 0: after -1, where "-0.0" would sort before it.
+        c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": [-0.0, -1]})
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()), b'{"key":"t","one_of":[-1,0],"type":"allow"}')
+        self.assertEqual(c.describe(), "t in [-1, 0]")
+        self.assertEqual(len(Deny("t", [-0.0, 0]).not_one_of), 1)
+
+    def test_describe_prints_every_typed_member(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(c.describe(), "region not in [1, True, secret]")
+        self.assertEqual(Allow("tier", [1.0]).describe(), "tier in [1]")
+
+    def test_a_denial_names_the_members_in_wire_order(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(_typed(c.permits({"region": 1}).reasons[0].limit), _typed([1, True, "secret"]))
+        refused = Allow("tier", [1]).permits({"tier": True}).reasons[0]
+        self.assertEqual((_typed(refused.limit), refused.requested), (_typed([1]), True))
+
+    def test_subsumption_keeps_true_and_1_apart(self):
+        self.assertFalse(Allow("t", [True]).subsumes(Allow("t", [1])))
+        self.assertFalse(Allow("t", [1]).subsumes(Allow("t", [True])))
+        self.assertTrue(Allow("t", [1, True]).subsumes(Allow("t", [True])))
+        # A deny-list subsumes another when it forbids a subset of what the other forbids.
+        self.assertFalse(Deny("t", [True]).subsumes(Deny("t", [1])))
+        self.assertTrue(Deny("t", [1]).subsumes(Deny("t", [1, True])))
+
+    def test_narrowing_keeps_true_and_1_apart(self):
+        self.assertEqual(len(Allow("t", [1]).narrow(Allow("t", [True])).one_of), 0)
+        self.assertEqual(_typed(Deny("t", [1]).narrow(Deny("t", [True])).to_wire()["not_one_of"]),
+                         _typed([1, True]))
+
+    def test_meet_and_is_narrower_than_use_typed_members(self):
+        parent = Authority(scopes={"crm.read"}, ceilings=[Allow("tier", [True])], ttl=60)
+        child = Authority(scopes={"crm.read"}, ceilings=[Allow("tier", [1])], ttl=60)
+        self.assertFalse(child.is_narrower_than(parent))
+        met = parent.meet(child)
+        self.assertTrue(met.is_narrower_than(parent))
+        self.assertFalse(met.permits("crm.read", {"tier": 1}))
+        self.assertFalse(met.permits("crm.read", {"tier": True}))
+
+    def test_ceilings_are_equal_only_with_the_same_typed_members(self):
+        self.assertNotEqual(Allow("t", [1]), Allow("t", [True]))
+        self.assertNotEqual(Deny("t", ["secret", True, 1]), Deny("t", ["secret", True]))
+        self.assertNotEqual(Authority(scopes={"crm.read"}, ceilings=[Allow("t", [1])]),
+                            Authority(scopes={"crm.read"}, ceilings=[Allow("t", [True])]))
+
+    def test_a_list_or_an_object_member_is_still_refused(self):
+        for member in ([1], {"a": 1}):
+            with self.subTest(member=member):
+                with self.assertRaises(TypeError) as ctx:
+                    ceiling_from_wire({"key": "k", "type": "allow", "one_of": [member]})
+                self.assertEqual(str(ctx.exception), f"unhashable type: {type(member).__name__!r}")
+                with self.assertRaises(TypeError):
+                    Deny("k", ["ok", member])
+
+    def test_a_list_or_an_object_in_the_context_is_no_member(self):
+        # It used to raise TypeError out of permits() (and out of verify_bundle). No member is
+        # a list or an object, so an allow-list refuses one and a deny-list does not deny it.
+        for value in ([1], {"a": 1}):
+            with self.subTest(value=value):
+                self.assertFalse(Allow("k", [1]).permits({"k": value}))
+                self.assertTrue(Deny("k", [1]).permits({"k": value}))
+
+    def test_the_members_still_compare_with_a_plain_set(self):
+        self.assertEqual(Allow("region", {"eu", "us"}).one_of, frozenset({"eu", "us"}))
+        self.assertEqual(sorted(Deny("tool", ["rm", "curl", "rm"]).not_one_of), ["curl", "rm"])
+        self.assertIn("eu", Allow("region", {"eu"}).one_of)
+
+
 class TestPrefix(unittest.TestCase):
     def test_permits_prefix_match(self):
         c = Prefix("path", "/tmp/")

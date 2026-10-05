@@ -33,7 +33,7 @@ import re
 from typing import Any, Mapping
 
 from attenu_guard import canonical
-from attenu_guard._display import escaped as _escaped, shown as _shown
+from attenu_guard._display import escaped as _escaped, shown as _shown, shown_text as _shown_text
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
@@ -317,8 +317,9 @@ def _ceiling_in_finding(ceiling) -> str:
     if bound is not None:
         return f"{_shown(ceiling.key)}<={_shown(getattr(ceiling, bound))}"
     if kind is _c.Allow or kind is _c.Deny:
+        # The typed members in wire order, as describe() lists them (attenu-ops#110).
         members = ceiling.one_of if kind is _c.Allow else ceiling.not_one_of
-        listed = ", ".join(_shown(v) for v in sorted(members, key=str))
+        listed = ", ".join(_shown_text(_c._member_text(v), v) for v in _c._in_wire_order(members))
         return f"{_shown(ceiling.key)} {'in' if kind is _c.Allow else 'not in'} [{listed}]"
     if kind is _c.Prefix:
         return f"{_shown(ceiling.key)} startswith {_shown(ceiling.prefix)}"

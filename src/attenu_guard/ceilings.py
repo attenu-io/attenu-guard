@@ -22,6 +22,9 @@ which an unrecognised bound is silently dropped.
 """
 from __future__ import annotations
 
+import collections.abc
+import math
+import numbers
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
@@ -314,15 +317,117 @@ class EgressRank:
 # extra argument).
 # =========================================================================
 
+def _member_key(value) -> tuple:
+    """A `one_of` / `not_one_of` member as JSON tells members apart: its JSON type, then its value.
+
+    Python has `True == 1` and `hash(True) == hash(1)`, so a frozenset of the raw members merged
+    the two (attenu-ops#110): `one_of: [1]` admitted `true`, and the same signed
+    `not_one_of: ["secret", true, 1]` held two members here and three in the TypeScript
+    implementation, whose Set keeps them apart. Keyed by type, a boolean is never a number, a
+    string is never the number it spells, and null is its own kind. A number, any
+    `numbers.Number`, is its numeric value, so `1.0` is 1, as in JavaScript and in RFC 8785. Any
+    other value outside the JSON data model is a kind of its own, compared by Python's equality.
+    A list or an object raises TypeError here, `unhashable type: 'list'`, which is how a member
+    that is one was always refused."""
+    if value is None:
+        return ("null", None)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, numbers.Number):
+        return ("number", value)
+    hash(value)   # raises for a list or an object, in the same words on every Python version
+    return ("other", value)
+
+
+def _member_text(value) -> str:
+    """A member as `describe()` and a finding print it, and the text the wire form sorts by.
+
+    The TypeScript implementation's `strOf` of the member its Set holds, so the two print and
+    order the same members the same way: Python's `str` of a string, a boolean or null, and a
+    number the way JavaScript holds it, which has no separate float. An integral number prints in
+    decimal with no `.0` (`1.0` prints 1, the integral-number rule), and that includes -0.0,
+    which a JavaScript Set stores as 0. Any other number prints as Python's `repr`, the same
+    digits."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value.is_integer() and abs(value) < 1e21:
+            return str(int(value))
+        return repr(value)
+    return value if isinstance(value, str) else str(value)
+
+
+def _in_wire_order(members) -> list:
+    """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
+    `_member_text`, which is the order the TypeScript implementation emits. Members that print
+    alike (`"1"` and 1) keep the order they arrived in, as a stable sort over a JavaScript Set
+    does, so the same signed bytes re-emit the same bytes in both implementations."""
+    return sorted(members, key=_member_text)
+
+
+class _Members(collections.abc.Set):
+    """The members of an `Allow` or a `Deny`: a set of JSON values told apart by `_member_key`.
+
+    Holds the first value given for each key, in the order given, which is what a JavaScript Set
+    holds. Read-only and hashable, and a `collections.abc.Set`, so `in`, `len`, iteration, `<=`,
+    `&` and `|` work as they did on the frozenset this replaces, with members compared by type.
+    Compared against a plain set or frozenset, the plain set's own equality decides, and that
+    still merges `true` and 1."""
+
+    __slots__ = ("_values", "_keys")
+
+    def __init__(self, values=()):
+        by_key: dict = {}
+        for value in values:
+            by_key.setdefault(_member_key(value), value)
+        self._values = tuple(by_key.values())
+        self._keys = frozenset(by_key)
+
+    def __contains__(self, value) -> bool:
+        try:
+            return _member_key(value) in self._keys
+        except TypeError:   # a list or an object: no member is one, as in a JavaScript Set
+            return False
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __eq__(self, other):
+        if isinstance(other, _Members):
+            return self._keys == other._keys
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        # The hash of a frozenset of the same values, so this and a plain set it compares equal
+        # to hash alike. `true` and 1 share a hash without being equal, which a hash allows.
+        return hash(frozenset(self._values))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({list(self._values)!r})"
+
+    def __reduce__(self):
+        return (type(self), (self._values,))
+
+
 @dataclass(frozen=True)
 class Allow:
-    """Membership allow-list: the ctx value MUST be one of `one_of`."""
+    """Membership allow-list: the ctx value MUST be one of `one_of`.
+
+    A member is its JSON type plus its value (`_member_key`): `one_of: [1]` admits 1 and 1.0,
+    and refuses `true` and `"1"`."""
     key: str
-    one_of: frozenset
+    one_of: _Members
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "one_of", frozenset(self.one_of))
+        object.__setattr__(self, "one_of", _Members(self.one_of))
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -332,38 +437,41 @@ class Allow:
         if val is None or val in self.one_of:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     sorted(self.one_of, key=str), val))
+                                     _in_wire_order(self.one_of), val))
 
     def describe(self) -> str:
-        return f"{self.key} in [{', '.join(sorted(map(str, self.one_of)))}]"
+        return f"{self.key} in [{', '.join(map(_member_text, _in_wire_order(self.one_of)))}]"
 
     def narrow(self, other: "Allow") -> "Allow":
-        # admits fewer values -> stricter: set intersection.
-        return Allow(self.key, self.one_of & frozenset(other.one_of), self.field)
+        # admits fewer values -> stricter: set intersection, in self's order.
+        return Allow(self.key, [v for v in self.one_of if v in other.one_of], self.field)
 
     def subsumes(self, other: "Allow") -> bool:
-        return frozenset(other.one_of) <= self.one_of
+        return all(v in self.one_of for v in other.one_of)
 
     def to_wire(self) -> dict:
-        d = {"key": self.key, "type": "allow", "one_of": sorted(self.one_of, key=str)}
+        d = {"key": self.key, "type": "allow", "one_of": _in_wire_order(self.one_of)}
         if self.field is not None and self.field != self.key:
             d["field"] = self.field
         return d
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Allow":
-        return cls(d["key"], frozenset(d.get("one_of", ())), d.get("field"))
+        return cls(d["key"], d.get("one_of", ()), d.get("field"))
 
 
 @dataclass(frozen=True)
 class Deny:
-    """Membership deny-list: the ctx value MUST NOT be one of `not_one_of`."""
+    """Membership deny-list: the ctx value MUST NOT be one of `not_one_of`.
+
+    A member is its JSON type plus its value (`_member_key`): `not_one_of: [1]` refuses 1 and
+    1.0, and does not refuse `true` or `"1"`."""
     key: str
-    not_one_of: frozenset
+    not_one_of: _Members
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "not_one_of", frozenset(self.not_one_of))
+        object.__setattr__(self, "not_one_of", _Members(self.not_one_of))
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -373,29 +481,29 @@ class Deny:
         if val is None or val not in self.not_one_of:
             return Decision.allow()
         return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     sorted(self.not_one_of, key=str), val))
+                                     _in_wire_order(self.not_one_of), val))
 
     def describe(self) -> str:
-        return f"{self.key} not in [{', '.join(sorted(map(str, self.not_one_of)))}]"
+        return f"{self.key} not in [{', '.join(map(_member_text, _in_wire_order(self.not_one_of)))}]"
 
     def narrow(self, other: "Deny") -> "Deny":
-        # denying MORE values is stricter: set union.
-        return Deny(self.key, self.not_one_of | frozenset(other.not_one_of), self.field)
+        # denying MORE values is stricter: set union, self's members first.
+        return Deny(self.key, [*self.not_one_of, *other.not_one_of], self.field)
 
     def subsumes(self, other: "Deny") -> bool:
         # self admits a superset of other's admitted set iff self forbids a
         # subset of what other forbids.
-        return self.not_one_of <= frozenset(other.not_one_of)
+        return all(v in other.not_one_of for v in self.not_one_of)
 
     def to_wire(self) -> dict:
-        d = {"key": self.key, "type": "deny", "not_one_of": sorted(self.not_one_of, key=str)}
+        d = {"key": self.key, "type": "deny", "not_one_of": _in_wire_order(self.not_one_of)}
         if self.field is not None and self.field != self.key:
             d["field"] = self.field
         return d
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Deny":
-        return cls(d["key"], frozenset(d.get("not_one_of", ())), d.get("field"))
+        return cls(d["key"], d.get("not_one_of", ()), d.get("field"))
 
 
 @dataclass(frozen=True)

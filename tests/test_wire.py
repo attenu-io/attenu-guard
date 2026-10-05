@@ -21,7 +21,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "tests" / "vectors"))
 
-from attenu_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
+from attenu_guard import Allow, Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
 from attenu_guard import canonical, wire  # noqa: E402
 from attenu_guard import vectors  # noqa: E402  (the shipped copy of tests/vectors/)
 
@@ -603,6 +603,61 @@ class TestExpiry(unittest.TestCase):
         token = wire.serialize(root, signer, iat=0)
         vc = wire.load([token], signer, now=10)  # now == exp: still valid
         self.assertEqual(vc.depth, 0)
+
+
+# =========================================================================
+# one_of / not_one_of members keep their JSON type through load()
+# =========================================================================
+class TestTypedMembersOnTheWire(unittest.TestCase):
+    """A token's `one_of` / `not_one_of` members are read by JSON type and value, both in the
+    subsumption check between tokens and in the leaf's decision (attenu-ops#110). Python's
+    `True == 1`, and a frozenset of members merged the two: a leaf allow-list of 1 admitted
+    `true`, and a child holding 1 passed as narrower than a parent holding `true`. Each case
+    rewrites a real chain's constraint and re-signs it, so only the reading is under test."""
+
+    def setUp(self):
+        self.signer = _signer()
+        root = Guard.issue("orchestrator",
+                           Authority(scopes={"crm.read"}, ceilings=[Allow("tier", {"gold"})], ttl=3600))
+        leaf = root.delegate("summarizer",
+                             Authority(scopes={"crm.read"}, ceilings=[Allow("tier", {"gold"})], ttl=900),
+                             task="summarize Q3 pipeline")
+        self.tokens = wire.serialize_chain(leaf, self.signer)
+
+    def _chain(self, root_constraint, leaf_constraint):
+        def on_root(payload):
+            payload["authorization_details"][0]["constraints"] = [root_constraint]
+
+        def on_leaf(payload):
+            payload["authorization_details"][0]["constraints"] = [leaf_constraint]
+
+        tokens = _tamper_root_and_repair_chain(self.tokens, self.signer, on_root)
+        tokens[-1] = _tamper_leaf(tokens[-1], self.signer, on_leaf)
+        return tokens
+
+    def test_a_child_holding_1_is_not_narrower_than_a_parent_holding_true(self):
+        tokens = self._chain({"key": "tier", "type": "allow", "one_of": [True]},
+                             {"key": "tier", "type": "allow", "one_of": [1]})
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(tokens, self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_a_verified_allow_list_of_1_refuses_true(self):
+        allow_1 = {"key": "tier", "type": "allow", "one_of": [1]}
+        chain = wire.load(self._chain(allow_1, allow_1), self.signer)
+        self.assertTrue(chain.permits("crm.read", {"tier": 1}))
+        self.assertFalse(chain.permits("crm.read", {"tier": True}))
+
+    def test_a_verified_deny_list_keeps_every_typed_member(self):
+        deny = {"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]}
+        chain = wire.load(self._chain(deny, deny), self.signer)
+        emitted = chain.leaf_authority.to_wire()["constraints"][0]["not_one_of"]
+        self.assertEqual([(type(v).__name__, v) for v in emitted],
+                         [("int", 1), ("bool", True), ("str", "secret")])
+        for denied in (1, True, "secret"):
+            with self.subTest(denied=denied):
+                self.assertFalse(chain.permits("crm.read", {"region": denied}))
+        self.assertTrue(chain.permits("crm.read", {"region": "public"}))
 
 
 # =========================================================================

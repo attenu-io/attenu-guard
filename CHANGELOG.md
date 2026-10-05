@@ -6,6 +6,16 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- **`Allow.one_of` and `Deny.not_one_of` are no longer frozensets.** Each is a read-only `collections.abc.Set` whose members compare by JSON type and value (see Fixed): `in`, `len`, iteration, `<=`, `&` and `|` work as before, and the constructors still take any iterable. Compared with a plain `set` or `frozenset`, the plain set's own equality decides, and it still merges `true` and 1
+
+### Fixed
+- **An allow-list holding the number 1 admitted `true`.** `one_of: [1]` accepted `"tier": true`, and `one_of: [0]` accepted `false`, in every release from 0.4.0 through 0.19.0. `Allow` and `Deny` held their members in a frozenset, and `True == 1` in Python, so `true` and 1 were one member. Measured on the 0.4.0, 0.10.0, 0.17.0, 0.18.0 and 0.19.0 wheels; the `Allow` and `Deny` code is the same in every release in between. Every reader of a member was affected: `Guard.check` allowed the call, `VerifiedChain.permits` allowed it from a verified token, and `verify_bundle` passed it as contained. A child holding `one_of: [1]` passed as narrower than a parent holding `[true]`, in `load()` and in a bundle's monotonicity check, and delegating `[true]` from a parent holding `[1]` granted `[true]`. A deny-list lost members the same way: `not_one_of: ["secret", true, 1]` re-emitted `[true, "secret"]` where the TypeScript implementation re-emits `[1, true, "secret"]`, so the same signed constraint built two different authorities. A member is now its JSON type plus its value: a boolean is never a number, a string is never the number it spells, and null is its own kind. A number is its numeric value, so `1.0` is 1. `to_wire` emits each typed member once, in the order the TypeScript implementation emits them, so both re-emit the same bytes. `describe()`, a denial's `limit` and the verifier's findings list the same members as the TypeScript implementation, and print an integral number as the integer (`1.0` as 1). Reported as attenu-ops#110
+- **A list or an object in a request context raised `TypeError` out of `permits()`.** Against an allow-list or a deny-list, `Guard.check` raised instead of deciding, and `verify_bundle` raised out of the verifier, so `attenu-guard verify` ended in a traceback with exit 1. No member is a list or an object, so an allow-list now refuses such a value and a deny-list does not deny it, as in the TypeScript implementation. A list or an object as a member is still refused with `TypeError: unhashable type: 'list'`, now in those words on every Python version
+
+### Known differences
+- A list or an object as a `one_of` or `not_one_of` member is refused here: as `malformed` in a token, and as `unreadable_authority` or `unreadable_granted` in a bundle. attenu-guard-ts accepts it and compares it by object identity, so no request value matches it, and a child that repeats it is not narrower than the parent holding it. A lone root token carrying one verifies there
+
 ## [0.19.0] - 2026-10-05
 
 ### Added

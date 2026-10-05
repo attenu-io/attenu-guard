@@ -60,7 +60,7 @@ def _ceiling_from_wire_whole(c):
     Comparing whole VALUES instead was tried and reverted before release: it
     could not tell "we ignored a member" from "we normalised a value", and
     several built-ins legitimately normalise. `Allow.to_wire` emits its
-    `one_of` sorted and `from_wire` holds it as a frozenset, and `to_wire`
+    `one_of` sorted and `from_wire` holds it as a set, and `to_wire`
     omits `field` when it equals `key`. RFC 8785 canonicalises object member
     ORDER and never reorders array elements, and the draft puts no ordering or
     uniqueness requirement on `one_of` -- so `["us-west", "us-east"]` is a

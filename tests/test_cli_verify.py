@@ -483,6 +483,91 @@ class TestDefaultOutputEscaping(unittest.TestCase):
 
 
 # =========================================================================
+# An allow-list or deny-list member is its JSON type and value (attenu-ops#110)
+# =========================================================================
+def _typed_bundle(root_constraint, *, granted=None, context=None) -> dict:
+    """A ledger written entry by entry, so each constraint is in it exactly as given: a root
+    holding docs.write under `root_constraint`, then, when `granted` is given, a spawn granted
+    docs.write under it, then, when `context` is given, an allow of docs.write with that context
+    on the last node defined. The node ids are `typed:n0` and `typed:n1`."""
+    from attenu_guard import AuditLog
+    def authority(constraint):
+        return {"scopes": ["docs.write"], "constraints": [constraint], "ttl": None}
+    log = AuditLog()
+    log.append("root", 0, chain_id="typed", node="typed:n0", agent="root",
+               authority=authority(root_constraint))
+    node = "typed:n0"
+    if granted is not None:
+        log.append("spawn", 1, chain_id="typed", parent="typed:n0", node="typed:n1", agent="child",
+                   task="t", requested=authority(granted), granted=authority(granted))
+        node = "typed:n1"
+    if context is not None:
+        log.append("allow", 2, chain_id="typed", node=node, scope="docs.write", tool=None,
+                   context=context)
+    return evidence.export_bundle(log, HS256TestSigner(b"typed", kid="typed"))
+
+
+class TestTypedMembersInABundle(unittest.TestCase):
+    """`verify_bundle` reads an allow-list or deny-list member as the enforcement point does: by
+    its JSON type and value. Python's `True == 1`, so an allow of `tier: true` under
+    `one_of: [1]` verified as contained, and a child granted `one_of: [1]` under a parent holding
+    `one_of: [true]` verified as a subset of it. The TypeScript verifier reports both."""
+
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _verify(self, bundle: dict) -> tuple[int, list]:
+        path = self.td / "bundle.json"
+        path.write_text(json.dumps(bundle))
+        rc, out = run("verify", str(path), "--hs256-key", b"typed".hex())
+        return rc, out.splitlines()
+
+    def test_an_allow_of_true_under_an_allow_list_of_1_is_outside_the_authority(self):
+        allow_1 = {"key": "tier", "type": "allow", "one_of": [1]}
+        self.assertEqual(self._verify(_typed_bundle(allow_1, context={"tier": True})), (2, [
+            "integrity=True monotonicity=True containment=False anchor=verified nodes=1 "
+            "actions_checked=1",
+            "  - containment: allow of 'docs.write' on typed:n0 outside its authority ['docs.write']",
+            "FAILED",
+        ]))
+        self.assertEqual(self._verify(_typed_bundle(allow_1, context={"tier": 1}))[0], 0)
+
+    def test_a_child_granted_1_under_a_parent_holding_true_is_not_its_subset(self):
+        bundle = _typed_bundle({"key": "tier", "type": "allow", "one_of": [True]},
+                               granted={"key": "tier", "type": "allow", "one_of": [1]})
+        self.assertEqual(self._verify(bundle), (2, [
+            "integrity=True monotonicity=False containment=True anchor=verified nodes=2 "
+            "actions_checked=0",
+            "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling tier in [1] looser than "
+            "parent tier in [True])",
+            "FAILED",
+        ]))
+
+    def test_a_list_in_the_context_is_a_finding_not_a_crash(self):
+        # It raised TypeError out of verify_bundle. No member is a list, so an allow-list
+        # refuses one and a deny-list does not deny it.
+        rc, lines = self._verify(_typed_bundle({"key": "tier", "type": "allow", "one_of": [1]},
+                                               context={"tier": [1]}))
+        self.assertEqual((rc, lines[0]), (2, "integrity=True monotonicity=True containment=False "
+                                             "anchor=verified nodes=1 actions_checked=1"))
+        rc, lines = self._verify(_typed_bundle({"key": "tier", "type": "deny", "not_one_of": [1]},
+                                               context={"tier": [1]}))
+        self.assertEqual((rc, lines[-1]), (0, "OK"))
+
+    def test_a_finding_prints_each_typed_member_as_typescript_does(self):
+        from attenu_guard.ceilings import ceiling_from_wire
+        deny = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(evidence._ceiling_in_finding(deny), "region not in [1, True, secret]")
+        allow = ceiling_from_wire({"key": "tier", "type": "allow", "one_of": [1.0, "1+"]})
+        self.assertEqual(evidence._ceiling_in_finding(allow), "tier in [1, 1+]")
+
+
+# =========================================================================
 # A malformed trust file is one line naming the file and the kid, exit 2
 # =========================================================================
 class TestMalformedTrustFile(unittest.TestCase):
