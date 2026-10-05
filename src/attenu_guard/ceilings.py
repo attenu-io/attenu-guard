@@ -361,6 +361,30 @@ def _member_text(value) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _not_a_scalar(value) -> str | None:
+    """What a refusal calls a request value that an `Allow` or a `Deny` cannot compare with its
+    members, or None for a JSON scalar: a string, a number or a boolean. (null never gets here: it
+    asserts nothing.)
+
+    No member is an array, an object or a value outside JSON, so no such value can equal one. An
+    allow-list refuses it as a non-member. A deny-list must refuse it too: waving `["rm"]` through
+    because it is not the string "rm" would fail open."""
+    if isinstance(value, (bool, str, numbers.Number)):
+        return None
+    if isinstance(value, (list, tuple)):
+        return "an array"
+    if isinstance(value, collections.abc.Mapping):
+        return "an object"
+    return "a value that is not JSON"
+
+
+def _outside(key: str, list_name: str, members, value, kind: str | None) -> Reason:
+    """Why an `Allow` or a `Deny` refused `value`. `kind` is `_not_a_scalar(value)`: a value the
+    list could compare carries no message, as before; one it could not compare says so."""
+    message = "" if kind is None else f"{kind} cannot be compared with {list_name} members; refused"
+    return Reason(ReasonCode.CEILING_EXCEEDED, key, _in_wire_order(members), value, message)
+
+
 def _in_wire_order(members) -> list:
     """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
     `_member_text`, which is the order the TypeScript implementation emits. Members that print
@@ -421,7 +445,8 @@ class Allow:
     """Membership allow-list: the ctx value MUST be one of `one_of`.
 
     A member is its JSON type plus its value (`_member_key`): `one_of: [1]` admits 1 and 1.0,
-    and refuses `true` and `"1"`."""
+    and refuses `true` and `"1"`. A ctx value that is not a JSON scalar is refused
+    (`_not_a_scalar`)."""
     key: str
     one_of: _Members
     field: str | None = None
@@ -434,10 +459,12 @@ class Allow:
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or val in self.one_of:
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     _in_wire_order(self.one_of), val))
+        kind = _not_a_scalar(val)
+        if kind is None and val in self.one_of:
+            return Decision.allow()
+        return Decision.deny(_outside(self.key, "one_of", self.one_of, val, kind))
 
     def describe(self) -> str:
         return f"{self.key} in [{', '.join(map(_member_text, _in_wire_order(self.one_of)))}]"
@@ -465,7 +492,8 @@ class Deny:
     """Membership deny-list: the ctx value MUST NOT be one of `not_one_of`.
 
     A member is its JSON type plus its value (`_member_key`): `not_one_of: [1]` refuses 1 and
-    1.0, and does not refuse `true` or `"1"`."""
+    1.0, and does not refuse `true` or `"1"`. A ctx value that is not a JSON scalar is refused
+    as well (`_not_a_scalar`): a deny-list never waves through a value it cannot compare."""
     key: str
     not_one_of: _Members
     field: str | None = None
@@ -478,10 +506,12 @@ class Deny:
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or val not in self.not_one_of:
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     _in_wire_order(self.not_one_of), val))
+        kind = _not_a_scalar(val)
+        if kind is None and val not in self.not_one_of:
+            return Decision.allow()
+        return Decision.deny(_outside(self.key, "not_one_of", self.not_one_of, val, kind))
 
     def describe(self) -> str:
         return f"{self.key} not in [{', '.join(map(_member_text, _in_wire_order(self.not_one_of)))}]"

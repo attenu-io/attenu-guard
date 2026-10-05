@@ -659,6 +659,14 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                 self.assertFalse(chain.permits("crm.read", {"region": denied}))
         self.assertTrue(chain.permits("crm.read", {"region": "public"}))
 
+    def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
+        deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
+        chain = wire.load(self._chain(deny, deny), self.signer)
+        decision = chain.permits("crm.read", {"region": ["secret"]})
+        self.assertFalse(decision)
+        self.assertEqual(decision.reasons[0].message,
+                         "an array cannot be compared with not_one_of members; refused")
+
 
 # =========================================================================
 # HS256TestSigner

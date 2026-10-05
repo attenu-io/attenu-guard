@@ -548,16 +548,21 @@ class TestTypedMembersInABundle(unittest.TestCase):
             "FAILED",
         ]))
 
-    def test_a_list_in_the_context_is_a_finding_not_a_crash(self):
-        # It raised TypeError out of verify_bundle. No member is a list, so an allow-list
-        # refuses one and a deny-list does not deny it.
-        rc, lines = self._verify(_typed_bundle({"key": "tier", "type": "allow", "one_of": [1]},
-                                               context={"tier": [1]}))
-        self.assertEqual((rc, lines[0]), (2, "integrity=True monotonicity=True containment=False "
-                                             "anchor=verified nodes=1 actions_checked=1"))
-        rc, lines = self._verify(_typed_bundle({"key": "tier", "type": "deny", "not_one_of": [1]},
-                                               context={"tier": [1]}))
-        self.assertEqual((rc, lines[-1]), (0, "OK"))
+    def test_a_list_or_an_object_in_the_context_is_outside_both_lists(self):
+        # It raised TypeError out of verify_bundle. Neither list can compare such a value with its
+        # members, so an allow of one is outside an allow-list and outside a deny-list alike.
+        for constraint in ({"key": "tier", "type": "allow", "one_of": [1]},
+                           {"key": "tier", "type": "deny", "not_one_of": [1]}):
+            for value in ([1], {"a": 1}):
+                with self.subTest(constraint=constraint["type"], value=value):
+                    rc, lines = self._verify(_typed_bundle(constraint, context={"tier": value}))
+                    self.assertEqual((rc, lines), (2, [
+                        "integrity=True monotonicity=True containment=False anchor=verified "
+                        "nodes=1 actions_checked=1",
+                        "  - containment: allow of 'docs.write' on typed:n0 outside its authority "
+                        "['docs.write']",
+                        "FAILED",
+                    ]))
 
     def test_a_finding_prints_each_typed_member_as_typescript_does(self):
         from attenu_guard.ceilings import ceiling_from_wire

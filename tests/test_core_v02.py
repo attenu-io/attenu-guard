@@ -398,13 +398,42 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     Deny("k", ["ok", member])
 
-    def test_a_list_or_an_object_in_the_context_is_no_member(self):
-        # It used to raise TypeError out of permits() (and out of verify_bundle). No member is
-        # a list or an object, so an allow-list refuses one and a deny-list does not deny it.
-        for value in ([1], {"a": 1}):
-            with self.subTest(value=value):
-                self.assertFalse(Allow("k", [1]).permits({"k": value}))
-                self.assertTrue(Deny("k", [1]).permits({"k": value}))
+    def test_a_request_value_that_is_not_a_json_scalar_is_refused_by_both_lists(self):
+        # It used to raise TypeError out of permits() (and out of verify_bundle). Neither list can
+        # compare such a value with its members, so both refuse it: a deny-list that waved through
+        # `["rm"]` because it is not the string "rm" would fail open.
+        for value, kind in ((["rm"], "an array"), (("rm",), "an array"), ({"rm": 1}, "an object"),
+                            ([1], "an array"), ({"rm"}, "a value that is not JSON"),
+                            (b"rm", "a value that is not JSON")):
+            for ceiling, name in ((Allow("tool", ["rm", 1]), "one_of"),
+                                  (Deny("tool", ["rm", 1]), "not_one_of")):
+                with self.subTest(value=value, ceiling=name):
+                    decision = ceiling.permits({"tool": value})
+                    self.assertFalse(decision)
+                    (reason,) = decision.reasons
+                    self.assertEqual((reason.code, reason.constraint, reason.requested),
+                                     (ReasonCode.CEILING_EXCEEDED, "tool", value))
+                    self.assertEqual(_typed(reason.limit), _typed([1, "rm"]))
+                    self.assertEqual(reason.message,
+                                     f"{kind} cannot be compared with {name} members; refused")
+
+    def test_null_and_the_scalars_are_still_compared(self):
+        deny = Deny("tool", ["rm", 1])
+        self.assertTrue(deny.permits({"tool": None}))      # null asserts nothing, as before
+        self.assertTrue(deny.permits({}))
+        self.assertTrue(deny.permits({"tool": "ls"}))
+        self.assertFalse(deny.permits({"tool": "rm"}))
+        self.assertTrue(deny.permits({"tool": True}))
+        self.assertEqual(deny.permits({"tool": "rm"}).reasons[0].message, "")
+
+    def test_guard_check_refuses_and_records_a_list_against_a_deny_list(self):
+        g = Guard.issue("root", Authority(scopes={"shell.run"}, ceilings=[Deny("tool", {"rm"})]))
+        decision = g.check("shell.run", context={"tool": ["rm"]})
+        self.assertFalse(decision)
+        deny = g.audit_log().entries[-1]
+        self.assertEqual((deny["event"], deny["reason"]), ("deny", ReasonCode.CEILING_EXCEEDED))
+        self.assertEqual(deny["reasons"][0]["message"],
+                         "an array cannot be compared with not_one_of members; refused")
 
     def test_the_members_still_compare_with_a_plain_set(self):
         self.assertEqual(Allow("region", {"eu", "us"}).one_of, frozenset({"eu", "us"}))
