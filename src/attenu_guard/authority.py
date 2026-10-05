@@ -233,6 +233,11 @@ class Authority:
         for k in sorted(set(self_by_key) | set(other_by_key)):
             a = self_by_key.get(k)
             b = other_by_key.get(k)
+            if a is not None and b is not None and type(a) is not type(b):
+                # An allow-list and a deny-list (or any two ceiling types) under one key have no
+                # common narrowing; refusing beats an AttributeError or a guess.
+                raise ValueError(f"constraint {k!r} has a different ceiling type on each side; "
+                                 "neither narrows the other")
             new_ceilings.append(a.narrow(b) if (a is not None and b is not None)
                                  else (a if a is not None else b))
 
@@ -269,7 +274,9 @@ class Authority:
             self_ceiling = self_by_key.get(k)
             if self_ceiling is None:
                 return False  # unbounded on self where other bounds it -> more powerful
-            if not other_ceiling.subsumes(self_ceiling):
+            # Two ceiling types under one key are not comparable, so not narrower (a custom
+            # ceiling's subsumes() need not handle another type).
+            if type(self_ceiling) is not type(other_ceiling) or not other_ceiling.subsumes(self_ceiling):
                 return False
 
         if other.ttl is not None:

@@ -595,6 +595,14 @@ class TestTypedMembersInABundle(unittest.TestCase):
                 rc, lines = self._verify(_typed_bundle(bad))
                 self.assertEqual((rc, lines[1]), (2, f"  - root typed:n0: unreadable authority ({message})"))
 
+    def test_a_child_with_another_ceiling_type_under_the_key_fails_monotonicity(self):
+        # It raised AttributeError out of verify_bundle, and `attenu-guard verify` exited 1.
+        rc, lines = self._verify(_typed_bundle({"key": "region", "type": "allow", "one_of": ["us"]},
+                                               granted={"key": "region", "type": "deny", "not_one_of": ["eu"]}))
+        self.assertEqual((rc, lines[0]), (2, "integrity=True monotonicity=False containment=True "
+                                             "anchor=verified nodes=2 actions_checked=0"))
+        self.assertTrue(lines[1].startswith("  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling region"))
+
     def test_a_recorded_scope_cannot_move_an_allow_off_its_meter(self):
         # The verifier reads the allow's context through the same permits(): a `_scope` recorded
         # in it no longer takes the call off the limit that applies to the allow's own scope.

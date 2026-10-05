@@ -714,6 +714,40 @@ class TestMalformedBounds(unittest.TestCase):
                       "max of constraint 'max_rows' is a string, not a number")
 
 
+class TestDifferentCeilingTypesUnderOneKey(unittest.TestCase):
+    """Ceilings pair by key, and two ceilings of different types under one key are not comparable:
+    an authority holding one is not narrower than an authority holding the other, and meet refuses
+    to combine them. This used to raise AttributeError out of `is_narrower_than`, so out of
+    `verify_bundle` and `load()` (attenu-ops#110)."""
+
+    PAIRS = (
+        (Allow("region", ["us"]), Deny("region", ["eu"])),
+        (Deny("region", ["eu"]), Allow("region", ["us"])),
+        (Prefix("region", "u"), Allow("region", ["us"])),
+        (RowLimit(5), ceiling_from_wire({"key": "max_rows", "type": "x-custom"})),
+        (ceiling_from_wire({"key": "max_rows", "type": "x-custom"}), RowLimit(5)),
+        (EgressRank("none"), ceiling_from_wire({"key": "egress", "type": "prefix", "prefix": "n"})),
+    )
+
+    def test_a_ceiling_of_another_type_is_not_narrower(self):
+        for parent, child in self.PAIRS:
+            with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
+                self.assertFalse(parent.subsumes(child))
+                p = Authority(scopes={"crm.read"}, ceilings=[parent], ttl=60)
+                c = Authority(scopes={"crm.read"}, ceilings=[child], ttl=60)
+                self.assertFalse(c.is_narrower_than(p))
+
+    def test_meet_refuses_to_combine_them(self):
+        for parent, child in self.PAIRS:
+            with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
+                p = Authority(scopes={"crm.read"}, ceilings=[parent], ttl=60)
+                c = Authority(scopes={"crm.read"}, ceilings=[child], ttl=60)
+                with self.assertRaises(ValueError) as ctx:
+                    p.meet(c)
+                self.assertEqual(str(ctx.exception), f"constraint {parent.key!r} has a different ceiling "
+                                                     "type on each side; neither narrows the other")
+
+
 class TestScopeIsNeverTheCallers(unittest.TestCase):
     """`_scope` is reserved: `Authority.permits` sets it to the scope being checked, whatever the
     context says (attenu-ops#110). A context carrying its own `_scope` used to decide which scoped

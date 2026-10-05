@@ -355,7 +355,7 @@ def _monotonicity_detail(child: Authority, parent: Authority) -> str:
         child_ceiling = child_by_key.get(key)
         if child_ceiling is None:
             return f"ceiling {_shown(key)} unbounded, parent holds {_ceiling_in_finding(parent_ceiling)}"
-        if not parent_ceiling.subsumes(child_ceiling):
+        if type(child_ceiling) is not type(parent_ceiling) or not parent_ceiling.subsumes(child_ceiling):
             return (f"ceiling {_ceiling_in_finding(child_ceiling)} looser than parent "
                     f"{_ceiling_in_finding(parent_ceiling)}")
 

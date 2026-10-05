@@ -269,7 +269,7 @@ class RowLimit:
         return RowLimit(min(self.max_rows, other.max_rows))
 
     def subsumes(self, other: "RowLimit") -> bool:
-        return self.max_rows >= other.max_rows
+        return type(other) is type(self) and self.max_rows >= other.max_rows
 
     def to_wire(self) -> dict:
         return {"key": self.key, "max": self.max_rows}
@@ -307,7 +307,7 @@ class SpendCap:
         return SpendCap(min(self.max_spend, other.max_spend))
 
     def subsumes(self, other: "SpendCap") -> bool:
-        return self.max_spend >= other.max_spend
+        return type(other) is type(self) and self.max_spend >= other.max_spend
 
     def to_wire(self) -> dict:
         return {"key": self.key, "max": self.max_spend}
@@ -379,7 +379,7 @@ class CallLimit:
         return CallLimit(min(self.max_calls, other.max_calls), self.applies_to)
 
     def subsumes(self, other: "CallLimit") -> bool:
-        return self.max_calls >= other.max_calls
+        return type(other) is type(self) and self.max_calls >= other.max_calls
 
     def to_wire(self) -> dict:
         if not self.applies_to:
@@ -422,7 +422,7 @@ class EgressRank:
         return EgressRank(stricter)
 
     def subsumes(self, other: "EgressRank") -> bool:
-        return _egress_rank(self.level) >= _egress_rank(other.level)
+        return type(other) is type(self) and _egress_rank(self.level) >= _egress_rank(other.level)
 
     def to_wire(self) -> dict:
         return {"key": self.key, "rank": self.level}
@@ -614,7 +614,7 @@ class Allow:
         return Allow(self.key, [v for v in self.one_of if v in other.one_of], self.field)
 
     def subsumes(self, other: "Allow") -> bool:
-        return all(v in self.one_of for v in other.one_of)
+        return type(other) is type(self) and all(v in self.one_of for v in other.one_of)
 
     def to_wire(self) -> dict:
         d = {"key": self.key, "type": "allow", "one_of": _in_wire_order(self.one_of)}
@@ -667,7 +667,7 @@ class Deny:
     def subsumes(self, other: "Deny") -> bool:
         # self admits a superset of other's admitted set iff self forbids a
         # subset of what other forbids.
-        return all(v in other.not_one_of for v in self.not_one_of)
+        return type(other) is type(self) and all(v in other.not_one_of for v in self.not_one_of)
 
     def to_wire(self) -> dict:
         d = {"key": self.key, "type": "deny", "not_one_of": _in_wire_order(self.not_one_of)}
@@ -725,7 +725,7 @@ class Prefix:
         return Prefix(self.key, self.prefix + "\x00" + other.prefix, self.field)
 
     def subsumes(self, other: "Prefix") -> bool:
-        return other.prefix.startswith(self.prefix)
+        return type(other) is type(self) and other.prefix.startswith(self.prefix)
 
     def to_wire(self) -> dict:
         d = {"key": self.key, "type": "prefix", "prefix": self.prefix}

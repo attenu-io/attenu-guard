@@ -720,6 +720,13 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                 self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
                 self.assertEqual(ctx.exception.message, f"invalid authorization_details: {message}")
 
+    def test_a_child_with_another_ceiling_type_under_the_key_is_not_narrower(self):
+        # It raised AttributeError out of load().
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(self._chain({"key": "region", "type": "allow", "one_of": ["us"]},
+                                  {"key": "region", "type": "deny", "not_one_of": ["eu"]}), self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
     def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
         limit = {"key": "max_calls[crm.read]", "type": "max_calls", "max": 1, "applies_to": "crm.read"}
         chain = wire.load(self._chain(limit, limit), self.signer)
