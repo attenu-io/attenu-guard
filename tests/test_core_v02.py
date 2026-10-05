@@ -748,6 +748,34 @@ class TestDifferentCeilingTypesUnderOneKey(unittest.TestCase):
                                                      "type on each side; neither narrows the other")
 
 
+class TestAnExplicitNullIsUndeclared(unittest.TestCase):
+    """A null quantity asserts nothing, so for a metered field it is an undeclared one: strict
+    metering refuses the call, and the guard meters the call count itself (attenu-ops#110). Before,
+    `{"rows": None, "calls": None}` counted as declared, the ceilings read null as absent, and a
+    metered CallLimit(1) passed any number of calls."""
+
+    def test_strict_metering_refuses_a_null_quantity(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(5)]), strict_metering=True)
+        decision = g.check("crm.read", metered=True, context={"rows": None})
+        self.assertFalse(decision)
+        self.assertEqual(decision.reasons[0].code, ReasonCode.UNMETERED)
+        self.assertTrue(g.check("crm.read", metered=True, context={"rows": 3}))
+
+    def test_the_guard_counts_a_call_whose_count_is_null(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1)]))
+        self.assertTrue(g.check("crm.read", context={"calls": None}))
+        self.assertFalse(g.check("crm.read", context={"calls": None}))
+        self.assertFalse(g.check("crm.read", context={"rows": None, "calls": None}))
+
+    def test_both_together(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1), RowLimit(5)]),
+                        strict_metering=True)
+        self.assertTrue(g.check("crm.read", metered=True, context={"rows": 1, "calls": None}))
+        self.assertFalse(g.check("crm.read", metered=True, context={"rows": 1, "calls": None}))
+        refused = g.check("crm.read", metered=True, context={"rows": None, "calls": None})
+        self.assertEqual(refused.reasons[0].code, ReasonCode.UNMETERED)
+
+
 class TestScopeIsNeverTheCallers(unittest.TestCase):
     """`_scope` is reserved: `Authority.permits` sets it to the scope being checked, whatever the
     context says (attenu-ops#110). A context carrying its own `_scope` used to decide which scoped
