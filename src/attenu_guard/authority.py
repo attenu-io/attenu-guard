@@ -311,7 +311,9 @@ class Authority:
                 message=f"scope {scope!r} not covered by held scopes {sorted(self.scopes)}"))
 
         # Reserved key so SCOPED ceilings (CallLimit(applies_to=...)) can tell whether they apply.
-        cctx = dict(ctx); cctx.setdefault("_scope", scope)
+        # Always the scope being checked: a `_scope` in the caller's context is ignored, so it can
+        # move no call off its own meter or onto another (attenu-ops#110).
+        cctx = dict(ctx); cctx["_scope"] = scope
         for c in self.ceilings:
             decision = c.permits(cctx)
             if not decision:

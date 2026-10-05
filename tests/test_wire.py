@@ -715,6 +715,11 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                 self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
                 self.assertEqual(ctx.exception.message, f"invalid authorization_details: {message}")
 
+    def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
+        limit = {"key": "max_calls[crm.read]", "type": "max_calls", "max": 1, "applies_to": "crm.read"}
+        chain = wire.load(self._chain(limit, limit), self.signer)
+        self.assertFalse(chain.permits("crm.read", {"calls[crm.read]": 2, "_scope": "other.x"}))
+
     def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
         deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
         chain = wire.load(self._chain(deny, deny), self.signer)

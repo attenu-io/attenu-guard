@@ -589,6 +589,14 @@ class TestTypedMembersInABundle(unittest.TestCase):
                 rc, lines = self._verify(_typed_bundle(bad))
                 self.assertEqual((rc, lines[1]), (2, f"  - root typed:n0: unreadable authority ({message})"))
 
+    def test_a_recorded_scope_cannot_move_an_allow_off_its_meter(self):
+        # The verifier reads the allow's context through the same permits(): a `_scope` recorded
+        # in it no longer takes the call off the limit that applies to the allow's own scope.
+        limit = {"key": "max_calls[docs.write]", "type": "max_calls", "max": 1, "applies_to": "docs.write"}
+        rc, lines = self._verify(_typed_bundle(limit, context={"calls[docs.write]": 5, "_scope": "other.x"}))
+        self.assertEqual((rc, lines[1]), (2, "  - containment: allow of 'docs.write' on typed:n0 outside its "
+                                             "authority ['docs.write']"))
+
     def test_a_one_of_that_is_not_an_array_is_an_unreadable_authority(self):
         # An object's keys used to become the members and a string's characters, so such a bundle
         # verified; null, a number and a boolean were refused with a TypeError's text.

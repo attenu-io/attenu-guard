@@ -676,6 +676,26 @@ class TestMalformedBounds(unittest.TestCase):
                       "max of constraint 'max_rows' is a string, not a number")
 
 
+class TestScopeIsNeverTheCallers(unittest.TestCase):
+    """`_scope` is reserved: `Authority.permits` sets it to the scope being checked, whatever the
+    context says (attenu-ops#110). A context carrying its own `_scope` used to decide which scoped
+    call limit applied, so it could move a call off its meter, or onto another one."""
+
+    def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[CallLimit(1, "crm.read")])
+        self.assertFalse(auth.permits("crm.read", {"calls[crm.read]": 2, "_scope": "other.x"}))
+
+    def test_a_callers_scope_cannot_move_a_call_onto_another_meter(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[CallLimit(0, "other.*")])
+        self.assertTrue(auth.permits("crm.read", {"calls[other.*]": 1, "_scope": "other.x"}))
+
+    def test_guard_check_keeps_counting_against_the_calls_own_meter(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1, "crm.read")]))
+        self.assertTrue(g.check("crm.read"))
+        self.assertFalse(g.check("crm.read"))
+        self.assertFalse(g.check("crm.read", context={"_scope": "other.x"}))
+
+
 class TestUnknownConstraintsCompareAsJson(unittest.TestCase):
     """An unknown constraint subsumes only an equal one, and equal means equal as JSON: the same
     RFC 8785 bytes (attenu-ops#110). Python's `True == 1` made `v: [1]` equal `v: [true]`, and the
