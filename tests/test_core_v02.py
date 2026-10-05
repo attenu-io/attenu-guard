@@ -600,6 +600,82 @@ class TestEveryCeilingIsTypeStrict(unittest.TestCase):
                          "a string cannot be compared with a maximum; refused")
 
 
+class TestMalformedBounds(unittest.TestCase):
+    """A ceiling bound of the wrong type is malformed (attenu-ops#110): the draft makes "max" a
+    number and "prefix" a string, an egress rank outside none < internal < any admitted every
+    request, and a `field` or `applies_to` that is not a string named a different field in each
+    implementation. The constructor raises ValueError naming the member and the key, so a token
+    carrying one is malformed and a bundle reports the authority unreadable. Same text as the
+    TypeScript implementation, which throws TypeError."""
+
+    NOT_NUMBERS = (("5", "a string"), (True, "a boolean"), (None, "null"), ([5], "an array"),
+                   ({"n": 5}, "an object"))
+
+    def _refused(self, build, message):
+        with self.assertRaises(ValueError) as ctx:
+            build()
+        self.assertEqual(str(ctx.exception), message)
+
+    def test_a_max_that_is_not_a_number(self):
+        for value, kind in self.NOT_NUMBERS:
+            for cls, key in ((RowLimit, "max_rows"), (SpendCap, "max_spend"), (CallLimit, "max_calls")):
+                with self.subTest(cls=cls.__name__, value=value):
+                    message = f"max of constraint {key!r} is {kind}, not a number"
+                    self._refused(lambda: cls(value), message)
+                    self._refused(lambda: ceiling_from_wire({"key": key, "max": value}), message)
+        for key in ("max_rows", "max_spend", "max_calls"):
+            with self.subTest(absent=key):
+                self._refused(lambda: ceiling_from_wire({"key": key}),
+                              f"max of constraint {key!r} is absent, not a number")
+        self._refused(lambda: CallLimit("3", "fs.write"),
+                      "max of constraint 'max_calls[fs.write]' is a string, not a number")
+
+    def test_a_prefix_that_is_not_a_string(self):
+        for value, kind in ((5, "a number"), (True, "a boolean"), (None, "null"), (["x"], "an array"),
+                            ({"x": 1}, "an object")):
+            with self.subTest(value=value):
+                message = f"prefix of constraint 'path' is {kind}, not a string"
+                self._refused(lambda: Prefix("path", value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "path", "type": "prefix", "prefix": value}), message)
+        self._refused(lambda: ceiling_from_wire({"key": "path", "type": "prefix"}),
+                      "prefix of constraint 'path' is absent, not a string")
+
+    def test_an_egress_rank_outside_none_internal_any(self):
+        # An unknown rank used to rank above "any", so the ceiling admitted every request.
+        for value, shown in (("everywhere", "'everywhere'"), ("NONE", "'NONE'"), (5, "a number"),
+                             (True, "a boolean"), (None, "null"), (["any"], "an array")):
+            with self.subTest(value=value):
+                message = f"rank of constraint 'egress' is {shown}, not 'none', 'internal' or 'any'"
+                self._refused(lambda: EgressRank(value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "egress", "rank": value}), message)
+        self._refused(lambda: ceiling_from_wire({"key": "egress"}),
+                      "rank of constraint 'egress' is absent, not 'none', 'internal' or 'any'")
+        for level in ("none", "internal", "any"):
+            self.assertEqual(EgressRank(level).level, level)
+
+    def test_a_field_or_applies_to_that_is_not_a_string(self):
+        self._refused(lambda: Allow("region", ["us"], field=5),
+                      "field of constraint 'region' is a number, not a string")
+        self._refused(lambda: Deny("tool", ["rm"], field=True),
+                      "field of constraint 'tool' is a boolean, not a string")
+        self._refused(lambda: Prefix("path", "/tmp/", field=["p"]),
+                      "field of constraint 'path' is an array, not a string")
+        self._refused(lambda: ceiling_from_wire({"key": "region", "type": "allow", "one_of": ["us"], "field": {}}),
+                      "field of constraint 'region' is an object, not a string")
+        self._refused(lambda: CallLimit(3, 5), "applies_to of constraint 'max_calls' is a number, not a string")
+        self._refused(lambda: ceiling_from_wire({"key": "max_calls[x]", "type": "max_calls", "max": 3,
+                                                 "applies_to": True}),
+                      "applies_to of constraint 'max_calls' is a boolean, not a string")
+        # null is absent, as before: the ctx field is the key, and the limit is unscoped.
+        self.assertEqual(ceiling_from_wire({"key": "region", "type": "allow", "one_of": ["us"],
+                                            "field": None}).field, None)
+        self.assertEqual(CallLimit(3, None).key, "max_calls")
+
+    def test_guard_issue_refuses_an_authority_built_with_one(self):
+        self._refused(lambda: Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit("5")])),
+                      "max of constraint 'max_rows' is a string, not a number")
+
+
 class TestUnknownConstraintsCompareAsJson(unittest.TestCase):
     """An unknown constraint subsumes only an equal one, and equal means equal as JSON: the same
     RFC 8785 bytes (attenu-ops#110). Python's `True == 1` made `v: [1]` equal `v: [true]`, and the

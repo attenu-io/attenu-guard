@@ -694,6 +694,27 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                 self.assertEqual(decision.reasons[0].message,
                                  f"{kind} cannot be compared with a maximum; refused")
 
+    def test_a_bound_of_the_wrong_type_makes_the_token_malformed(self):
+        # Each of these verified before: Python read `max: true` as 1 and an unknown rank as wider
+        # than "any", and the TypeScript implementation coerced the rest.
+        for bad, message in (
+            ({"key": "max_rows", "max": "5"}, "max of constraint 'max_rows' is a string, not a number"),
+            ({"key": "max_rows", "max": True}, "max of constraint 'max_rows' is a boolean, not a number"),
+            ({"key": "max_rows"}, "max of constraint 'max_rows' is absent, not a number"),
+            ({"key": "path", "type": "prefix", "prefix": 5}, "prefix of constraint 'path' is a number, not a string"),
+            ({"key": "egress", "rank": "everywhere"},
+             "rank of constraint 'egress' is 'everywhere', not 'none', 'internal' or 'any'"),
+            ({"key": "region", "type": "allow", "one_of": ["us"], "field": 5},
+             "field of constraint 'region' is a number, not a string"),
+            ({"key": "max_calls[x]", "type": "max_calls", "max": 3, "applies_to": True},
+             "applies_to of constraint 'max_calls' is a boolean, not a string"),
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(wire.WireError) as ctx:
+                    wire.load(self._chain(bad, bad), self.signer)
+                self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+                self.assertEqual(ctx.exception.message, f"invalid authorization_details: {message}")
+
     def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
         deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
         chain = wire.load(self._chain(deny, deny), self.signer)

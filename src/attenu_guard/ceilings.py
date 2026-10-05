@@ -103,6 +103,38 @@ def _refusal(kind: str | None, against: str) -> str:
     return "" if kind is None else f"{kind} cannot be compared with {against}; refused"
 
 
+#: What `from_wire` passes for a bound the constraint does not carry, so the constructor refuses it.
+_ABSENT = object()
+
+
+def _malformed(key, member: str, value, expected: str, shown: str | None = None) -> ValueError:
+    """The error for a constraint member of the wrong type, `<member> of constraint <key!r> is
+    <kind>, not <expected>`: the TypeScript implementation's text too, which throws TypeError.
+
+    A bound of the wrong type is malformed (attenu-ops#110), on every path: the draft makes "max" a
+    number and "prefix" a string, an egress rank outside none < internal < any ranked above "any"
+    and admitted every request, and a `field` or `applies_to` that is not a string named a different
+    context field in each implementation. A token carrying one is refused as malformed, and a
+    bundle reports the authority unreadable."""
+    kind = "absent" if value is _ABSENT else (shown if shown is not None else _json_kind(value))
+    return ValueError(f"{member} of constraint {key!r} is {kind}, not {expected}")
+
+
+def _check_max(key, value) -> None:
+    """A `max` is a JSON number, and a boolean is not one, although Python's bool is an int."""
+    if value is _ABSENT or _json_kind(value) != "a number":
+        raise _malformed(key, "max", value, "a number")
+
+
+def _check_string(key, member: str, value, *, optional: bool = False) -> None:
+    """A `prefix`, `field` or `applies_to` is a string. `field` and `applies_to` are optional, and
+    null leaves them unset, as before."""
+    if optional and value is None:
+        return
+    if value is _ABSENT or not isinstance(value, str):
+        raise _malformed(key, member, value, "a string")
+
+
 @runtime_checkable
 class Ceiling(Protocol):
     """The shape every ceiling (built-in or custom) must implement.
@@ -198,6 +230,7 @@ class RowLimit:
     ctx_field: str = field(default="rows", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_max(self.key, self.max_rows)
         _validate_safe_number(self.key, self.max_rows)
 
     def permits(self, ctx: Mapping) -> Decision:
@@ -224,7 +257,7 @@ class RowLimit:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "RowLimit":
-        return cls(d["max"])
+        return cls(d.get("max", _ABSENT))
 
 
 @dataclass(frozen=True)
@@ -235,6 +268,7 @@ class SpendCap:
     ctx_field: str = field(default="spend", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_max(self.key, self.max_spend)
         _validate_safe_number(self.key, self.max_spend)
 
     def permits(self, ctx: Mapping) -> Decision:
@@ -261,7 +295,7 @@ class SpendCap:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "SpendCap":
-        return cls(d["max"])
+        return cls(d.get("max", _ABSENT))
 
 
 @dataclass(frozen=True)
@@ -284,9 +318,12 @@ class CallLimit:
     ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_string(self.key, "applies_to", self.applies_to, optional=True)
+        scoped_key = f"max_calls[{self.applies_to}]" if self.applies_to else self.key
+        _check_max(scoped_key, self.max_calls)
         _validate_safe_number(self.key, self.max_calls)
         if self.applies_to:
-            object.__setattr__(self, "key", f"max_calls[{self.applies_to}]")
+            object.__setattr__(self, "key", scoped_key)
             object.__setattr__(self, "ctx_field", f"calls[{self.applies_to}]")   # own meter, coexists with unscoped `calls`
 
     @property
@@ -328,7 +365,7 @@ class CallLimit:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "CallLimit":
-        return cls(d["max"], d.get("applies_to"))
+        return cls(d.get("max", _ABSENT), d.get("applies_to"))
 
 
 @dataclass(frozen=True)
@@ -337,6 +374,12 @@ class EgressRank:
     level: str
     key: str = field(default="egress", init=False, repr=False)
     ctx_field: str = field(default="egress", init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        # A rank outside the vocabulary ranked above "any", so the ceiling admitted every request.
+        if not isinstance(self.level, str) or self.level not in _EGRESS_ORDER:
+            raise _malformed(self.key, "rank", self.level, "'none', 'internal' or 'any'",
+                             repr(self.level) if isinstance(self.level, str) else None)
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get("egress")
@@ -363,7 +406,7 @@ class EgressRank:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "EgressRank":
-        return cls(d["rank"])
+        return cls(d.get("rank", _ABSENT))
 
 
 # =========================================================================
@@ -521,6 +564,7 @@ class Allow:
 
     def __post_init__(self):
         object.__setattr__(self, "one_of", _members_of(self.key, "one_of", self.one_of))
+        _check_string(self.key, "field", self.field, optional=True)
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -570,6 +614,7 @@ class Deny:
 
     def __post_init__(self):
         object.__setattr__(self, "not_one_of", _members_of(self.key, "not_one_of", self.not_one_of))
+        _check_string(self.key, "field", self.field, optional=True)
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -614,6 +659,10 @@ class Prefix:
     prefix: str
     field: str | None = None
 
+    def __post_init__(self):
+        _check_string(self.key, "prefix", self.prefix)
+        _check_string(self.key, "field", self.field, optional=True)
+
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
 
@@ -657,7 +706,7 @@ class Prefix:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Prefix":
-        return cls(d["key"], d["prefix"], d.get("field"))
+        return cls(d["key"], d.get("prefix", _ABSENT), d.get("field"))
 
 
 # =========================================================================

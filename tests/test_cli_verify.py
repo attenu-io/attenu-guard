@@ -579,6 +579,16 @@ class TestTypedMembersInABundle(unittest.TestCase):
                     "FAILED",
                 ]))
 
+    def test_a_bound_of_the_wrong_type_is_an_unreadable_authority(self):
+        for bad, message in (({"key": "max_rows", "max": True}, "max of constraint 'max_rows' is a boolean, not a number"),
+                             ({"key": "egress", "rank": "everywhere"},
+                              "rank of constraint 'egress' is 'everywhere', not 'none', 'internal' or 'any'"),
+                             ({"key": "path", "type": "prefix", "prefix": None},
+                              "prefix of constraint 'path' is null, not a string")):
+            with self.subTest(bad=bad):
+                rc, lines = self._verify(_typed_bundle(bad))
+                self.assertEqual((rc, lines[1]), (2, f"  - root typed:n0: unreadable authority ({message})"))
+
     def test_a_one_of_that_is_not_an_array_is_an_unreadable_authority(self):
         # An object's keys used to become the members and a string's characters, so such a bundle
         # verified; null, a number and a boolean were refused with a TypeError's text.
