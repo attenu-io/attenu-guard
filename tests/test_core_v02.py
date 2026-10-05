@@ -435,6 +435,35 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
         self.assertEqual(deny["reasons"][0]["message"],
                          "an array cannot be compared with not_one_of members; refused")
 
+    NOT_ARRAYS = (({"us": 1}, "an object"), (None, "null"), ("us", "a string"), (5, "a number"),
+                  (1.5, "a number"), (True, "a boolean"))
+
+    def test_a_one_of_that_is_not_an_array_is_refused(self):
+        # An object's keys used to become the members, and a string's characters; null, a number
+        # and a boolean raised TypeError. Each is now a ValueError naming the list and the key,
+        # from the constructor and from the wire alike.
+        for value, kind in self.NOT_ARRAYS:
+            for cls, name in ((Allow, "one_of"), (Deny, "not_one_of")):
+                with self.subTest(list=name, value=value):
+                    message = f"{name} of constraint 'region' is {kind}, not an array"
+                    with self.assertRaises(ValueError) as ctx:
+                        cls("region", value)
+                    self.assertEqual(str(ctx.exception), message)
+                    with self.assertRaises(ValueError) as ctx:
+                        ceiling_from_wire({"key": "region", "type": cls.__name__.lower(), name: value})
+                    self.assertEqual(str(ctx.exception), message)
+
+    def test_guard_issue_refuses_an_authority_built_with_one(self):
+        with self.assertRaises(ValueError) as ctx:
+            Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[Allow("region", {"us": 1})]))
+        self.assertEqual(str(ctx.exception), "one_of of constraint 'region' is an object, not an array")
+
+    def test_an_array_or_a_python_collection_is_still_a_list_of_members(self):
+        for given in (["us", "eu"], ("us", "eu"), {"us", "eu"}, frozenset({"us", "eu"})):
+            with self.subTest(given=type(given).__name__):
+                self.assertEqual(sorted(Allow("region", given).one_of), ["eu", "us"])
+        self.assertEqual(len(ceiling_from_wire({"key": "region", "type": "allow"}).one_of), 0)
+
     def test_the_members_still_compare_with_a_plain_set(self):
         self.assertEqual(Allow("region", {"eu", "us"}).one_of, frozenset({"eu", "us"}))
         self.assertEqual(sorted(Deny("tool", ["rm", "curl", "rm"]).not_one_of), ["curl", "rm"])
@@ -511,6 +540,49 @@ class TestUnknownCeilingFailsClosed(unittest.TestCase):
         c = ceiling_from_wire({"key": "max_rows", "type": "double_row_limit", "max": 42})
         self.assertIsInstance(c, RowLimit)
         self.assertEqual(c.max_rows, 42)
+
+
+class TestUnknownConstraintsCompareAsJson(unittest.TestCase):
+    """An unknown constraint subsumes only an equal one, and equal means equal as JSON: the same
+    RFC 8785 bytes (attenu-ops#110). Python's `True == 1` made `v: [1]` equal `v: [true]`, and the
+    TypeScript implementation, which compared JSON text with only the top-level keys sorted, held
+    two objects unequal when a nested one listed its keys in another order. Both now compare the
+    canonical bytes, and a value RFC 8785 cannot write equals nothing."""
+
+    CASES = (  # (label, a, b, equal)
+        ("a boolean is not a number", {"v": [True]}, {"v": [1]}, False),
+        ("1.0 is 1", {"v": 1.0}, {"v": 1}, True),
+        ("-0.0 is 0", {"v": -0.0}, {"v": 0}, True),
+        ("nested key order is not a difference", {"v": {"a": 1, "b": 2}}, {"v": {"b": 2, "a": 1}}, True),
+        ("nor is it deeper down", {"v": [{"a": {"c": 1, "d": 2}}]}, {"v": [{"a": {"d": 2, "c": 1}}]}, True),
+        ("array order is", {"v": [1, 2]}, {"v": [2, 1]}, False),
+        ("a string is not the number it spells", {"v": "1"}, {"v": 1}, False),
+        ("null is not false", {"v": None}, {"v": False}, False),
+        ("identical", {"v": {"a": [1, "s", None]}}, {"v": {"a": [1, "s", None]}}, True),
+    )
+
+    @staticmethod
+    def _unknown(members):
+        return ceiling_from_wire({"key": "k", "type": "x-custom", **members})
+
+    def test_subsumption_is_json_equality(self):
+        for label, a, b, equal in self.CASES:
+            with self.subTest(label):
+                self.assertEqual(self._unknown(a).subsumes(self._unknown(b)), equal)
+                self.assertEqual(self._unknown(b).subsumes(self._unknown(a)), equal)
+
+    def test_a_value_rfc_8785_cannot_write_equals_nothing(self):
+        # An integer past 2**53 has no RFC 8785 form, so not even an identical copy is provably
+        # the same constraint: fail closed. A token cannot carry one; a bundle that does fails
+        # its integrity check as well.
+        self.assertFalse(self._unknown({"v": 2**53}).subsumes(self._unknown({"v": 2**53})))
+
+    def test_a_child_holding_1_is_not_narrower_than_a_parent_holding_true(self):
+        def authority(v):
+            return Authority.from_wire({"scopes": ["crm.read"], "ttl": 60,
+                                        "constraints": [{"key": "k", "type": "x-custom", "v": v}]})
+        self.assertFalse(authority([1]).is_narrower_than(authority([True])))
+        self.assertTrue(authority([1.0]).is_narrower_than(authority([1])))
 
 
 # =========================================================================

@@ -564,6 +564,36 @@ class TestTypedMembersInABundle(unittest.TestCase):
                         "FAILED",
                     ]))
 
+    def test_a_one_of_that_is_not_an_array_is_an_unreadable_authority(self):
+        # An object's keys used to become the members and a string's characters, so such a bundle
+        # verified; null, a number and a boolean were refused with a TypeError's text.
+        for value, kind in (({"x": 1}, "an object"), (None, "null"), ("x", "a string"),
+                            (5, "a number"), (True, "a boolean")):
+            with self.subTest(value=value):
+                rc, lines = self._verify(_typed_bundle({"key": "tier", "type": "allow", "one_of": value}))
+                self.assertEqual((rc, lines[1]), (2, "  - root typed:n0: unreadable authority "
+                                                     f"(one_of of constraint 'tier' is {kind}, not an array)"))
+                rc, lines = self._verify(_typed_bundle(
+                    {"key": "tier", "type": "allow", "one_of": [1]},
+                    granted={"key": "tier", "type": "deny", "not_one_of": value}))
+                self.assertEqual((rc, lines[1]), (2, "  - spawn typed:n1: unreadable granted "
+                                                     f"(not_one_of of constraint 'tier' is {kind}, not an array)"))
+
+    def test_unknown_constraints_compare_as_json(self):
+        # A child granted v: [1] under a parent holding v: [true] is not its subset, though
+        # Python's True == 1 used to say it was. A child whose nested object lists its keys in
+        # another order is the same constraint.
+        parent = {"key": "k", "type": "x-custom", "v": [True], "w": {"a": 1, "b": 2}}
+        rc, lines = self._verify(_typed_bundle(parent, granted={"key": "k", "type": "x-custom", "v": [1],
+                                                                "w": {"a": 1, "b": 2}}))
+        self.assertEqual((rc, lines[1]), (2, (
+            "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling k={'key': 'k', 'type': "
+            "'x-custom', 'v': [1], 'w': {'a': 1, 'b': 2}} looser than parent k={'key': 'k', "
+            "'type': 'x-custom', 'v': [True], 'w': {'a': 1, 'b': 2}})")))
+        rc, lines = self._verify(_typed_bundle(parent, granted={"key": "k", "type": "x-custom",
+                                                                "w": {"b": 2, "a": 1}, "v": [True]}))
+        self.assertEqual((rc, lines[-1]), (0, "OK"))
+
     def test_a_finding_prints_each_typed_member_as_typescript_does(self):
         from attenu_guard.ceilings import ceiling_from_wire
         deny = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})

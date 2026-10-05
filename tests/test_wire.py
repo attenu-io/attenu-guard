@@ -659,6 +659,29 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                 self.assertFalse(chain.permits("crm.read", {"region": denied}))
         self.assertTrue(chain.permits("crm.read", {"region": "public"}))
 
+    def test_unknown_constraints_compare_as_json(self):
+        # A child repeating its parent's unknown constraint is narrower; one holding 1 where the
+        # parent holds true is not, though Python's True == 1 used to say it was.
+        parent = {"key": "k", "type": "x-custom", "v": [True]}
+        wire.load(self._chain(parent, parent), self.signer)
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(self._chain(parent, {"key": "k", "type": "x-custom", "v": [1]}), self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_a_one_of_that_is_not_an_array_makes_the_token_malformed(self):
+        # An object's keys used to become the members and a string's characters, so such a
+        # token verified; null, a number and a boolean were refused with a TypeError's text.
+        for value, kind in (({"gold": 1}, "an object"), (None, "null"), ("gold", "a string"),
+                            (5, "a number"), (True, "a boolean")):
+            for type_, name in (("allow", "one_of"), ("deny", "not_one_of")):
+                with self.subTest(list=name, value=value):
+                    bad = {"key": "tier", "type": type_, name: value}
+                    with self.assertRaises(wire.WireError) as ctx:
+                        wire.load(self._chain(bad, bad), self.signer)
+                    self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+                    self.assertEqual(ctx.exception.message, "invalid authorization_details: "
+                                     f"{name} of constraint 'tier' is {kind}, not an array")
+
     def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
         deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
         chain = wire.load(self._chain(deny, deny), self.signer)

@@ -28,6 +28,7 @@ import numbers
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
+from . import canonical
 from .canonical import MAX_SAFE_INTEGER
 from .reasons import Decision, Reason, ReasonCode
 
@@ -361,6 +362,38 @@ def _member_text(value) -> str:
     return value if isinstance(value, str) else str(value)
 
 
+def _not_an_array(values) -> str | None:
+    """What a refusal calls a `one_of` / `not_one_of` that is not a list of members, or None for
+    one that is: a JSON array, or in-process any other collection of members (a set, a tuple).
+
+    The draft defines both as an array. An object used to be read by its keys and a string by its
+    characters, so `{"us": 1}` became the allow-list `["us"]`; null, a number and a boolean raised
+    TypeError. Each is malformed now, as in the TypeScript implementation: a token carrying one is
+    refused as malformed, and a bundle reports the authority unreadable."""
+    if values is None:
+        return "null"
+    if isinstance(values, bool):
+        return "a boolean"
+    if isinstance(values, numbers.Number):
+        return "a number"
+    if isinstance(values, str):
+        return "a string"
+    if isinstance(values, collections.abc.Mapping):
+        return "an object"
+    if isinstance(values, (bytes, bytearray)) or not isinstance(values, collections.abc.Iterable):
+        return "a value that is not an array"
+    return None
+
+
+def _members_of(key, list_name: str, values) -> "_Members":
+    """`values` as the members of an `Allow` or a `Deny`. Raises ValueError naming the list and
+    the key when `values` is not a list of members (`_not_an_array`)."""
+    kind = _not_an_array(values)
+    if kind is not None:
+        raise ValueError(f"{list_name} of constraint {key!r} is {kind}, not an array")
+    return _Members(values)
+
+
 def _not_a_scalar(value) -> str | None:
     """What a refusal calls a request value that an `Allow` or a `Deny` cannot compare with its
     members, or None for a JSON scalar: a string, a number or a boolean. (null never gets here: it
@@ -452,7 +485,7 @@ class Allow:
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "one_of", _Members(self.one_of))
+        object.__setattr__(self, "one_of", _members_of(self.key, "one_of", self.one_of))
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -499,7 +532,7 @@ class Deny:
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "not_one_of", _Members(self.not_one_of))
+        object.__setattr__(self, "not_one_of", _members_of(self.key, "not_one_of", self.not_one_of))
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
@@ -624,6 +657,10 @@ class _UnknownCeiling:
                        constraint (we don't understand its semantics), so
                        it only subsumes an identical unknown ceiling —
                        just enough reflexivity for is_narrower_than(self).
+                       Identical means the same RFC 8785 bytes, which is
+                       equality as JSON: `true` is not 1, `1.0` is 1, and
+                       key order is no difference at any depth. A value
+                       RFC 8785 cannot write is identical to nothing.
       * to_wire()   -> preserves the original bytes losslessly, so a chain
                        that merely forwards tokens (without needing to
                        interpret every constraint type) can still do so.
@@ -640,7 +677,14 @@ class _UnknownCeiling:
         return self
 
     def subsumes(self, other: "Ceiling") -> bool:
-        return isinstance(other, _UnknownCeiling) and dict(other.raw) == dict(self.raw)
+        # Compared as RFC 8785 bytes, as the TypeScript implementation compares them, never by
+        # Python's `==`: `{"v": [true]}` == `{"v": [1]}` there (attenu-ops#110).
+        if not isinstance(other, _UnknownCeiling):
+            return False
+        try:
+            return canonical.dumps(dict(other.raw)) == canonical.dumps(dict(self.raw))
+        except canonical.CanonicalizationError:
+            return False
 
     def to_wire(self) -> dict:
         return dict(self.raw)
