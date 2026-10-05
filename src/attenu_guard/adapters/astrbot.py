@@ -28,11 +28,8 @@ Hook points used
       - `Agent.tools is None`  -> `tool_mgr.get_full_tool_set()`
       - `Agent.tools = [name]` -> `tool_mgr.get_func(name)`
 
-  On AstrBot bd4b198a those two branches do NOT agree: `get_full_tool_set()`
-  wraps each tool in `_PermissionGuardedTool`, while the named-tools branch
-  returns the raw tool, so a tool marked `admin` in `tool_permissions` runs for a
-  non-admin when it is assigned to a sub-agent by name. Guarding the REGISTRY
-  rather than a toolset sidesteps that split by construction: both branches hand
+  The two branches do not wrap tools the same way. Guarding the REGISTRY rather
+  than a toolset makes them agree by construction: both branches hand
   out the same already-guarded objects, and `get_full_tool_set()`'s extra
   `_PermissionGuardedTool` simply delegates into this adapter's `call()` (it
   routes through `type(self._wrapped).call` when the wrapped tool overrides it).
