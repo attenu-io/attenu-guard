@@ -17,6 +17,7 @@ Versions follow semantic versioning.
 
 ### Known differences
 - A list or an object as a `one_of` or `not_one_of` member is refused here: as `malformed` in a token, and as `unreadable_authority` or `unreadable_granted` in a bundle. attenu-guard-ts accepts it and compares it by object identity, so no request value matches it, and a child that repeats it is not narrower than the parent holding it. A lone root token carrying one verifies there
+- A ceiling bound or an unknown constraint value written as an integral number with a fraction, such as `100.0`, prints as `100.0` here, in `describe()` and in a verifier finding (`max_rows<=100.0`), and as `100` in attenu-guard-ts, which reads the number before it prints it. Verdicts and hashes are the same: RFC 8785 writes both as `100`
 
 ## [0.19.0] - 2026-10-05
 
