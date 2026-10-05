@@ -542,6 +542,64 @@ class TestUnknownCeilingFailsClosed(unittest.TestCase):
         self.assertEqual(c.max_rows, 42)
 
 
+class TestEveryCeilingIsTypeStrict(unittest.TestCase):
+    """A request value of the wrong JSON type is refused by every built-in ceiling, never coerced
+    (attenu-ops#110): a numeric cap takes a number, and a boolean is not one although Python's bool
+    is an int; a prefix and an egress rank take a string. The refusal is `ceiling_exceeded`, with
+    one message per ceiling kind, in the TypeScript implementation's words too. null and an absent
+    field still assert nothing."""
+
+    WRONG = {   # the value, and what a refusal calls it
+        "a string": "50", "a boolean": True, "a number": 50, "an array": [50],
+        "an object": {"n": 50}, "a value that is not JSON": {50},
+    }
+
+    def _assert_refused(self, ceiling, field, accepted, against, extra=None):
+        for kind, value in self.WRONG.items():
+            if kind in accepted:
+                continue
+            with self.subTest(ceiling=type(ceiling).__name__, value=value):
+                decision = ceiling.permits({field: value, **(extra or {})})
+                self.assertFalse(decision)
+                (reason,) = decision.reasons
+                self.assertEqual((reason.code, reason.constraint, reason.requested),
+                                 (ReasonCode.CEILING_EXCEEDED, ceiling.key, value))
+                self.assertEqual(reason.message, f"{kind} cannot be compared with {against}; refused")
+
+    def test_a_numeric_cap_takes_a_number_and_never_a_boolean(self):
+        for ceiling, field, extra in ((RowLimit(100), "rows", None), (SpendCap(2.5), "spend", None),
+                                      (CallLimit(3), "calls", None),
+                                      (CallLimit(3, "fs.write"), "calls[fs.write]", {"_scope": "fs.write"})):
+            self._assert_refused(ceiling, field, ("a number",), "a maximum", extra)
+            self.assertEqual(ceiling.permits({field: 1, **(extra or {})}).reasons, ())
+            self.assertEqual(ceiling.permits({field: 10**6, **(extra or {})}).reasons[0].message, "")
+
+    def test_a_prefix_takes_a_string(self):
+        ceiling = Prefix("path", "50")
+        self._assert_refused(ceiling, "path", ("a string",), "a prefix")
+        self.assertTrue(ceiling.permits({"path": "50/x"}))
+        self.assertFalse(Prefix("flag", "T").permits({"flag": True}))   # str(True) began with "T"
+
+    def test_an_egress_rank_takes_a_string(self):
+        ceiling = EgressRank("any")
+        self._assert_refused(ceiling, "egress", ("a string",), "an egress rank")
+        self.assertTrue(ceiling.permits({"egress": "internal"}))
+        self.assertEqual(ceiling.permits({"egress": "elsewhere"}).reasons[0].message, "")
+
+    def test_null_and_an_absent_field_still_assert_nothing(self):
+        for ceiling, field in ((RowLimit(1), "rows"), (SpendCap(1), "spend"), (CallLimit(1), "calls"),
+                               (EgressRank("none"), "egress"), (Prefix("path", "/tmp/"), "path")):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                self.assertTrue(ceiling.permits({field: None}))
+                self.assertTrue(ceiling.permits({}))
+
+    def test_guard_check_refuses_a_string_quantity_where_it_raised(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(100)]))
+        self.assertFalse(g.check("crm.read", context={"rows": "50"}))
+        self.assertEqual(g.audit_log().entries[-1]["reasons"][0]["message"],
+                         "a string cannot be compared with a maximum; refused")
+
+
 class TestUnknownConstraintsCompareAsJson(unittest.TestCase):
     """An unknown constraint subsumes only an equal one, and equal means equal as JSON: the same
     RFC 8785 bytes (attenu-ops#110). Python's `True == 1` made `v: [1]` equal `v: [true]`, and the

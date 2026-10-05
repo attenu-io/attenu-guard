@@ -60,6 +60,49 @@ def _egress_rank(value: object) -> int:
         return len(_EGRESS_ORDER)
 
 
+#: The JSON kinds a ceiling compares, as `_json_kind` names them.
+_NUMBER = ("a number",)
+_STRING = ("a string",)
+_SCALAR = ("a string", "a number", "a boolean")
+
+
+def _json_kind(value) -> str:
+    """`value`'s JSON type as a refusal names it: null, a boolean, a number, a string, an array or
+    an object, or "a value that is not JSON" for anything else passed in-process (a set, bytes).
+    A boolean is never a number here, although Python's bool is an int, and a complex is no JSON
+    number. The TypeScript implementation names the same values the same way."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, numbers.Number) and not isinstance(value, complex):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, (list, tuple)):
+        return "an array"
+    if isinstance(value, collections.abc.Mapping):
+        return "an object"
+    return "a value that is not JSON"
+
+
+def _wrong_kind(value, accepted: tuple) -> str | None:
+    """`_json_kind(value)` when a ceiling that compares `accepted` cannot compare `value`, else None.
+
+    Every built-in ceiling refuses such a request value rather than coercing it (attenu-ops#110):
+    `"50"` raised TypeError against a row cap, `True` passed one as 1 and a prefix as the text
+    "True", and the TypeScript implementation read `["/tmp/x"]` as the path "/tmp/x"."""
+    kind = _json_kind(value)
+    return None if kind in accepted else kind
+
+
+def _refusal(kind: str | None, against: str) -> str:
+    """A denial's message: none when the value had the right type, as before; for one of the wrong
+    type, `<kind> cannot be compared with <against>; refused`, one wording per ceiling kind, and
+    the TypeScript implementation's too."""
+    return "" if kind is None else f"{kind} cannot be compared with {against}; refused"
+
+
 @runtime_checkable
 class Ceiling(Protocol):
     """The shape every ceiling (built-in or custom) must implement.
@@ -159,9 +202,13 @@ class RowLimit:
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("rows")
-        if n is None or n <= self.max_rows:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_rows:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_rows}"
@@ -192,9 +239,13 @@ class SpendCap:
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("spend")
-        if n is None or n <= self.max_spend:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_spend:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_spend}"
@@ -253,9 +304,13 @@ class CallLimit:
         if not self.applies_to_scope(ctx.get("_scope")):
             return Decision.allow()
         n = ctx.get(self.ctx_field)
-        if n is None or n <= self.max_calls:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_calls:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_calls}"
@@ -285,9 +340,13 @@ class EgressRank:
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get("egress")
-        if val is None or _egress_rank(val) <= _egress_rank(self.level):
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val))
+        kind = _wrong_kind(val, _STRING)
+        if kind is None and _egress_rank(val) <= _egress_rank(self.level):
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val,
+                                    _refusal(kind, "an egress rank")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.level}"
@@ -394,30 +453,6 @@ def _members_of(key, list_name: str, values) -> "_Members":
     return _Members(values)
 
 
-def _not_a_scalar(value) -> str | None:
-    """What a refusal calls a request value that an `Allow` or a `Deny` cannot compare with its
-    members, or None for a JSON scalar: a string, a number or a boolean. (null never gets here: it
-    asserts nothing.)
-
-    No member is an array, an object or a value outside JSON, so no such value can equal one. An
-    allow-list refuses it as a non-member. A deny-list must refuse it too: waving `["rm"]` through
-    because it is not the string "rm" would fail open."""
-    if isinstance(value, (bool, str, numbers.Number)):
-        return None
-    if isinstance(value, (list, tuple)):
-        return "an array"
-    if isinstance(value, collections.abc.Mapping):
-        return "an object"
-    return "a value that is not JSON"
-
-
-def _outside(key: str, list_name: str, members, value, kind: str | None) -> Reason:
-    """Why an `Allow` or a `Deny` refused `value`. `kind` is `_not_a_scalar(value)`: a value the
-    list could compare carries no message, as before; one it could not compare says so."""
-    message = "" if kind is None else f"{kind} cannot be compared with {list_name} members; refused"
-    return Reason(ReasonCode.CEILING_EXCEEDED, key, _in_wire_order(members), value, message)
-
-
 def _in_wire_order(members) -> list:
     """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
     `_member_text`, which is the order the TypeScript implementation emits. Members that print
@@ -479,7 +514,7 @@ class Allow:
 
     A member is its JSON type plus its value (`_member_key`): `one_of: [1]` admits 1 and 1.0,
     and refuses `true` and `"1"`. A ctx value that is not a JSON scalar is refused
-    (`_not_a_scalar`)."""
+    (`_wrong_kind`)."""
     key: str
     one_of: _Members
     field: str | None = None
@@ -494,10 +529,11 @@ class Allow:
         val = ctx.get(self._field())
         if val is None:
             return Decision.allow()
-        kind = _not_a_scalar(val)
+        kind = _wrong_kind(val, _SCALAR)
         if kind is None and val in self.one_of:
             return Decision.allow()
-        return Decision.deny(_outside(self.key, "one_of", self.one_of, val, kind))
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, _in_wire_order(self.one_of),
+                                    val, _refusal(kind, "one_of members")))
 
     def describe(self) -> str:
         return f"{self.key} in [{', '.join(map(_member_text, _in_wire_order(self.one_of)))}]"
@@ -526,7 +562,8 @@ class Deny:
 
     A member is its JSON type plus its value (`_member_key`): `not_one_of: [1]` refuses 1 and
     1.0, and does not refuse `true` or `"1"`. A ctx value that is not a JSON scalar is refused
-    as well (`_not_a_scalar`): a deny-list never waves through a value it cannot compare."""
+    as well (`_wrong_kind`): a deny-list never waves through a value it cannot compare, since
+    waving `["rm"]` through because it is not the string "rm" would fail open."""
     key: str
     not_one_of: _Members
     field: str | None = None
@@ -541,10 +578,11 @@ class Deny:
         val = ctx.get(self._field())
         if val is None:
             return Decision.allow()
-        kind = _not_a_scalar(val)
+        kind = _wrong_kind(val, _SCALAR)
         if kind is None and val not in self.not_one_of:
             return Decision.allow()
-        return Decision.deny(_outside(self.key, "not_one_of", self.not_one_of, val, kind))
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, _in_wire_order(self.not_one_of),
+                                    val, _refusal(kind, "not_one_of members")))
 
     def describe(self) -> str:
         return f"{self.key} not in [{', '.join(map(_member_text, _in_wire_order(self.not_one_of)))}]"
@@ -581,9 +619,13 @@ class Prefix:
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or str(val).startswith(self.prefix):
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val))
+        kind = _wrong_kind(val, _STRING)
+        if kind is None and val.startswith(self.prefix):
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val,
+                                    _refusal(kind, "a prefix")))
 
     def describe(self) -> str:
         return f"{self.key} startswith {self.prefix}"

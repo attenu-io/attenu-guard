@@ -564,6 +564,21 @@ class TestTypedMembersInABundle(unittest.TestCase):
                         "FAILED",
                     ]))
 
+    def test_a_quantity_or_a_prefix_of_the_wrong_type_is_outside_the_authority(self):
+        # A string quantity raised TypeError out of verify_bundle; a boolean passed a numeric cap
+        # as 0 or 1, and a prefix as the text "True".
+        for constraint, context in (({"key": "max_rows", "max": 100}, {"rows": "50"}),
+                                    ({"key": "max_rows", "max": 100}, {"rows": True}),
+                                    ({"key": "path", "type": "prefix", "prefix": "/tmp/"}, {"path": ["/tmp/x"]}),
+                                    ({"key": "flag", "type": "prefix", "prefix": "T"}, {"flag": True})):
+            with self.subTest(constraint=constraint, context=context):
+                self.assertEqual(self._verify(_typed_bundle(constraint, context=context)), (2, [
+                    "integrity=True monotonicity=True containment=False anchor=verified nodes=1 "
+                    "actions_checked=1",
+                    "  - containment: allow of 'docs.write' on typed:n0 outside its authority ['docs.write']",
+                    "FAILED",
+                ]))
+
     def test_a_one_of_that_is_not_an_array_is_an_unreadable_authority(self):
         # An object's keys used to become the members and a string's characters, so such a bundle
         # verified; null, a number and a boolean were refused with a TypeError's text.

@@ -682,6 +682,18 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
                     self.assertEqual(ctx.exception.message, "invalid authorization_details: "
                                      f"{name} of constraint 'tier' is {kind}, not an array")
 
+    def test_a_verified_numeric_cap_refuses_a_string_or_a_boolean(self):
+        # A string raised TypeError out of permits(), and a boolean passed the cap as 0 or 1.
+        cap = {"key": "max_rows", "max": 100}
+        chain = wire.load(self._chain(cap, cap), self.signer)
+        self.assertTrue(chain.permits("crm.read", {"rows": 50}))
+        for value, kind in (("50", "a string"), (True, "a boolean")):
+            with self.subTest(value=value):
+                decision = chain.permits("crm.read", {"rows": value})
+                self.assertFalse(decision)
+                self.assertEqual(decision.reasons[0].message,
+                                 f"{kind} cannot be compared with a maximum; refused")
+
     def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
         deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
         chain = wire.load(self._chain(deny, deny), self.signer)
