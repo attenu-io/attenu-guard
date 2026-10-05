@@ -435,7 +435,7 @@ class TestDefaultOutputEscaping(unittest.TestCase):
             "integrity=True monotonicity=False containment=True anchor=verified nodes=2 "
             "actions_checked=0",
             "  - monotonicity: mono:n1 not ⊆ parent mono:n0 (ceiling region in "
-            "['eu\\nOK', 'us'] looser than parent region in ['us'])",
+            '["eu\\nOK", "us"] looser than parent region in ["us"])',
             "FAILED",
         ])
 
@@ -456,19 +456,25 @@ class TestDefaultOutputEscaping(unittest.TestCase):
                         EgressRank("internal"), Prefix("path", "/tmp/")):
             with self.subTest(ceiling=describe(ceiling)):
                 self.assertEqual(evidence._ceiling_in_finding(ceiling), describe(ceiling))
-        self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"us", "eu"})), "region in ['eu', 'us']")
-        self.assertEqual(evidence._ceiling_in_finding(Deny("tool", {"shell", "rm"})), "tool not in ['rm', 'shell']")
+        self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"us", "eu"})), 'region in ["eu", "us"]')
+        self.assertEqual(evidence._ceiling_in_finding(Deny("tool", {"shell", "rm"})), 'tool not in ["rm", "shell"]')
 
-    def test_a_finding_prints_string_members_through_repr(self):
-        # So a finding tells the string "1" from the number 1 (they printed alike), and a member
-        # carrying a line break or a control character stays on one line, escaped.
+    def test_a_finding_prints_string_members_under_the_display_rule(self):
+        # Quoted, so a finding tells the string "1" from the number 1 (they printed alike), and in
+        # the escaped JSON form, so the text is ASCII and the same on every Python version and in the
+        # TypeScript implementation: repr printed a printable non-ASCII character as it is, by the
+        # runtime's Unicode tables. A number, a boolean and null print bare, as before.
         from attenu_guard import Allow
         self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"São Paulo", "us"})),
-                         "region in ['São Paulo', 'us']")
+                         'region in ["S\\u00e3o\\u0020Paulo", "us"]')
         self.assertEqual(evidence._ceiling_in_finding(Allow("region", ["eu\nOK", "x\u202e"])),
-                         "region in ['eu\\nOK', 'x\\u202e']")
+                         'region in ["eu\\nOK", "x\\u202e"]')
         self.assertEqual(evidence._ceiling_in_finding(Allow("t", ["1", 1, "True", True, None])),
-                         "t in [1, '1', None, True, 'True']")
+                         't in [1, "1", None, True, "True"]')
+        text = evidence._ceiling_in_finding(Allow("region", ["\u05e9\u05dc\u05d5\u05dd", "e\u0301", "\U0001f6dd", "it's", 'say "hi"']))
+        self.assertEqual(text, 'region in ["e\\u0301", "it\'s", "say\\u0020\\"hi\\"", '
+                               '"\\u05e9\\u05dc\\u05d5\\u05dd", "\\ud83d\\udedd"]')
+        self.assertTrue(text.isascii())
 
     def test_a_ceiling_this_build_does_not_define_stays_on_one_line(self):
         from attenu_guard.ceilings import ceiling_from_wire, describe
@@ -591,7 +597,7 @@ class TestTypedMembersInABundle(unittest.TestCase):
         rc, lines = self._verify(_typed_bundle({"key": "t", "type": "allow", "one_of": ["1"]},
                                                granted={"key": "t", "type": "allow", "one_of": [1]}))
         self.assertEqual((rc, lines[1]), (2, "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling t in [1] "
-                                             "looser than parent t in ['1'])"))
+                                             'looser than parent t in ["1"])'))
 
     def test_a_bound_of_the_wrong_type_is_an_unreadable_authority(self):
         for bad, message in (({"key": "max_rows", "max": True}, "max of constraint 'max_rows' is a boolean, not a number"),
@@ -614,6 +620,40 @@ class TestTypedMembersInABundle(unittest.TestCase):
             with self.subTest(bad=bad):
                 rc, lines = self._verify(_typed_bundle(bad))
                 self.assertEqual((rc, lines[1]), (2, f"  - root typed:n0: unreadable authority ({message})"))
+
+    def test_two_constraints_under_one_key_are_an_unreadable_authority(self):
+        from attenu_guard import AuditLog
+        log = AuditLog()
+        log.append("root", 0, chain_id="typed", node="typed:n0", agent="root", authority={
+            "scopes": ["docs.write"], "ttl": None, "constraints": [
+                {"key": "region", "type": "allow", "one_of": ["us"]}, {"key": "region", "type": "deny", "not_one_of": ["rm"]}]})
+        rc, lines = self._verify(evidence.export_bundle(log, HS256TestSigner(b"typed", kid="typed")))
+        self.assertEqual((rc, lines[1]), (2, "  - root typed:n0: unreadable authority (two constraints share the key "
+                                             "'region'; an authority holds one per key)"))
+
+    def test_a_custom_ceiling_that_subsumes_anything_still_fails_monotonicity(self):
+        # The verifier's monotonicity detail checks the type first, as is_narrower_than does, so the
+        # finding names the ceiling that is wider.
+        from attenu_guard import register_ceiling
+        from attenu_guard.ceilings import _REGISTRY
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_core_v02 import _AnyRegion
+        register_ceiling("x-anyregion", _AnyRegion)
+        try:
+            rc, lines = self._verify(_typed_bundle({"key": "region", "type": "x-anyregion", "allowed": "us"},
+                                                   granted={"key": "region", "type": "allow", "one_of": ["us", "eu"]}))
+        finally:
+            _REGISTRY.pop("x-anyregion", None)
+        self.assertEqual((rc, lines[1]), (2, "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling region in "
+                                             '["eu", "us"] looser than parent region only us)'))
+
+    def test_a_childs_unknown_constraint_under_a_bound_fails_monotonicity(self):
+        # A child holding a constraint this build does not define under the parent's bound is not
+        # narrower: other verifiers of the draft read the relation the same way.
+        rc, lines = self._verify(_typed_bundle({"key": "max_rows", "max": 5},
+                                               granted={"key": "max_rows", "type": "x-custom"}))
+        self.assertEqual((rc, lines[1]), (2, "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling "
+                                             "max_rows={'key': 'max_rows', 'type': 'x-custom'} looser than parent max_rows<=5)"))
 
     def test_a_child_with_another_ceiling_type_under_the_key_fails_monotonicity(self):
         # It raised AttributeError out of verify_bundle, and `attenu-guard verify` exited 1.
@@ -664,9 +704,9 @@ class TestTypedMembersInABundle(unittest.TestCase):
     def test_a_finding_prints_each_typed_member_as_typescript_does(self):
         from attenu_guard.ceilings import ceiling_from_wire
         deny = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
-        self.assertEqual(evidence._ceiling_in_finding(deny), "region not in [1, True, 'secret']")
+        self.assertEqual(evidence._ceiling_in_finding(deny), 'region not in [1, True, "secret"]')
         allow = ceiling_from_wire({"key": "tier", "type": "allow", "one_of": [1.0, "1+"]})
-        self.assertEqual(evidence._ceiling_in_finding(allow), "tier in [1, '1+']")
+        self.assertEqual(evidence._ceiling_in_finding(allow), 'tier in [1, "1+"]')
 
 
 # =========================================================================

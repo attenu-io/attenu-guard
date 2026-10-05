@@ -308,9 +308,9 @@ def _ceiling_in_finding(ceiling) -> str:
     called "São Paulo" as it is. The built-ins are rendered here in describe()'s own shape, and
     for values in the bare set the two agree character for character (tests/test_cli_verify.py
     pins that for each built-in), except that an allow-list's or a deny-list's string members
-    are printed through repr, quoted, so the string "1" and the number 1 read differently. A
-    ceiling this build does not define, or the fail-closed unknown one, prints its own
-    description as it is when that is printable ASCII, spaces included, and as escaped JSON
+    are printed in their escaped JSON form, quoted, so the string "1" and the number 1 read
+    differently. A ceiling this build does not define, or the fail-closed unknown one, prints its
+    own description as it is when that is printable ASCII, spaces included, and as escaped JSON
     otherwise. Either way the finding stays on one line."""
     from attenu_guard import ceilings as _c
     kind = type(ceiling)
@@ -320,10 +320,12 @@ def _ceiling_in_finding(ceiling) -> str:
         return f"{_shown(ceiling.key)}<={_shown(getattr(ceiling, bound))}"
     if kind is _c.Allow or kind is _c.Deny:
         # The typed members in wire order, as describe() lists them, except that a string member is
-        # printed through repr, quoted and escaped, so a finding tells the string "1" from the
-        # number 1 (attenu-ops#110). Every other member's text is bare.
+        # printed in its escaped JSON form, quoted, so a finding tells the string "1" from the
+        # number 1 (attenu-ops#110). That form is ASCII, so the text is the same on every Python
+        # version and in the TypeScript implementation; repr printed a printable non-ASCII
+        # character as it is, by the runtime's Unicode tables. Every other member's text is bare.
         members = ceiling.one_of if kind is _c.Allow else ceiling.not_one_of
-        listed = ", ".join(repr(v) if isinstance(v, str) else _shown_text(_c._member_text(v), v)
+        listed = ", ".join(_escaped(v) if isinstance(v, str) else _shown_text(_c._member_text(v), v)
                            for v in _c._in_wire_order(members))
         return f"{_shown(ceiling.key)} {'in' if kind is _c.Allow else 'not in'} [{listed}]"
     if kind is _c.Prefix:

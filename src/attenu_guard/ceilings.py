@@ -530,12 +530,19 @@ def _members_of(key, list_name: str, values) -> "_Members":
 _KIND_RANK = {"null": 0, "boolean": 1, "number": 2, "string": 3, "other": 4}
 
 
+def _wire_sort_key(value) -> tuple:
+    return (_member_text(value), _KIND_RANK[_member_key(value)[0]])
+
+
 def _in_wire_order(members) -> list:
     """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
     `_member_text`, then by JSON type (`_KIND_RANK`). That is a total order on distinct members,
     so an equal member set re-emits the same bytes whatever order it arrived in and whatever the
-    hash seed, in both implementations; ties used to keep their arrival order."""
-    return sorted(members, key=lambda v: (_member_text(v), _KIND_RANK[_member_key(v)[0]]))
+    hash seed, in both implementations; ties used to keep their arrival order. The members of an
+    `Allow` or a `Deny` are sorted once (`_Members._wire_order`); each caller gets its own list."""
+    if isinstance(members, _Members):
+        return list(members._wire_order())
+    return sorted(members, key=_wire_sort_key)
 
 
 class _Members(collections.abc.Set):
@@ -547,7 +554,7 @@ class _Members(collections.abc.Set):
     Compared against a plain set or frozenset, the plain set's own equality decides, and that
     still merges `true` and 1."""
 
-    __slots__ = ("_values", "_keys", "_hash")
+    __slots__ = ("_values", "_keys", "_hash", "_order")
 
     def __init__(self, values=()):
         by_key: dict = {}
@@ -559,6 +566,14 @@ class _Members(collections.abc.Set):
         # hash alike (`true` and 1 share a hash without being equal, which a hash allows). Computed
         # once, as a frozenset caches its own.
         self._hash = hash(frozenset(self._values))
+        self._order = None
+
+    def _wire_order(self) -> tuple:
+        """The members in wire order (`_in_wire_order`), sorted on first use and kept: a denial,
+        `to_wire()` and `describe()` each sorted the whole set again."""
+        if self._order is None:
+            self._order = tuple(sorted(self._values, key=_wire_sort_key))
+        return self._order
 
     def __contains__(self, value) -> bool:
         # An unhashable value raises TypeError, as it would against a frozenset: membership cannot
@@ -782,7 +797,9 @@ class _UnknownCeiling:
                        permits, no matter what ctx is asked about).
       * narrow()    -> meeting with anything stays an (still-denying)
                        unknown ceiling; it can never resolve to something
-                       more permissive than "deny everything".
+                       more permissive than "deny everything". `Authority.meet`
+                       keeps a parent's against a request of any other type,
+                       so the child inherits it.
       * subsumes()  -> can never be proven true against a *different*
                        constraint (we don't understand its semantics), so
                        it only subsumes an identical unknown ceiling —

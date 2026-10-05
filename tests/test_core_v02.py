@@ -356,6 +356,16 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     ceiling.permits({"amount": Amount(13.0)})
 
+    def test_the_wire_order_is_computed_once(self):
+        # A denial, to_wire() and describe() each sorted the whole member set again.
+        members = Allow("t", ["b", "a", 1, "1"]).one_of
+        first = members._wire_order()
+        self.assertEqual(_typed(list(first)), _typed([1, "1", "a", "b"]))
+        self.assertIs(members._wire_order(), first)
+        c = Allow("t", ["b", "a"])
+        self.assertIsNot(c.to_wire()["one_of"], c.to_wire()["one_of"])
+        self.assertEqual(c.permits({"t": "z"}).reasons[0].limit, ["a", "b"])
+
     def test_the_members_hash_is_computed_once(self):
         members = Allow("t", range(1000)).one_of
         self.assertEqual(members._hash, hash(frozenset(range(1000))))
@@ -785,37 +795,191 @@ class TestMalformedBounds(unittest.TestCase):
 
 
 class TestDifferentCeilingTypesUnderOneKey(unittest.TestCase):
-    """Ceilings pair by key, and two ceilings of different types under one key are not comparable:
-    an authority holding one is not narrower than an authority holding the other, and meet refuses
-    to combine them. This used to raise AttributeError out of `is_narrower_than`, so out of
-    `verify_bundle` and `load()` (attenu-ops#110)."""
+    """Ceilings pair by key, and two ceilings of different types under one key are not
+    comparable: an authority holding one is not narrower than an authority holding the other. meet
+    refuses to combine them with an AuthorityError, so `Guard.delegate` refuses the delegation and
+    records it as `spawn_denied`, except that a parent's constraint this build does not define is
+    inherited by the child, as 0.4.0 to 0.19.0 delegated it: it denies every action. A request
+    carrying one under a parent's other ceiling is refused. Each of these raised AttributeError out
+    of `is_narrower_than` or `meet` through 0.19.0, and ValueError out of `meet` earlier in
+    attenu-ops#110."""
 
-    PAIRS = (
+    KNOWN_PAIRS = (
         (Allow("region", ["us"]), Deny("region", ["eu"])),
         (Deny("region", ["eu"]), Allow("region", ["us"])),
         (Prefix("region", "u"), Allow("region", ["us"])),
-        (RowLimit(5), ceiling_from_wire({"key": "max_rows", "type": "x-custom"})),
-        (ceiling_from_wire({"key": "max_rows", "type": "x-custom"}), RowLimit(5)),
         (EgressRank("none"), ceiling_from_wire({"key": "egress", "type": "prefix", "prefix": "n"})),
     )
 
-    def test_a_ceiling_of_another_type_is_not_narrower(self):
-        for parent, child in self.PAIRS:
+    @staticmethod
+    def _auth(ceiling):
+        return Authority(scopes={"crm.read"}, ceilings=[ceiling], ttl=60)
+
+    def test_a_ceiling_of_another_known_type_is_not_narrower(self):
+        for parent, child in self.KNOWN_PAIRS:
             with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
                 self.assertFalse(parent.subsumes(child))
-                p = Authority(scopes={"crm.read"}, ceilings=[parent], ttl=60)
-                c = Authority(scopes={"crm.read"}, ceilings=[child], ttl=60)
-                self.assertFalse(c.is_narrower_than(p))
+                self.assertFalse(self._auth(child).is_narrower_than(self._auth(parent)))
 
-    def test_meet_refuses_to_combine_them(self):
-        for parent, child in self.PAIRS:
+    def test_meet_refuses_two_known_types_as_not_narrower(self):
+        for parent, child in self.KNOWN_PAIRS:
             with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
-                p = Authority(scopes={"crm.read"}, ceilings=[parent], ttl=60)
-                c = Authority(scopes={"crm.read"}, ceilings=[child], ttl=60)
-                with self.assertRaises(ValueError) as ctx:
-                    p.meet(c)
+                with self.assertRaises(AuthorityError) as ctx:
+                    self._auth(parent).meet(self._auth(child))
                 self.assertEqual(str(ctx.exception), f"constraint {parent.key!r} has a different ceiling "
                                                      "type on each side; neither narrows the other")
+                self.assertEqual((ctx.exception.reason, ctx.exception.detail),
+                                 ("not_narrower", {"constraint": parent.key}))
+
+    def test_a_delegation_across_two_known_types_is_refused_on_the_ledger(self):
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[Allow("region", ["us"])]))
+        with self.assertRaises(AuthorityError):
+            root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[Deny("region", ["eu"])]), task="t")
+        last = root.audit_log().entries[-1]
+        self.assertEqual((last["event"], last["reason"], last["detail"]),
+                         ("spawn_denied", "not_narrower", {"constraint": "region"}))
+
+    def test_a_parents_unknown_constraint_is_inherited_and_a_requested_one_is_refused(self):
+        unknown = ceiling_from_wire({"key": "max_rows", "type": "x-custom", "v": 1})
+        child = self._auth(unknown).meet(self._auth(RowLimit(5)))
+        self.assertIs(child.ceilings[0], unknown)
+        self.assertTrue(child.is_narrower_than(self._auth(unknown)))
+        self.assertFalse(child.permits("crm.read", {"rows": 1}))
+        with self.assertRaises(AuthorityError) as ctx:
+            self._auth(RowLimit(5)).meet(self._auth(unknown))
+        self.assertEqual(str(ctx.exception), "constraint 'max_rows' has a different ceiling type on each side; "
+                                             "neither narrows the other")
+        self.assertEqual((ctx.exception.reason, ctx.exception.detail), ("not_narrower", {"constraint": "max_rows"}))
+        # Neither holding is narrower than the other, as load() and a bundle's monotonicity check read it.
+        self.assertFalse(self._auth(unknown).is_narrower_than(self._auth(RowLimit(5))))
+        self.assertFalse(self._auth(RowLimit(5)).is_narrower_than(self._auth(unknown)))
+
+    def test_a_delegation_with_an_unknown_constraint_on_either_side(self):
+        # From a parent holding one, 0.4.0 through 0.19.0 delegated so; earlier in attenu-ops#110
+        # meet raised ValueError there. A request carrying one under a parent's bound raised
+        # AttributeError out of narrow(), with nothing on the ledger.
+        geo = ceiling_from_wire({"key": "geo", "type": "x-new", "v": 1})
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[geo]))
+        child = root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[Allow("geo", ["us"])]), task="t")
+        self.assertIs(child.authority.ceilings[0], geo)
+        self.assertEqual(root.audit_log().entries[-1]["event"], "spawn")
+        self.assertFalse(child.check("crm.read", context={"geo": "us"}))
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(5)]))
+        with self.assertRaises(AuthorityError):
+            root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[
+                ceiling_from_wire({"key": "max_rows", "type": "x-new"})]), task="t")
+        last = root.audit_log().entries[-1]
+        self.assertEqual((last["event"], last["reason"], last["detail"]),
+                         ("spawn_denied", "not_narrower", {"constraint": "max_rows"}))
+
+
+@dataclass(frozen=True)
+class _AnyRegion:
+    """A custom ceiling whose subsumes() takes any ceiling for one of its own kind, as a custom
+    ceiling may: an authority-level type check is all that keeps a wider child of another type
+    from passing as narrower (attenu-ops#110)."""
+    allowed: str
+    key: str = field(default="region", init=False, repr=False)
+
+    def permits(self, ctx):
+        v = ctx.get("region")
+        return Decision.allow() if v is None or v == self.allowed else Decision.deny(
+            Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.allowed, v))
+
+    def narrow(self, other):
+        return self
+
+    def subsumes(self, other):
+        return True
+
+    def describe(self):
+        return f"region only {self.allowed}"
+
+    def to_wire(self):
+        return {"key": self.key, "type": "x-anyregion", "allowed": self.allowed}
+
+    @classmethod
+    def from_wire(cls, d):
+        return cls(d["allowed"])
+
+
+@dataclass(frozen=True)
+class _Closed:
+    """A custom ceiling that denies every call without giving a reason."""
+    key: str = "closed"
+
+    def permits(self, ctx):
+        return Decision.deny()
+
+    def narrow(self, other):
+        return self
+
+    def subsumes(self, other):
+        return type(other) is type(self)
+
+    def to_wire(self):
+        return {"key": self.key, "type": "x-closed"}
+
+
+class TestTypeChecksProtectCustomCeilings(unittest.TestCase):
+    """The type checks in `is_narrower_than` and in each built-in's `subsumes`, pinned: a custom
+    ceiling's subsumes() need not handle another type, and through 0.19.0 a child holding a wider
+    allow-list passed as narrower than a parent holding such a ceiling."""
+
+    def test_a_wider_child_of_another_type_is_not_narrower_than_a_custom_ceiling(self):
+        parent = Authority(scopes={"crm.read"}, ceilings=[_AnyRegion("us")], ttl=60)
+        child = Authority(scopes={"crm.read"}, ceilings=[Allow("region", ["us", "eu"])], ttl=60)
+        self.assertTrue(child.permits("crm.read", {"region": "eu"}))
+        self.assertFalse(parent.permits("crm.read", {"region": "eu"}))
+        self.assertFalse(child.is_narrower_than(parent))
+
+    def test_each_built_in_subsumes_only_its_own_type(self):
+        class Lookalike:   # every field a built-in reads from `other`, under another class
+            key = "k"; max_rows = 1; max_spend = 1; max_calls = 1; level = "none"
+            one_of = Allow("k", []).one_of; not_one_of = Deny("k", ["x"]).not_one_of; prefix = "zz"
+        for ceiling in (RowLimit(5), SpendCap(5), CallLimit(5), EgressRank("any"), Allow("k", ["x"]),
+                        Deny("k", []), Prefix("k", "z")):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                self.assertFalse(ceiling.subsumes(Lookalike()))
+
+
+class TestADenialWithoutAReason(unittest.TestCase):
+    """A custom ceiling that denies without a Reason still denies: `Authority.permits` allowed a
+    call whenever it had collected no reason, so `Decision.deny()` from a custom ceiling let every
+    call through `Guard.check` (attenu-ops#110). The TypeScript implementation records the same
+    reason."""
+
+    def test_a_bare_denial_denies_with_a_generic_reason(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[_Closed()])
+        decision = auth.permits("crm.read", {})
+        self.assertFalse(decision)
+        self.assertEqual([r.to_dict() for r in decision.reasons], [
+            {"code": "ceiling_exceeded", "constraint": "closed", "limit": None, "requested": None,
+             "message": "denied without a reason"}])
+        guard = Guard.issue("root", auth)
+        self.assertFalse(guard.check("crm.read"))
+        self.assertEqual(guard.audit_log().entries[-1]["reasons"], [r.to_dict() for r in decision.reasons])
+
+
+class TestOneConstraintPerKey(unittest.TestCase):
+    """An authority holds one constraint per key. A second one under the same key is malformed, on
+    every path: through 0.19.0 the last one won, silently, so the authority
+    `[allow region in [us], deny region not in [rm]]` kept only the deny-list and permitted eu."""
+
+    MESSAGE = "two constraints share the key 'region'; an authority holds one per key"
+
+    def test_in_process(self):
+        for ceilings in ([Allow("region", ["us"]), Deny("region", ["rm"])], [Prefix("region", "u"), Prefix("region", "u")]):
+            with self.subTest(ceilings=ceilings):
+                with self.assertRaises(ValueError) as ctx:
+                    Authority(scopes={"crm.read"}, ceilings=ceilings)
+                self.assertEqual(str(ctx.exception), self.MESSAGE)
+
+    def test_on_the_wire(self):
+        with self.assertRaises(ValueError) as ctx:
+            Authority.from_wire({"scopes": ["crm.read"], "ttl": 60, "constraints": [
+                {"key": "region", "type": "allow", "one_of": ["us"]}, {"key": "region", "type": "deny", "not_one_of": ["rm"]}]})
+        self.assertEqual(str(ctx.exception), self.MESSAGE)
 
 
 class TestAnExplicitNullIsUndeclared(unittest.TestCase):

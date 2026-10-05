@@ -732,6 +732,25 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
             wire.load(self._chain({"key": "region", "type": "allow", "one_of": ["us"]},
                                   {"key": "region", "type": "deny", "not_one_of": ["eu"]}), self.signer)
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+        # A constraint this build does not define against a bound, in either direction.
+        unknown = {"key": "max_rows", "type": "x-custom", "v": 1}
+        for root, leaf in (({"key": "max_rows", "max": 5}, unknown), (unknown, {"key": "max_rows", "max": 5})):
+            with self.subTest(root=root):
+                with self.assertRaises(wire.WireError) as ctx:
+                    wire.load(self._chain(root, leaf), self.signer)
+                self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_two_constraints_under_one_key_make_the_token_malformed(self):
+        pair = [{"key": "region", "type": "allow", "one_of": ["us"]}, {"key": "region", "type": "deny", "not_one_of": ["rm"]}]
+        def set_pair(payload):
+            payload["authorization_details"][0]["constraints"] = pair
+        tokens = _tamper_root_and_repair_chain(self.tokens, self.signer, set_pair)
+        tokens[-1] = _tamper_leaf(tokens[-1], self.signer, set_pair)
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(tokens, self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+        self.assertEqual(ctx.exception.message, "invalid authorization_details: two constraints share the key "
+                                                "'region'; an authority holds one per key")
 
     def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
         limit = {"key": "max_calls[crm.read]", "type": "max_calls", "max": 1, "applies_to": "crm.read"}

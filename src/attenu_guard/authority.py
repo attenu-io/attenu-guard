@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import _SCOPE_RE, Ceiling, ceiling_from_wire
+from .ceilings import _SCOPE_RE, Ceiling, _UnknownCeiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
 
 
@@ -143,12 +143,12 @@ class Authority:
               allowed; the reverse is not. Bare or non-terminal "*" is invalid.
     ceilings: a tuple of typed `Ceiling` objects (RowLimit, SpendCap, ...,
               or any custom Ceiling implementation). Construction accepts any
-              iterable of Ceiling and normalises it to a tuple with at most
-              one ceiling per `.key` (last one wins), sorted by key for a
-              deterministic wire form / integrity seal. A dimension with no
-              ceiling present is unbounded on that dimension unless a parent
-              in the chain bounds it (attenuation can only add/tighten
-              bounds, never remove one — see `meet`).
+              iterable of Ceiling with one ceiling per `.key` (a second one
+              under the same key raises ValueError) and normalises it to a
+              tuple sorted by key for a deterministic wire form / integrity
+              seal. A dimension with no ceiling present is unbounded on that
+              dimension unless a parent in the chain bounds it (attenuation
+              can only add/tighten bounds, never remove one — see `meet`).
     ttl:      seconds this authority remains valid from issuance. meet takes
               the min. None = unbounded (discouraged; templates set a default).
     """
@@ -165,7 +165,11 @@ class Authority:
         object.__setattr__(self, "scopes", scopes)
         by_key: dict[str, Ceiling] = {}
         for c in self.ceilings:
-            by_key[c.key] = c  # last-one-wins on a duplicate key
+            # One constraint per key, on every path (attenu-ops#110): the last one won, silently, so
+            # [allow region in [us], deny region not in [rm]] kept only the deny-list.
+            if c.key in by_key:
+                raise ValueError(f"two constraints share the key {c.key!r}; an authority holds one per key")
+            by_key[c.key] = c
         object.__setattr__(self, "ceilings", tuple(by_key[k] for k in sorted(by_key)))
 
     # ---- ceiling lookup --------------------------------------------------
@@ -234,10 +238,17 @@ class Authority:
             a = self_by_key.get(k)
             b = other_by_key.get(k)
             if a is not None and b is not None and type(a) is not type(b):
-                # An allow-list and a deny-list (or any two ceiling types) under one key have no
-                # common narrowing; refusing beats an AttributeError or a guess.
-                raise ValueError(f"constraint {k!r} has a different ceiling type on each side; "
-                                 "neither narrows the other")
+                # Two ceiling types under one key have no common narrowing, so the delegation is
+                # refused as not narrower, and `Guard.delegate` records it as `spawn_denied`
+                # (attenu-ops#110). One exception: this side's constraint this build does not define,
+                # which denies every action, is kept, so the child inherits it, as 0.4.0 to 0.19.0
+                # delegated from a parent holding one. A request carrying one under this side's other
+                # ceiling is refused: the child would not be narrower (`is_narrower_than`).
+                if isinstance(a, _UnknownCeiling):
+                    new_ceilings.append(a)
+                    continue
+                raise AuthorityError(f"constraint {k!r} has a different ceiling type on each side; "
+                                     "neither narrows the other", reason="not_narrower", detail={"constraint": k})
             new_ceilings.append(a.narrow(b) if (a is not None and b is not None)
                                  else (a if a is not None else b))
 
@@ -318,7 +329,10 @@ class Authority:
         for c in self.ceilings:
             decision = c.permits(cctx)
             if not decision:
-                reasons.extend(decision.reasons)
+                # A denial with no reason still denies: an empty list read as an allow, so a custom
+                # ceiling's bare `Decision.deny()` let every call through (attenu-ops#110).
+                reasons.extend(decision.reasons or [Reason(ReasonCode.CEILING_EXCEEDED, c.key,
+                                                           message="denied without a reason")])
 
         if reasons:
             return Decision.deny(*reasons)
