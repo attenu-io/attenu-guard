@@ -831,8 +831,20 @@ def ceiling_from_wire(d: Mapping) -> "Ceiling":
     ceilings like Allow/Deny/Prefix), else falls back to "key" (sufficient
     for the fixed built-ins, where key IS the type). An unrecognised
     discriminator fails closed via `_UnknownCeiling` — see its docstring.
+
+    A constraint is a JSON object with a string `key`, and a `type` that, when present, is a
+    string; anything else is malformed (attenu-ops#110), in the TypeScript implementation's words
+    too: `a constraint is a string, not an object`, `type of constraint 'max_rows' is null, not a
+    string`. A constraint that is not an object raised AttributeError here; a `type` of null or a
+    number loaded as an unknown constraint, a list or an object raised TypeError in words that
+    changed with the Python version, and the TypeScript implementation routed a null `type` by
+    the key.
     """
+    if not isinstance(d, collections.abc.Mapping):
+        raise ValueError(f"a constraint is {_json_kind(d)}, not an object")
     _check_key(d.get("key", _ABSENT))
+    if "type" in d and not isinstance(d["type"], str):
+        raise _malformed(d["key"], "type", d["type"], "a string")
     discriminator = d.get("type", d.get("key"))
     cls = _REGISTRY.get(discriminator)
     if cls is None:

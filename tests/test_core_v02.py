@@ -718,6 +718,35 @@ class TestMalformedBounds(unittest.TestCase):
         self._refused(lambda: Deny(None, ["rm"]), "key of a constraint is null, not a string")
         self._refused(lambda: Prefix(True, "/"), "key of a constraint is a boolean, not a string")
 
+    def test_a_type_that_is_not_a_string(self):
+        # A present type names the constraint's kind. null or a number loaded as an unknown
+        # constraint here, a list or an object raised TypeError in words that changed with the
+        # Python version, and the TypeScript implementation read null as absent and routed the
+        # constraint by its key, so {"key": "allow", "type": null, ...} loaded there as an allow-list.
+        for value, kind in ((None, "null"), (5, "a number"), (True, "a boolean"), (["allow"], "an array"),
+                            ({"a": 1}, "an object")):
+            for wire in ({"key": "max_rows", "type": value, "max": 5},
+                         {"key": "allow", "type": value, "one_of": ["us"]},
+                         {"key": "region", "type": value, "v": 1}):
+                with self.subTest(wire=wire):
+                    self._refused(lambda: ceiling_from_wire(wire),
+                                  f"type of constraint {wire['key']!r} is {kind}, not a string")
+        # The key is read first, and a type that is a string routes as before.
+        self._refused(lambda: ceiling_from_wire({"type": None}), "key of a constraint is absent, not a string")
+        self.assertIsInstance(ceiling_from_wire({"key": "region", "type": "x-custom"}), _UnknownCeiling)
+        self.assertIsInstance(ceiling_from_wire({"key": "max_rows", "max": 5}), RowLimit)
+
+    def test_a_constraint_that_is_not_an_object(self):
+        # It raised AttributeError, "'str' object has no attribute 'get'", and the TypeScript
+        # implementation loaded every such value but null as an unknown constraint.
+        for value, kind in (("max_rows", "a string"), (5, "a number"), (1.5, "a number"), (None, "null"),
+                            (True, "a boolean"), (["max_rows"], "an array"), ([], "an array")):
+            with self.subTest(value=value):
+                message = f"a constraint is {kind}, not an object"
+                self._refused(lambda: ceiling_from_wire(value), message)
+                self._refused(lambda: Authority.from_wire({"scopes": ["crm.read"], "constraints": [value],
+                                                           "ttl": 60}), message)
+
     def test_an_absent_one_of_or_not_one_of(self):
         # An absent deny-list used to read as an empty one, which bounds nothing.
         self._refused(lambda: ceiling_from_wire({"key": "region", "type": "allow"}),

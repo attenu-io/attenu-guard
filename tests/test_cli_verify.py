@@ -604,7 +604,13 @@ class TestTypedMembersInABundle(unittest.TestCase):
                              ({"key": "tool", "type": "deny"},
                               "not_one_of of constraint 'tool' is absent, not an array"),
                              ({"key": "max_calls[crm]", "type": "max_calls", "max": 1, "applies_to": "crm"},
-                              "applies_to of constraint 'max_calls' is 'crm', not a scope")):
+                              "applies_to of constraint 'max_calls' is 'crm', not a scope"),
+                             ({"key": "max_rows", "type": None, "max": 5},
+                              "type of constraint 'max_rows' is null, not a string"),
+                             ({"key": "max_rows", "type": {"a": 1}, "max": 5},
+                              "type of constraint 'max_rows' is an object, not a string"),
+                             ("max_rows", "a constraint is a string, not an object"),
+                             (5, "a constraint is a number, not an object")):
             with self.subTest(bad=bad):
                 rc, lines = self._verify(_typed_bundle(bad))
                 self.assertEqual((rc, lines[1]), (2, f"  - root typed:n0: unreadable authority ({message})"))

@@ -713,6 +713,12 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
             ({"key": 5, "type": "deny", "not_one_of": ["rm"]}, "key of a constraint is a number, not a string"),
             ({"type": "x-custom", "v": 1}, "key of a constraint is absent, not a string"),
             ({"key": "region", "type": "deny"}, "not_one_of of constraint 'region' is absent, not an array"),
+            ({"key": "max_rows", "type": None, "max": 5}, "type of constraint 'max_rows' is null, not a string"),
+            ({"key": "allow", "type": None, "one_of": ["us"]}, "type of constraint 'allow' is null, not a string"),
+            ({"key": "max_rows", "type": ["allow"], "max": 5}, "type of constraint 'max_rows' is an array, not a string"),
+            ("max_rows", "a constraint is a string, not an object"),
+            (None, "a constraint is null, not an object"),
+            (["max_rows"], "a constraint is an array, not an object"),
         ):
             with self.subTest(bad=bad):
                 with self.assertRaises(wire.WireError) as ctx:
