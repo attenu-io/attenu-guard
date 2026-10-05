@@ -41,8 +41,11 @@ def _validate_safe_number(key: str, value) -> None:
     neighbouring integer once canonicalized (see canonical.UnsafeIntegerError),
     so a ceiling built from one would silently admit or deny a different value
     than the one the caller constructed. Fail at construction, not at signing —
-    mirrors authority.py's `_validate_scope`."""
-    if type(value) is int and abs(value) > MAX_SAFE_INTEGER:
+    mirrors authority.py's `_validate_scope`. An integral float past that range is refused too,
+    such as 1e21: the TypeScript implementation cannot write one in RFC 8785, so a token this
+    build minted with `max: 1e+21` loaded here and was refused there."""
+    integral = type(value) is int or (type(value) is float and value.is_integer())
+    if integral and abs(value) > MAX_SAFE_INTEGER:
         raise ValueError(
             f"{key} value {value!r} exceeds the safe integer range "
             f"±{MAX_SAFE_INTEGER} for a binary64 signing surface (RFC 8785)"
@@ -522,12 +525,17 @@ def _members_of(key, list_name: str, values) -> "_Members":
     return _Members(values)
 
 
+#: Where two members print alike ("1" and 1), JSON type decides their order: null, boolean,
+#: number, string, then a value outside JSON.
+_KIND_RANK = {"null": 0, "boolean": 1, "number": 2, "string": 3, "other": 4}
+
+
 def _in_wire_order(members) -> list:
     """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
-    `_member_text`, which is the order the TypeScript implementation emits. Members that print
-    alike (`"1"` and 1) keep the order they arrived in, as a stable sort over a JavaScript Set
-    does, so the same signed bytes re-emit the same bytes in both implementations."""
-    return sorted(members, key=_member_text)
+    `_member_text`, then by JSON type (`_KIND_RANK`). That is a total order on distinct members,
+    so an equal member set re-emits the same bytes whatever order it arrived in and whatever the
+    hash seed, in both implementations; ties used to keep their arrival order."""
+    return sorted(members, key=lambda v: (_member_text(v), _KIND_RANK[_member_key(v)[0]]))
 
 
 class _Members(collections.abc.Set):
@@ -539,7 +547,7 @@ class _Members(collections.abc.Set):
     Compared against a plain set or frozenset, the plain set's own equality decides, and that
     still merges `true` and 1."""
 
-    __slots__ = ("_values", "_keys")
+    __slots__ = ("_values", "_keys", "_hash")
 
     def __init__(self, values=()):
         by_key: dict = {}
@@ -547,12 +555,16 @@ class _Members(collections.abc.Set):
             by_key.setdefault(_member_key(value), value)
         self._values = tuple(by_key.values())
         self._keys = frozenset(by_key)
+        # The hash of a frozenset of the same values, so this and a plain set it compares equal to
+        # hash alike (`true` and 1 share a hash without being equal, which a hash allows). Computed
+        # once, as a frozenset caches its own.
+        self._hash = hash(frozenset(self._values))
 
     def __contains__(self, value) -> bool:
-        try:
-            return _member_key(value) in self._keys
-        except TypeError:   # a list or an object: no member is one, as in a JavaScript Set
-            return False
+        # An unhashable value raises TypeError, as it would against a frozenset: membership cannot
+        # be decided, so the check fails closed. A ceiling refuses a list or an object before it
+        # asks (`_wrong_kind`); swallowing the error let a deny-list pass an unhashable number.
+        return _member_key(value) in self._keys
 
     def __iter__(self):
         return iter(self._values)
@@ -566,9 +578,7 @@ class _Members(collections.abc.Set):
         return super().__eq__(other)
 
     def __hash__(self) -> int:
-        # The hash of a frozenset of the same values, so this and a plain set it compares equal
-        # to hash alike. `true` and 1 share a hash without being equal, which a hash allows.
-        return hash(frozenset(self._values))
+        return self._hash
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({list(self._values)!r})"

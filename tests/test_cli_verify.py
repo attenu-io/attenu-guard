@@ -435,7 +435,7 @@ class TestDefaultOutputEscaping(unittest.TestCase):
             "integrity=True monotonicity=False containment=True anchor=verified nodes=2 "
             "actions_checked=0",
             "  - monotonicity: mono:n1 not ⊆ parent mono:n0 (ceiling region in "
-            "[\"eu\\nOK\", us] looser than parent region in [us])",
+            "['eu\\nOK', 'us'] looser than parent region in ['us'])",
             "FAILED",
         ])
 
@@ -448,19 +448,27 @@ class TestDefaultOutputEscaping(unittest.TestCase):
 
     def test_a_finding_prints_a_ceiling_as_describe_does_for_bare_values(self):
         # The finding text is rendered in describe()'s own shape; this pins the two together for
-        # every built-in, so a change to one that is not made to the other fails here.
+        # every built-in, so a change to one that is not made to the other fails here. An
+        # allow-list or a deny-list differs in one way: a finding quotes its string members.
         from attenu_guard import Allow, CallLimit, Deny, EgressRank, Prefix, RowLimit, SpendCap
         from attenu_guard.ceilings import describe
         for ceiling in (RowLimit(100), SpendCap(2.5), CallLimit(3), CallLimit(3, "fs.write"),
-                        EgressRank("internal"), Allow("region", {"us", "eu"}),
-                        Deny("tool", {"shell", "rm"}), Prefix("path", "/tmp/")):
+                        EgressRank("internal"), Prefix("path", "/tmp/")):
             with self.subTest(ceiling=describe(ceiling)):
                 self.assertEqual(evidence._ceiling_in_finding(ceiling), describe(ceiling))
+        self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"us", "eu"})), "region in ['eu', 'us']")
+        self.assertEqual(evidence._ceiling_in_finding(Deny("tool", {"shell", "rm"})), "tool not in ['rm', 'shell']")
 
-    def test_a_finding_escapes_a_value_that_is_not_bare_and_describe_does_not(self):
+    def test_a_finding_prints_string_members_through_repr(self):
+        # So a finding tells the string "1" from the number 1 (they printed alike), and a member
+        # carrying a line break or a control character stays on one line, escaped.
         from attenu_guard import Allow
         self.assertEqual(evidence._ceiling_in_finding(Allow("region", {"São Paulo", "us"})),
-                         'region in ["S\\u00e3o\\u0020Paulo", us]')
+                         "region in ['São Paulo', 'us']")
+        self.assertEqual(evidence._ceiling_in_finding(Allow("region", ["eu\nOK", "x\u202e"])),
+                         "region in ['eu\\nOK', 'x\\u202e']")
+        self.assertEqual(evidence._ceiling_in_finding(Allow("t", ["1", 1, "True", True, None])),
+                         "t in [1, '1', None, True, 'True']")
 
     def test_a_ceiling_this_build_does_not_define_stays_on_one_line(self):
         from attenu_guard.ceilings import ceiling_from_wire, describe
@@ -579,6 +587,12 @@ class TestTypedMembersInABundle(unittest.TestCase):
                     "FAILED",
                 ]))
 
+    def test_a_finding_tells_a_string_member_from_a_number(self):
+        rc, lines = self._verify(_typed_bundle({"key": "t", "type": "allow", "one_of": ["1"]},
+                                               granted={"key": "t", "type": "allow", "one_of": [1]}))
+        self.assertEqual((rc, lines[1]), (2, "  - monotonicity: typed:n1 not ⊆ parent typed:n0 (ceiling t in [1] "
+                                             "looser than parent t in ['1'])"))
+
     def test_a_bound_of_the_wrong_type_is_an_unreadable_authority(self):
         for bad, message in (({"key": "max_rows", "max": True}, "max of constraint 'max_rows' is a boolean, not a number"),
                              ({"key": "egress", "rank": "everywhere"},
@@ -644,9 +658,9 @@ class TestTypedMembersInABundle(unittest.TestCase):
     def test_a_finding_prints_each_typed_member_as_typescript_does(self):
         from attenu_guard.ceilings import ceiling_from_wire
         deny = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
-        self.assertEqual(evidence._ceiling_in_finding(deny), "region not in [1, True, secret]")
+        self.assertEqual(evidence._ceiling_in_finding(deny), "region not in [1, True, 'secret']")
         allow = ceiling_from_wire({"key": "tier", "type": "allow", "one_of": [1.0, "1+"]})
-        self.assertEqual(evidence._ceiling_in_finding(allow), "tier in [1, 1+]")
+        self.assertEqual(evidence._ceiling_in_finding(allow), "tier in [1, '1+']")
 
 
 # =========================================================================

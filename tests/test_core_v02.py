@@ -306,7 +306,7 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
         self.assertEqual(len(c.one_of), 1)
         self.assertTrue(c.permits({"t": 1}))
         self.assertTrue(c.permits({"t": 1.0}))
-        self.assertEqual(c.to_wire()["one_of"], [1])
+        self.assertEqual(_typed(c.to_wire()["one_of"]), _typed([1]))   # [True] == [1] in Python
         self.assertEqual(Allow("t", [1]), Allow("t", [1.0]))
         self.assertEqual(hash(Allow("t", [1])), hash(Allow("t", [1.0])))
 
@@ -324,13 +324,42 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
         self.assertEqual(canonical.dumps(c.to_wire()),
                          b'{"key":"region","not_one_of":[1,true,"secret"],"type":"deny"}')
 
-    def test_members_that_print_alike_keep_the_order_they_arrived_in(self):
-        # The wire order is sorted by each member's printed text, and a tie keeps the order the
-        # members arrived in, as a stable sort over a JavaScript Set does.
-        for given in (["1", 1], [1, "1"], ["True", True], [True, "True"]):
-            with self.subTest(given=given):
-                c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": given})
-                self.assertEqual(_typed(c.to_wire()["one_of"]), _typed(given))
+    def test_members_that_print_alike_are_ordered_by_json_type(self):
+        # The wire order is sorted by each member's printed text, then by JSON type (null, boolean,
+        # number, string), so equal member sets re-emit equal bytes whatever order they arrived in.
+        for given, expected in ((["1", 1], [1, "1"]), (["True", True], [True, "True"]),
+                                (["None", None], [None, "None"]), (["1.5", 1.5], [1.5, "1.5"])):
+            for order in (given, list(reversed(given))):
+                with self.subTest(order=order):
+                    c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": order})
+                    self.assertEqual(_typed(c.to_wire()["one_of"]), _typed(expected))
+                    self.assertEqual(_typed(c.narrow(c).to_wire()["one_of"]), _typed(expected))
+
+    def test_the_wire_order_does_not_depend_on_the_hash_seed(self):
+        import os
+        import subprocess
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        program = ("from attenu_guard import Allow, Deny, canonical; "
+                   "print(canonical.dumps(Allow('t', {'1', 1, 'True', 'None', None, '1.5', 1.5}).to_wire()), "
+                   "canonical.dumps(Deny('t', frozenset({'1', 1, 'True', True})).to_wire()))")
+        outputs = {subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, check=True,
+                                  env={**os.environ, "PYTHONPATH": src, "PYTHONHASHSEED": str(seed)}).stdout
+                   for seed in range(6)}
+        self.assertEqual(len(outputs), 1, outputs)
+
+    def test_an_unhashable_value_fails_closed(self):
+        # It was swallowed as "no member" (`except TypeError`), so a deny-list let it through.
+        class Amount(float):
+            __hash__ = None
+        for ceiling in (Deny("amount", [13, 13.0]), Allow("amount", [13])):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                with self.assertRaises(TypeError):
+                    ceiling.permits({"amount": Amount(13.0)})
+
+    def test_the_members_hash_is_computed_once(self):
+        members = Allow("t", range(1000)).one_of
+        self.assertEqual(members._hash, hash(frozenset(range(1000))))
+        self.assertEqual(hash(members), members._hash)
 
     def test_an_integral_float_sorts_and_prints_as_the_integer(self):
         # `1.0` is 1 (the integral-number rule), so it sorts as "1", before "1+", and prints as 1.
@@ -708,6 +737,18 @@ class TestMalformedBounds(unittest.TestCase):
                                                          "max": 3, "applies_to": value}), message)
         for value in ("crm.read", "crm.*", "a.b-c.d_e"):
             self.assertEqual(CallLimit(3, value).key, f"max_calls[{value}]")
+
+    def test_an_integral_float_past_2_53_as_a_max(self):
+        # The TypeScript implementation cannot write such a number in RFC 8785 and refused it, while
+        # this build minted tokens carrying one (`max: 1e+21`).
+        for value in (1e21, 2.0 ** 60):
+            with self.subTest(value=value):
+                message = (f"max_rows value {value!r} exceeds the safe integer range ±9007199254740991 "
+                           "for a binary64 signing surface (RFC 8785)")
+                self._refused(lambda: RowLimit(value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "max_rows", "max": value}), message)
+        self.assertEqual(RowLimit(1e15).max_rows, 1e15)
+        self.assertEqual(SpendCap(float("inf")).max_spend, float("inf"))
 
     def test_guard_issue_refuses_an_authority_built_with_one(self):
         self._refused(lambda: Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit("5")])),
