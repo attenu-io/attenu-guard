@@ -264,6 +264,250 @@ class TestDeny(unittest.TestCase):
         self.assertEqual(ceiling_from_wire(wire), c)
 
 
+def _typed(values):
+    """`values` with each one's type beside it: `[1] == [True]` in Python, and these tests
+    are about exactly that difference."""
+    return [(type(v).__name__, v) for v in values]
+
+
+class TestMembersAreKeyedByJsonType(unittest.TestCase):
+    """`one_of` / `not_one_of` members are JSON values, and a member is its JSON type plus its
+    value (attenu-ops#110). Python's `True == 1` and `hash(True) == hash(1)`, so a plain
+    frozenset merged them: an allow-list holding only the number 1 admitted `true`, and the
+    same signed deny-list built two members here and three in the TypeScript implementation.
+    Every expectation below is what the TypeScript implementation answers for the same input."""
+
+    def test_an_allow_list_of_1_refuses_true(self):
+        c = ceiling_from_wire({"key": "tier", "type": "allow", "one_of": [1]})
+        self.assertTrue(c.permits({"tier": 1}))
+        self.assertFalse(c.permits({"tier": True}))
+        self.assertFalse(Allow("tier", [True]).permits({"tier": 1}))
+        self.assertFalse(Allow("tier", [0]).permits({"tier": False}))
+        self.assertFalse(Allow("tier", [False]).permits({"tier": 0}))
+
+    def test_a_deny_list_of_1_does_not_deny_true(self):
+        c = Deny("tier", [1])
+        self.assertFalse(c.permits({"tier": 1}))
+        self.assertTrue(c.permits({"tier": True}))
+        both = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        for denied in ("secret", True, 1, 1.0):
+            with self.subTest(denied=denied):
+                self.assertFalse(both.permits({"region": denied}))
+        for allowed in ("1", "True", 2, False, 0):
+            with self.subTest(allowed=allowed):
+                self.assertTrue(both.permits({"region": allowed}))
+
+    def test_a_string_is_not_the_number_it_spells(self):
+        self.assertFalse(Allow("t", ["1"]).permits({"t": 1}))
+        self.assertFalse(Allow("t", [1]).permits({"t": "1"}))
+
+    def test_a_number_is_its_numeric_value(self):
+        c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": [1, 1.0]})
+        self.assertEqual(len(c.one_of), 1)
+        self.assertTrue(c.permits({"t": 1}))
+        self.assertTrue(c.permits({"t": 1.0}))
+        self.assertEqual(_typed(c.to_wire()["one_of"]), _typed([1]))   # [True] == [1] in Python
+        self.assertEqual(Allow("t", [1]), Allow("t", [1.0]))
+        self.assertEqual(hash(Allow("t", [1])), hash(Allow("t", [1.0])))
+
+    def test_each_json_kind_is_its_own_member(self):
+        c = ceiling_from_wire({"key": "t", "type": "deny", "not_one_of": [0, False, None, "", "0"]})
+        self.assertEqual(len(c.not_one_of), 5)
+        self.assertEqual(_typed(c.to_wire()["not_one_of"]),
+                         _typed(["", 0, "0", False, None]))
+
+    def test_the_issue_deny_list_re_emits_three_members_in_the_typescript_order(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(len(c.not_one_of), 3)
+        self.assertEqual(_typed(c.to_wire()["not_one_of"]), _typed([1, True, "secret"]))
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()),
+                         b'{"key":"region","not_one_of":[1,true,"secret"],"type":"deny"}')
+
+    def test_members_that_print_alike_are_ordered_by_json_type(self):
+        # The wire order is sorted by each member's printed text, then by JSON type (null, boolean,
+        # number, string), so equal member sets re-emit equal bytes whatever order they arrived in.
+        for given, expected in ((["1", 1], [1, "1"]), (["True", True], [True, "True"]),
+                                (["None", None], [None, "None"]), (["1.5", 1.5], [1.5, "1.5"])):
+            for order in (given, list(reversed(given))):
+                with self.subTest(order=order):
+                    c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": order})
+                    self.assertEqual(_typed(c.to_wire()["one_of"]), _typed(expected))
+                    self.assertEqual(_typed(c.narrow(c).to_wire()["one_of"]), _typed(expected))
+
+    def test_the_wire_order_does_not_depend_on_the_hash_seed(self):
+        import os
+        import subprocess
+        src = str(Path(__file__).resolve().parents[1] / "src")
+        program = ("from attenu_guard import Allow, Deny, canonical; "
+                   "print(canonical.dumps(Allow('t', {'1', 1, 'True', 'None', None, '1.5', 1.5}).to_wire()), "
+                   "canonical.dumps(Deny('t', frozenset({'1', 1, 'True', True})).to_wire()))")
+        outputs = {subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, check=True,
+                                  env={**os.environ, "PYTHONPATH": src, "PYTHONHASHSEED": str(seed)}).stdout
+                   for seed in range(6)}
+        self.assertEqual(len(outputs), 1, outputs)
+
+    def test_an_unhashable_value_fails_closed(self):
+        # It was swallowed as "no member" (`except TypeError`), so a deny-list let it through.
+        class Amount(float):
+            __hash__ = None
+        for ceiling in (Deny("amount", [13, 13.0]), Allow("amount", [13])):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                with self.assertRaises(TypeError):
+                    ceiling.permits({"amount": Amount(13.0)})
+
+    def test_the_wire_order_is_computed_once(self):
+        # A denial, to_wire() and describe() each sorted the whole member set again.
+        members = Allow("t", ["b", "a", 1, "1"]).one_of
+        first = members._wire_order()
+        self.assertEqual(_typed(list(first)), _typed([1, "1", "a", "b"]))
+        self.assertIs(members._wire_order(), first)
+        c = Allow("t", ["b", "a"])
+        self.assertIsNot(c.to_wire()["one_of"], c.to_wire()["one_of"])
+        self.assertEqual(c.permits({"t": "z"}).reasons[0].limit, ["a", "b"])
+
+    def test_the_members_hash_is_computed_once(self):
+        members = Allow("t", range(1000)).one_of
+        self.assertEqual(members._hash, hash(frozenset(range(1000))))
+        self.assertEqual(hash(members), members._hash)
+
+    def test_an_integral_float_sorts_and_prints_as_the_integer(self):
+        # `1.0` is 1 (the integral-number rule), so it sorts as "1", before "1+", and prints as 1.
+        c = Allow("t", [1.0, "1+"])
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()), b'{"key":"t","one_of":[1,"1+"],"type":"allow"}')
+        self.assertEqual(c.describe(), "t in [1, 1+]")
+        self.assertEqual(Allow("t", ["1000000000000000.", 1e15]).to_wire()["one_of"],
+                         [1e15, "1000000000000000."])
+
+    def test_a_negative_zero_member_is_0(self):
+        # A JavaScript Set holds -0 as +0, so the TypeScript implementation sorts and prints a
+        # member read from `-0.0` as 0: after -1, where "-0.0" would sort before it.
+        c = ceiling_from_wire({"key": "t", "type": "allow", "one_of": [-0.0, -1]})
+        from attenu_guard import canonical
+        self.assertEqual(canonical.dumps(c.to_wire()), b'{"key":"t","one_of":[-1,0],"type":"allow"}')
+        self.assertEqual(c.describe(), "t in [-1, 0]")
+        self.assertEqual(len(Deny("t", [-0.0, 0]).not_one_of), 1)
+
+    def test_describe_prints_every_typed_member(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(c.describe(), "region not in [1, True, secret]")
+        self.assertEqual(Allow("tier", [1.0]).describe(), "tier in [1]")
+
+    def test_a_denial_names_the_members_in_wire_order(self):
+        c = ceiling_from_wire({"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]})
+        self.assertEqual(_typed(c.permits({"region": 1}).reasons[0].limit), _typed([1, True, "secret"]))
+        refused = Allow("tier", [1]).permits({"tier": True}).reasons[0]
+        self.assertEqual((_typed(refused.limit), refused.requested), (_typed([1]), True))
+
+    def test_subsumption_keeps_true_and_1_apart(self):
+        self.assertFalse(Allow("t", [True]).subsumes(Allow("t", [1])))
+        self.assertFalse(Allow("t", [1]).subsumes(Allow("t", [True])))
+        self.assertTrue(Allow("t", [1, True]).subsumes(Allow("t", [True])))
+        # A deny-list subsumes another when it forbids a subset of what the other forbids.
+        self.assertFalse(Deny("t", [True]).subsumes(Deny("t", [1])))
+        self.assertTrue(Deny("t", [1]).subsumes(Deny("t", [1, True])))
+
+    def test_narrowing_keeps_true_and_1_apart(self):
+        self.assertEqual(len(Allow("t", [1]).narrow(Allow("t", [True])).one_of), 0)
+        self.assertEqual(_typed(Deny("t", [1]).narrow(Deny("t", [True])).to_wire()["not_one_of"]),
+                         _typed([1, True]))
+
+    def test_meet_and_is_narrower_than_use_typed_members(self):
+        parent = Authority(scopes={"crm.read"}, ceilings=[Allow("tier", [True])], ttl=60)
+        child = Authority(scopes={"crm.read"}, ceilings=[Allow("tier", [1])], ttl=60)
+        self.assertFalse(child.is_narrower_than(parent))
+        met = parent.meet(child)
+        self.assertTrue(met.is_narrower_than(parent))
+        self.assertFalse(met.permits("crm.read", {"tier": 1}))
+        self.assertFalse(met.permits("crm.read", {"tier": True}))
+
+    def test_ceilings_are_equal_only_with_the_same_typed_members(self):
+        self.assertNotEqual(Allow("t", [1]), Allow("t", [True]))
+        self.assertNotEqual(Deny("t", ["secret", True, 1]), Deny("t", ["secret", True]))
+        self.assertNotEqual(Authority(scopes={"crm.read"}, ceilings=[Allow("t", [1])]),
+                            Authority(scopes={"crm.read"}, ceilings=[Allow("t", [True])]))
+
+    def test_a_list_or_an_object_member_is_still_refused(self):
+        for member in ([1], {"a": 1}):
+            with self.subTest(member=member):
+                with self.assertRaises(TypeError) as ctx:
+                    ceiling_from_wire({"key": "k", "type": "allow", "one_of": [member]})
+                self.assertEqual(str(ctx.exception), f"unhashable type: {type(member).__name__!r}")
+                with self.assertRaises(TypeError):
+                    Deny("k", ["ok", member])
+
+    def test_a_request_value_that_is_not_a_json_scalar_is_refused_by_both_lists(self):
+        # It used to raise TypeError out of permits() (and out of verify_bundle). Neither list can
+        # compare such a value with its members, so both refuse it: a deny-list that waved through
+        # `["rm"]` because it is not the string "rm" would fail open.
+        for value, kind in ((["rm"], "an array"), (("rm",), "an array"), ({"rm": 1}, "an object"),
+                            ([1], "an array"), ({"rm"}, "a value that is not JSON"),
+                            (b"rm", "a value that is not JSON")):
+            for ceiling, name in ((Allow("tool", ["rm", 1]), "one_of"),
+                                  (Deny("tool", ["rm", 1]), "not_one_of")):
+                with self.subTest(value=value, ceiling=name):
+                    decision = ceiling.permits({"tool": value})
+                    self.assertFalse(decision)
+                    (reason,) = decision.reasons
+                    self.assertEqual((reason.code, reason.constraint, reason.requested),
+                                     (ReasonCode.CEILING_EXCEEDED, "tool", value))
+                    self.assertEqual(_typed(reason.limit), _typed([1, "rm"]))
+                    self.assertEqual(reason.message,
+                                     f"{kind} cannot be compared with {name} members; refused")
+
+    def test_null_and_the_scalars_are_still_compared(self):
+        deny = Deny("tool", ["rm", 1])
+        self.assertTrue(deny.permits({"tool": None}))      # null asserts nothing, as before
+        self.assertTrue(deny.permits({}))
+        self.assertTrue(deny.permits({"tool": "ls"}))
+        self.assertFalse(deny.permits({"tool": "rm"}))
+        self.assertTrue(deny.permits({"tool": True}))
+        self.assertEqual(deny.permits({"tool": "rm"}).reasons[0].message, "")
+
+    def test_guard_check_refuses_and_records_a_list_against_a_deny_list(self):
+        g = Guard.issue("root", Authority(scopes={"shell.run"}, ceilings=[Deny("tool", {"rm"})]))
+        decision = g.check("shell.run", context={"tool": ["rm"]})
+        self.assertFalse(decision)
+        deny = g.audit_log().entries[-1]
+        self.assertEqual((deny["event"], deny["reason"]), ("deny", ReasonCode.CEILING_EXCEEDED))
+        self.assertEqual(deny["reasons"][0]["message"],
+                         "an array cannot be compared with not_one_of members; refused")
+
+    NOT_ARRAYS = (({"us": 1}, "an object"), (None, "null"), ("us", "a string"), (5, "a number"),
+                  (1.5, "a number"), (True, "a boolean"))
+
+    def test_a_one_of_that_is_not_an_array_is_refused(self):
+        # An object's keys used to become the members, and a string's characters; null, a number
+        # and a boolean raised TypeError. Each is now a ValueError naming the list and the key,
+        # from the constructor and from the wire alike.
+        for value, kind in self.NOT_ARRAYS:
+            for cls, name in ((Allow, "one_of"), (Deny, "not_one_of")):
+                with self.subTest(list=name, value=value):
+                    message = f"{name} of constraint 'region' is {kind}, not an array"
+                    with self.assertRaises(ValueError) as ctx:
+                        cls("region", value)
+                    self.assertEqual(str(ctx.exception), message)
+                    with self.assertRaises(ValueError) as ctx:
+                        ceiling_from_wire({"key": "region", "type": cls.__name__.lower(), name: value})
+                    self.assertEqual(str(ctx.exception), message)
+
+    def test_guard_issue_refuses_an_authority_built_with_one(self):
+        with self.assertRaises(ValueError) as ctx:
+            Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[Allow("region", {"us": 1})]))
+        self.assertEqual(str(ctx.exception), "one_of of constraint 'region' is an object, not an array")
+
+    def test_an_array_or_a_python_collection_is_still_a_list_of_members(self):
+        for given in (["us", "eu"], ("us", "eu"), {"us", "eu"}, frozenset({"us", "eu"})):
+            with self.subTest(given=type(given).__name__):
+                self.assertEqual(sorted(Allow("region", given).one_of), ["eu", "us"])
+
+    def test_the_members_still_compare_with_a_plain_set(self):
+        self.assertEqual(Allow("region", {"eu", "us"}).one_of, frozenset({"eu", "us"}))
+        self.assertEqual(sorted(Deny("tool", ["rm", "curl", "rm"]).not_one_of), ["curl", "rm"])
+        self.assertIn("eu", Allow("region", {"eu"}).one_of)
+
+
 class TestPrefix(unittest.TestCase):
     def test_permits_prefix_match(self):
         c = Prefix("path", "/tmp/")
@@ -334,6 +578,499 @@ class TestUnknownCeilingFailsClosed(unittest.TestCase):
         c = ceiling_from_wire({"key": "max_rows", "type": "double_row_limit", "max": 42})
         self.assertIsInstance(c, RowLimit)
         self.assertEqual(c.max_rows, 42)
+
+
+class TestEveryCeilingIsTypeStrict(unittest.TestCase):
+    """A request value of the wrong JSON type is refused by every built-in ceiling, never coerced
+    (attenu-ops#110): a numeric cap takes a number, and a boolean is not one although Python's bool
+    is an int; a prefix and an egress rank take a string. The refusal is `ceiling_exceeded`, with
+    one message per ceiling kind, in the TypeScript implementation's words too. null and an absent
+    field still assert nothing."""
+
+    WRONG = {   # the value, and what a refusal calls it
+        "a string": "50", "a boolean": True, "a number": 50, "an array": [50],
+        "an object": {"n": 50}, "a value that is not JSON": {50},
+    }
+
+    def _assert_refused(self, ceiling, field, accepted, against, extra=None):
+        for kind, value in self.WRONG.items():
+            if kind in accepted:
+                continue
+            with self.subTest(ceiling=type(ceiling).__name__, value=value):
+                decision = ceiling.permits({field: value, **(extra or {})})
+                self.assertFalse(decision)
+                (reason,) = decision.reasons
+                self.assertEqual((reason.code, reason.constraint, reason.requested),
+                                 (ReasonCode.CEILING_EXCEEDED, ceiling.key, value))
+                self.assertEqual(reason.message, f"{kind} cannot be compared with {against}; refused")
+
+    def test_a_numeric_cap_takes_a_number_and_never_a_boolean(self):
+        for ceiling, field, extra in ((RowLimit(100), "rows", None), (SpendCap(2.5), "spend", None),
+                                      (CallLimit(3), "calls", None),
+                                      (CallLimit(3, "fs.write"), "calls[fs.write]", {"_scope": "fs.write"})):
+            self._assert_refused(ceiling, field, ("a number",), "a maximum", extra)
+            self.assertEqual(ceiling.permits({field: 1, **(extra or {})}).reasons, ())
+            self.assertEqual(ceiling.permits({field: 10**6, **(extra or {})}).reasons[0].message, "")
+
+    def test_a_prefix_takes_a_string(self):
+        ceiling = Prefix("path", "50")
+        self._assert_refused(ceiling, "path", ("a string",), "a prefix")
+        self.assertTrue(ceiling.permits({"path": "50/x"}))
+        self.assertFalse(Prefix("flag", "T").permits({"flag": True}))   # str(True) began with "T"
+
+    def test_an_egress_rank_takes_a_string(self):
+        ceiling = EgressRank("any")
+        self._assert_refused(ceiling, "egress", ("a string",), "an egress rank")
+        self.assertTrue(ceiling.permits({"egress": "internal"}))
+        self.assertEqual(ceiling.permits({"egress": "elsewhere"}).reasons[0].message, "")
+
+    def test_null_and_an_absent_field_still_assert_nothing(self):
+        for ceiling, field in ((RowLimit(1), "rows"), (SpendCap(1), "spend"), (CallLimit(1), "calls"),
+                               (EgressRank("none"), "egress"), (Prefix("path", "/tmp/"), "path")):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                self.assertTrue(ceiling.permits({field: None}))
+                self.assertTrue(ceiling.permits({}))
+
+    def test_guard_check_refuses_a_string_quantity_where_it_raised(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(100)]))
+        self.assertFalse(g.check("crm.read", context={"rows": "50"}))
+        self.assertEqual(g.audit_log().entries[-1]["reasons"][0]["message"],
+                         "a string cannot be compared with a maximum; refused")
+
+
+class TestMalformedBounds(unittest.TestCase):
+    """A ceiling bound of the wrong type is malformed (attenu-ops#110): the draft makes "max" a
+    number and "prefix" a string, an egress rank outside none < internal < any admitted every
+    request, and a `field` or `applies_to` that is not a string named a different field in each
+    implementation. The constructor raises ValueError naming the member and the key, so a token
+    carrying one is malformed and a bundle reports the authority unreadable. Same text as the
+    TypeScript implementation, which throws TypeError."""
+
+    NOT_NUMBERS = (("5", "a string"), (True, "a boolean"), (None, "null"), ([5], "an array"),
+                   ({"n": 5}, "an object"))
+
+    def _refused(self, build, message):
+        with self.assertRaises(ValueError) as ctx:
+            build()
+        self.assertEqual(str(ctx.exception), message)
+
+    def test_a_max_that_is_not_a_number(self):
+        for value, kind in self.NOT_NUMBERS:
+            for cls, key in ((RowLimit, "max_rows"), (SpendCap, "max_spend"), (CallLimit, "max_calls")):
+                with self.subTest(cls=cls.__name__, value=value):
+                    message = f"max of constraint {key!r} is {kind}, not a number"
+                    self._refused(lambda: cls(value), message)
+                    self._refused(lambda: ceiling_from_wire({"key": key, "max": value}), message)
+        for key in ("max_rows", "max_spend", "max_calls"):
+            with self.subTest(absent=key):
+                self._refused(lambda: ceiling_from_wire({"key": key}),
+                              f"max of constraint {key!r} is absent, not a number")
+        self._refused(lambda: CallLimit("3", "fs.write"),
+                      "max of constraint 'max_calls[fs.write]' is a string, not a number")
+
+    def test_a_prefix_that_is_not_a_string(self):
+        for value, kind in ((5, "a number"), (True, "a boolean"), (None, "null"), (["x"], "an array"),
+                            ({"x": 1}, "an object")):
+            with self.subTest(value=value):
+                message = f"prefix of constraint 'path' is {kind}, not a string"
+                self._refused(lambda: Prefix("path", value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "path", "type": "prefix", "prefix": value}), message)
+        self._refused(lambda: ceiling_from_wire({"key": "path", "type": "prefix"}),
+                      "prefix of constraint 'path' is absent, not a string")
+
+    def test_an_egress_rank_outside_none_internal_any(self):
+        # An unknown rank used to rank above "any", so the ceiling admitted every request.
+        for value, shown in (("everywhere", "'everywhere'"), ("NONE", "'NONE'"), (5, "a number"),
+                             (True, "a boolean"), (None, "null"), (["any"], "an array")):
+            with self.subTest(value=value):
+                message = f"rank of constraint 'egress' is {shown}, not 'none', 'internal' or 'any'"
+                self._refused(lambda: EgressRank(value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "egress", "rank": value}), message)
+        self._refused(lambda: ceiling_from_wire({"key": "egress"}),
+                      "rank of constraint 'egress' is absent, not 'none', 'internal' or 'any'")
+        for level in ("none", "internal", "any"):
+            self.assertEqual(EgressRank(level).level, level)
+
+    def test_a_field_or_applies_to_that_is_not_a_string(self):
+        self._refused(lambda: Allow("region", ["us"], field=5),
+                      "field of constraint 'region' is a number, not a string")
+        self._refused(lambda: Deny("tool", ["rm"], field=True),
+                      "field of constraint 'tool' is a boolean, not a string")
+        self._refused(lambda: Prefix("path", "/tmp/", field=["p"]),
+                      "field of constraint 'path' is an array, not a string")
+        self._refused(lambda: ceiling_from_wire({"key": "region", "type": "allow", "one_of": ["us"], "field": {}}),
+                      "field of constraint 'region' is an object, not a string")
+        self._refused(lambda: CallLimit(3, 5), "applies_to of constraint 'max_calls' is a number, not a string")
+        self._refused(lambda: ceiling_from_wire({"key": "max_calls[x]", "type": "max_calls", "max": 3,
+                                                 "applies_to": True}),
+                      "applies_to of constraint 'max_calls' is a boolean, not a string")
+        # null is absent, as before: the ctx field is the key, and the limit is unscoped.
+        self.assertEqual(ceiling_from_wire({"key": "region", "type": "allow", "one_of": ["us"],
+                                            "field": None}).field, None)
+        self.assertEqual(CallLimit(3, None).key, "max_calls")
+
+    def test_a_key_that_is_not_a_string(self):
+        # A constraint's key names its dimension and, by default, the context field it reads. A
+        # number, null or a boolean read a field no JSON object can carry here, so the constraint
+        # bounded nothing, and the TypeScript implementation read String(key) instead; an absent
+        # key loaded there and read the field "undefined".
+        for wire, kind in (({"type": "allow", "one_of": ["us"]}, "absent"),
+                           ({"key": 5, "type": "allow", "one_of": ["us"]}, "a number"),
+                           ({"key": None, "type": "deny", "not_one_of": ["rm"]}, "null"),
+                           ({"key": True, "type": "prefix", "prefix": "/"}, "a boolean"),
+                           ({"key": ["k"], "type": "x-custom"}, "an array"),
+                           ({"key": {"a": 1}, "type": "x-custom"}, "an object"),
+                           ({"type": "x-custom", "v": 1}, "absent"),
+                           ({"max": 5}, "absent")):
+            with self.subTest(wire=wire):
+                self._refused(lambda: ceiling_from_wire(wire), f"key of a constraint is {kind}, not a string")
+        self._refused(lambda: Allow(5, ["us"]), "key of a constraint is a number, not a string")
+        self._refused(lambda: Deny(None, ["rm"]), "key of a constraint is null, not a string")
+        self._refused(lambda: Prefix(True, "/"), "key of a constraint is a boolean, not a string")
+
+    def test_a_type_that_is_not_a_string(self):
+        # A present type names the constraint's kind. null or a number loaded as an unknown
+        # constraint here, a list or an object raised TypeError in words that changed with the
+        # Python version, and the TypeScript implementation read null as absent and routed the
+        # constraint by its key, so {"key": "allow", "type": null, ...} loaded there as an allow-list.
+        for value, kind in ((None, "null"), (5, "a number"), (True, "a boolean"), (["allow"], "an array"),
+                            ({"a": 1}, "an object")):
+            for wire in ({"key": "max_rows", "type": value, "max": 5},
+                         {"key": "allow", "type": value, "one_of": ["us"]},
+                         {"key": "region", "type": value, "v": 1}):
+                with self.subTest(wire=wire):
+                    self._refused(lambda: ceiling_from_wire(wire),
+                                  f"type of constraint {wire['key']!r} is {kind}, not a string")
+        # The key is read first, and a type that is a string routes as before.
+        self._refused(lambda: ceiling_from_wire({"type": None}), "key of a constraint is absent, not a string")
+        self.assertIsInstance(ceiling_from_wire({"key": "region", "type": "x-custom"}), _UnknownCeiling)
+        self.assertIsInstance(ceiling_from_wire({"key": "max_rows", "max": 5}), RowLimit)
+
+    def test_a_constraint_that_is_not_an_object(self):
+        # It raised AttributeError, "'str' object has no attribute 'get'", and the TypeScript
+        # implementation loaded every such value but null as an unknown constraint.
+        for value, kind in (("max_rows", "a string"), (5, "a number"), (1.5, "a number"), (None, "null"),
+                            (True, "a boolean"), (["max_rows"], "an array"), ([], "an array")):
+            with self.subTest(value=value):
+                message = f"a constraint is {kind}, not an object"
+                self._refused(lambda: ceiling_from_wire(value), message)
+                self._refused(lambda: Authority.from_wire({"scopes": ["crm.read"], "constraints": [value],
+                                                           "ttl": 60}), message)
+
+    def test_an_absent_one_of_or_not_one_of(self):
+        # An absent deny-list used to read as an empty one, which bounds nothing.
+        self._refused(lambda: ceiling_from_wire({"key": "region", "type": "allow"}),
+                      "one_of of constraint 'region' is absent, not an array")
+        self._refused(lambda: ceiling_from_wire({"key": "tool", "type": "deny"}),
+                      "not_one_of of constraint 'tool' is absent, not an array")
+        self.assertEqual(len(ceiling_from_wire({"key": "region", "type": "allow", "one_of": []}).one_of), 0)
+
+    def test_an_applies_to_that_is_not_a_scope(self):
+        # A scoped limit applies to the scopes its pattern covers, and "*", "crm" or "CRM.READ"
+        # covers none, so the limit bounded nothing. It follows the scope grammar now.
+        for value in ("*", "crm", "CRM.READ", "", "crm.", ".crm.read", "crm.*.read", "crm read"):
+            with self.subTest(value=value):
+                message = f"applies_to of constraint 'max_calls' is {value!r}, not a scope"
+                self._refused(lambda: CallLimit(3, value), message)
+                self._refused(lambda: ceiling_from_wire({"key": f"max_calls[{value}]", "type": "max_calls",
+                                                         "max": 3, "applies_to": value}), message)
+        for value in ("crm.read", "crm.*", "a.b-c.d_e"):
+            self.assertEqual(CallLimit(3, value).key, f"max_calls[{value}]")
+
+    def test_an_integral_float_past_2_53_as_a_max(self):
+        # The TypeScript implementation cannot write such a number in RFC 8785 and refused it, while
+        # this build minted tokens carrying one (`max: 1e+21`).
+        for value in (1e21, 2.0 ** 60):
+            with self.subTest(value=value):
+                message = (f"max_rows value {value!r} exceeds the safe integer range ±9007199254740991 "
+                           "for a binary64 signing surface (RFC 8785)")
+                self._refused(lambda: RowLimit(value), message)
+                self._refused(lambda: ceiling_from_wire({"key": "max_rows", "max": value}), message)
+        self.assertEqual(RowLimit(1e15).max_rows, 1e15)
+        self.assertEqual(SpendCap(float("inf")).max_spend, float("inf"))
+
+    def test_guard_issue_refuses_an_authority_built_with_one(self):
+        self._refused(lambda: Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit("5")])),
+                      "max of constraint 'max_rows' is a string, not a number")
+
+
+class TestDifferentCeilingTypesUnderOneKey(unittest.TestCase):
+    """Ceilings pair by key, and two ceilings of different types under one key are not
+    comparable: an authority holding one is not narrower than an authority holding the other. meet
+    refuses to combine them with an AuthorityError, so `Guard.delegate` refuses the delegation and
+    records it as `spawn_denied`, except that a parent's constraint this build does not define is
+    inherited by the child, as 0.4.0 to 0.19.0 delegated it: it denies every action. A request
+    carrying one under a parent's other ceiling is refused. Each of these raised AttributeError out
+    of `is_narrower_than` or `meet` through 0.19.0, and ValueError out of `meet` earlier in
+    attenu-ops#110."""
+
+    KNOWN_PAIRS = (
+        (Allow("region", ["us"]), Deny("region", ["eu"])),
+        (Deny("region", ["eu"]), Allow("region", ["us"])),
+        (Prefix("region", "u"), Allow("region", ["us"])),
+        (EgressRank("none"), ceiling_from_wire({"key": "egress", "type": "prefix", "prefix": "n"})),
+    )
+
+    @staticmethod
+    def _auth(ceiling):
+        return Authority(scopes={"crm.read"}, ceilings=[ceiling], ttl=60)
+
+    def test_a_ceiling_of_another_known_type_is_not_narrower(self):
+        for parent, child in self.KNOWN_PAIRS:
+            with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
+                self.assertFalse(parent.subsumes(child))
+                self.assertFalse(self._auth(child).is_narrower_than(self._auth(parent)))
+
+    def test_meet_refuses_two_known_types_as_not_narrower(self):
+        for parent, child in self.KNOWN_PAIRS:
+            with self.subTest(parent=type(parent).__name__, child=type(child).__name__):
+                with self.assertRaises(AuthorityError) as ctx:
+                    self._auth(parent).meet(self._auth(child))
+                self.assertEqual(str(ctx.exception), f"constraint {parent.key!r} has a different ceiling "
+                                                     "type on each side; neither narrows the other")
+                self.assertEqual((ctx.exception.reason, ctx.exception.detail),
+                                 ("not_narrower", {"constraint": parent.key}))
+
+    def test_a_delegation_across_two_known_types_is_refused_on_the_ledger(self):
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[Allow("region", ["us"])]))
+        with self.assertRaises(AuthorityError):
+            root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[Deny("region", ["eu"])]), task="t")
+        last = root.audit_log().entries[-1]
+        self.assertEqual((last["event"], last["reason"], last["detail"]),
+                         ("spawn_denied", "not_narrower", {"constraint": "region"}))
+
+    def test_a_parents_unknown_constraint_is_inherited_and_a_requested_one_is_refused(self):
+        unknown = ceiling_from_wire({"key": "max_rows", "type": "x-custom", "v": 1})
+        child = self._auth(unknown).meet(self._auth(RowLimit(5)))
+        self.assertIs(child.ceilings[0], unknown)
+        self.assertTrue(child.is_narrower_than(self._auth(unknown)))
+        self.assertFalse(child.permits("crm.read", {"rows": 1}))
+        with self.assertRaises(AuthorityError) as ctx:
+            self._auth(RowLimit(5)).meet(self._auth(unknown))
+        self.assertEqual(str(ctx.exception), "constraint 'max_rows' has a different ceiling type on each side; "
+                                             "neither narrows the other")
+        self.assertEqual((ctx.exception.reason, ctx.exception.detail), ("not_narrower", {"constraint": "max_rows"}))
+        # Neither holding is narrower than the other, as load() and a bundle's monotonicity check read it.
+        self.assertFalse(self._auth(unknown).is_narrower_than(self._auth(RowLimit(5))))
+        self.assertFalse(self._auth(RowLimit(5)).is_narrower_than(self._auth(unknown)))
+
+    def test_a_delegation_with_an_unknown_constraint_on_either_side(self):
+        # From a parent holding one, 0.4.0 through 0.19.0 delegated so; earlier in attenu-ops#110
+        # meet raised ValueError there. A request carrying one under a parent's bound raised
+        # AttributeError out of narrow(), with nothing on the ledger.
+        geo = ceiling_from_wire({"key": "geo", "type": "x-new", "v": 1})
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[geo]))
+        child = root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[Allow("geo", ["us"])]), task="t")
+        self.assertIs(child.authority.ceilings[0], geo)
+        self.assertEqual(root.audit_log().entries[-1]["event"], "spawn")
+        self.assertFalse(child.check("crm.read", context={"geo": "us"}))
+        root = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(5)]))
+        with self.assertRaises(AuthorityError):
+            root.delegate("child", Authority(scopes={"crm.read"}, ceilings=[
+                ceiling_from_wire({"key": "max_rows", "type": "x-new"})]), task="t")
+        last = root.audit_log().entries[-1]
+        self.assertEqual((last["event"], last["reason"], last["detail"]),
+                         ("spawn_denied", "not_narrower", {"constraint": "max_rows"}))
+
+
+@dataclass(frozen=True)
+class _AnyRegion:
+    """A custom ceiling whose subsumes() takes any ceiling for one of its own kind, as a custom
+    ceiling may: an authority-level type check is all that keeps a wider child of another type
+    from passing as narrower (attenu-ops#110)."""
+    allowed: str
+    key: str = field(default="region", init=False, repr=False)
+
+    def permits(self, ctx):
+        v = ctx.get("region")
+        return Decision.allow() if v is None or v == self.allowed else Decision.deny(
+            Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.allowed, v))
+
+    def narrow(self, other):
+        return self
+
+    def subsumes(self, other):
+        return True
+
+    def describe(self):
+        return f"region only {self.allowed}"
+
+    def to_wire(self):
+        return {"key": self.key, "type": "x-anyregion", "allowed": self.allowed}
+
+    @classmethod
+    def from_wire(cls, d):
+        return cls(d["allowed"])
+
+
+@dataclass(frozen=True)
+class _Closed:
+    """A custom ceiling that denies every call without giving a reason."""
+    key: str = "closed"
+
+    def permits(self, ctx):
+        return Decision.deny()
+
+    def narrow(self, other):
+        return self
+
+    def subsumes(self, other):
+        return type(other) is type(self)
+
+    def to_wire(self):
+        return {"key": self.key, "type": "x-closed"}
+
+
+class TestTypeChecksProtectCustomCeilings(unittest.TestCase):
+    """The type checks in `is_narrower_than` and in each built-in's `subsumes`, pinned: a custom
+    ceiling's subsumes() need not handle another type, and through 0.19.0 a child holding a wider
+    allow-list passed as narrower than a parent holding such a ceiling."""
+
+    def test_a_wider_child_of_another_type_is_not_narrower_than_a_custom_ceiling(self):
+        parent = Authority(scopes={"crm.read"}, ceilings=[_AnyRegion("us")], ttl=60)
+        child = Authority(scopes={"crm.read"}, ceilings=[Allow("region", ["us", "eu"])], ttl=60)
+        self.assertTrue(child.permits("crm.read", {"region": "eu"}))
+        self.assertFalse(parent.permits("crm.read", {"region": "eu"}))
+        self.assertFalse(child.is_narrower_than(parent))
+
+    def test_each_built_in_subsumes_only_its_own_type(self):
+        class Lookalike:   # every field a built-in reads from `other`, under another class
+            key = "k"; max_rows = 1; max_spend = 1; max_calls = 1; level = "none"
+            one_of = Allow("k", []).one_of; not_one_of = Deny("k", ["x"]).not_one_of; prefix = "zz"
+        for ceiling in (RowLimit(5), SpendCap(5), CallLimit(5), EgressRank("any"), Allow("k", ["x"]),
+                        Deny("k", []), Prefix("k", "z")):
+            with self.subTest(ceiling=type(ceiling).__name__):
+                self.assertFalse(ceiling.subsumes(Lookalike()))
+
+
+class TestADenialWithoutAReason(unittest.TestCase):
+    """A custom ceiling that denies without a Reason still denies: `Authority.permits` allowed a
+    call whenever it had collected no reason, so `Decision.deny()` from a custom ceiling let every
+    call through `Guard.check` (attenu-ops#110). The TypeScript implementation records the same
+    reason."""
+
+    def test_a_bare_denial_denies_with_a_generic_reason(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[_Closed()])
+        decision = auth.permits("crm.read", {})
+        self.assertFalse(decision)
+        self.assertEqual([r.to_dict() for r in decision.reasons], [
+            {"code": "ceiling_exceeded", "constraint": "closed", "limit": None, "requested": None,
+             "message": "denied without a reason"}])
+        guard = Guard.issue("root", auth)
+        self.assertFalse(guard.check("crm.read"))
+        self.assertEqual(guard.audit_log().entries[-1]["reasons"], [r.to_dict() for r in decision.reasons])
+
+
+class TestOneConstraintPerKey(unittest.TestCase):
+    """An authority holds one constraint per key. A second one under the same key is malformed, on
+    every path: through 0.19.0 the last one won, silently, so the authority
+    `[allow region in [us], deny region not in [rm]]` kept only the deny-list and permitted eu."""
+
+    MESSAGE = "two constraints share the key 'region'; an authority holds one per key"
+
+    def test_in_process(self):
+        for ceilings in ([Allow("region", ["us"]), Deny("region", ["rm"])], [Prefix("region", "u"), Prefix("region", "u")]):
+            with self.subTest(ceilings=ceilings):
+                with self.assertRaises(ValueError) as ctx:
+                    Authority(scopes={"crm.read"}, ceilings=ceilings)
+                self.assertEqual(str(ctx.exception), self.MESSAGE)
+
+    def test_on_the_wire(self):
+        with self.assertRaises(ValueError) as ctx:
+            Authority.from_wire({"scopes": ["crm.read"], "ttl": 60, "constraints": [
+                {"key": "region", "type": "allow", "one_of": ["us"]}, {"key": "region", "type": "deny", "not_one_of": ["rm"]}]})
+        self.assertEqual(str(ctx.exception), self.MESSAGE)
+
+
+class TestAnExplicitNullIsUndeclared(unittest.TestCase):
+    """A null quantity asserts nothing, so for a metered field it is an undeclared one: strict
+    metering refuses the call, and the guard meters the call count itself (attenu-ops#110). Before,
+    `{"rows": None, "calls": None}` counted as declared, the ceilings read null as absent, and a
+    metered CallLimit(1) passed any number of calls."""
+
+    def test_strict_metering_refuses_a_null_quantity(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit(5)]), strict_metering=True)
+        decision = g.check("crm.read", metered=True, context={"rows": None})
+        self.assertFalse(decision)
+        self.assertEqual(decision.reasons[0].code, ReasonCode.UNMETERED)
+        self.assertTrue(g.check("crm.read", metered=True, context={"rows": 3}))
+
+    def test_the_guard_counts_a_call_whose_count_is_null(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1)]))
+        self.assertTrue(g.check("crm.read", context={"calls": None}))
+        self.assertFalse(g.check("crm.read", context={"calls": None}))
+        self.assertFalse(g.check("crm.read", context={"rows": None, "calls": None}))
+
+    def test_both_together(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1), RowLimit(5)]),
+                        strict_metering=True)
+        self.assertTrue(g.check("crm.read", metered=True, context={"rows": 1, "calls": None}))
+        self.assertFalse(g.check("crm.read", metered=True, context={"rows": 1, "calls": None}))
+        refused = g.check("crm.read", metered=True, context={"rows": None, "calls": None})
+        self.assertEqual(refused.reasons[0].code, ReasonCode.UNMETERED)
+
+
+class TestScopeIsNeverTheCallers(unittest.TestCase):
+    """`_scope` is reserved: `Authority.permits` sets it to the scope being checked, whatever the
+    context says (attenu-ops#110). A context carrying its own `_scope` used to decide which scoped
+    call limit applied, so it could move a call off its meter, or onto another one."""
+
+    def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[CallLimit(1, "crm.read")])
+        self.assertFalse(auth.permits("crm.read", {"calls[crm.read]": 2, "_scope": "other.x"}))
+
+    def test_a_callers_scope_cannot_move_a_call_onto_another_meter(self):
+        auth = Authority(scopes={"crm.read"}, ceilings=[CallLimit(0, "other.*")])
+        self.assertTrue(auth.permits("crm.read", {"calls[other.*]": 1, "_scope": "other.x"}))
+
+    def test_guard_check_keeps_counting_against_the_calls_own_meter(self):
+        g = Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[CallLimit(1, "crm.read")]))
+        self.assertTrue(g.check("crm.read"))
+        self.assertFalse(g.check("crm.read"))
+        self.assertFalse(g.check("crm.read", context={"_scope": "other.x"}))
+
+
+class TestUnknownConstraintsCompareAsJson(unittest.TestCase):
+    """An unknown constraint subsumes only an equal one, and equal means equal as JSON: the same
+    RFC 8785 bytes (attenu-ops#110). Python's `True == 1` made `v: [1]` equal `v: [true]`, and the
+    TypeScript implementation, which compared JSON text with only the top-level keys sorted, held
+    two objects unequal when a nested one listed its keys in another order. Both now compare the
+    canonical bytes, and a value RFC 8785 cannot write equals nothing."""
+
+    CASES = (  # (label, a, b, equal)
+        ("a boolean is not a number", {"v": [True]}, {"v": [1]}, False),
+        ("1.0 is 1", {"v": 1.0}, {"v": 1}, True),
+        ("-0.0 is 0", {"v": -0.0}, {"v": 0}, True),
+        ("nested key order is not a difference", {"v": {"a": 1, "b": 2}}, {"v": {"b": 2, "a": 1}}, True),
+        ("nor is it deeper down", {"v": [{"a": {"c": 1, "d": 2}}]}, {"v": [{"a": {"d": 2, "c": 1}}]}, True),
+        ("array order is", {"v": [1, 2]}, {"v": [2, 1]}, False),
+        ("a string is not the number it spells", {"v": "1"}, {"v": 1}, False),
+        ("null is not false", {"v": None}, {"v": False}, False),
+        ("identical", {"v": {"a": [1, "s", None]}}, {"v": {"a": [1, "s", None]}}, True),
+    )
+
+    @staticmethod
+    def _unknown(members):
+        return ceiling_from_wire({"key": "k", "type": "x-custom", **members})
+
+    def test_subsumption_is_json_equality(self):
+        for label, a, b, equal in self.CASES:
+            with self.subTest(label):
+                self.assertEqual(self._unknown(a).subsumes(self._unknown(b)), equal)
+                self.assertEqual(self._unknown(b).subsumes(self._unknown(a)), equal)
+
+    def test_a_value_rfc_8785_cannot_write_equals_nothing(self):
+        # An integer past 2**53 has no RFC 8785 form, so not even an identical copy is provably
+        # the same constraint: fail closed. A token cannot carry one; a bundle that does fails
+        # its integrity check as well.
+        self.assertFalse(self._unknown({"v": 2**53}).subsumes(self._unknown({"v": 2**53})))
+
+    def test_a_child_holding_1_is_not_narrower_than_a_parent_holding_true(self):
+        def authority(v):
+            return Authority.from_wire({"scopes": ["crm.read"], "ttl": 60,
+                                        "constraints": [{"key": "k", "type": "x-custom", "v": v}]})
+        self.assertFalse(authority([1]).is_narrower_than(authority([True])))
+        self.assertTrue(authority([1.0]).is_narrower_than(authority([1])))
 
 
 # =========================================================================

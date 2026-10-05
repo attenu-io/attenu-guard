@@ -37,5 +37,11 @@ def escaped(value) -> str:
 def shown(value) -> str:
     """`value` as a finding message prints it: the text it has always printed as (`str`) when
     that text is bare, its `escaped` JSON form otherwise."""
-    text = value if isinstance(value, str) else str(value)
+    return shown_text(value if isinstance(value, str) else str(value), value)
+
+
+def shown_text(text: str, value) -> str:
+    """`shown`, for a caller that already holds the text `value` prints as (a ceiling member
+    prints a number as the TypeScript implementation does, `1.0` as 1): `text` when it is bare,
+    `value`'s `escaped` form otherwise."""
     return text if BARE.fullmatch(text) else escaped(value)

@@ -21,7 +21,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "src"))
 sys.path.insert(0, str(_ROOT / "tests" / "vectors"))
 
-from attenu_guard import Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
+from attenu_guard import Allow, Authority, Guard, RowLimit, EgressRank, SpendCap  # noqa: E402
 from attenu_guard import canonical, wire  # noqa: E402
 from attenu_guard import vectors  # noqa: E402  (the shipped copy of tests/vectors/)
 
@@ -603,6 +603,167 @@ class TestExpiry(unittest.TestCase):
         token = wire.serialize(root, signer, iat=0)
         vc = wire.load([token], signer, now=10)  # now == exp: still valid
         self.assertEqual(vc.depth, 0)
+
+
+# =========================================================================
+# one_of / not_one_of members keep their JSON type through load()
+# =========================================================================
+class TestTypedMembersOnTheWire(unittest.TestCase):
+    """A token's `one_of` / `not_one_of` members are read by JSON type and value, both in the
+    subsumption check between tokens and in the leaf's decision (attenu-ops#110). Python's
+    `True == 1`, and a frozenset of members merged the two: a leaf allow-list of 1 admitted
+    `true`, and a child holding 1 passed as narrower than a parent holding `true`. Each case
+    rewrites a real chain's constraint and re-signs it, so only the reading is under test."""
+
+    def setUp(self):
+        self.signer = _signer()
+        root = Guard.issue("orchestrator",
+                           Authority(scopes={"crm.read"}, ceilings=[Allow("tier", {"gold"})], ttl=3600))
+        leaf = root.delegate("summarizer",
+                             Authority(scopes={"crm.read"}, ceilings=[Allow("tier", {"gold"})], ttl=900),
+                             task="summarize Q3 pipeline")
+        self.tokens = wire.serialize_chain(leaf, self.signer)
+
+    def _chain(self, root_constraint, leaf_constraint):
+        def on_root(payload):
+            payload["authorization_details"][0]["constraints"] = [root_constraint]
+
+        def on_leaf(payload):
+            payload["authorization_details"][0]["constraints"] = [leaf_constraint]
+
+        tokens = _tamper_root_and_repair_chain(self.tokens, self.signer, on_root)
+        tokens[-1] = _tamper_leaf(tokens[-1], self.signer, on_leaf)
+        return tokens
+
+    def test_a_child_holding_1_is_not_narrower_than_a_parent_holding_true(self):
+        tokens = self._chain({"key": "tier", "type": "allow", "one_of": [True]},
+                             {"key": "tier", "type": "allow", "one_of": [1]})
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(tokens, self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_a_verified_allow_list_of_1_refuses_true(self):
+        allow_1 = {"key": "tier", "type": "allow", "one_of": [1]}
+        chain = wire.load(self._chain(allow_1, allow_1), self.signer)
+        self.assertTrue(chain.permits("crm.read", {"tier": 1}))
+        self.assertFalse(chain.permits("crm.read", {"tier": True}))
+
+    def test_a_verified_deny_list_keeps_every_typed_member(self):
+        deny = {"key": "region", "type": "deny", "not_one_of": ["secret", True, 1]}
+        chain = wire.load(self._chain(deny, deny), self.signer)
+        emitted = chain.leaf_authority.to_wire()["constraints"][0]["not_one_of"]
+        self.assertEqual([(type(v).__name__, v) for v in emitted],
+                         [("int", 1), ("bool", True), ("str", "secret")])
+        for denied in (1, True, "secret"):
+            with self.subTest(denied=denied):
+                self.assertFalse(chain.permits("crm.read", {"region": denied}))
+        self.assertTrue(chain.permits("crm.read", {"region": "public"}))
+
+    def test_unknown_constraints_compare_as_json(self):
+        # A child repeating its parent's unknown constraint is narrower; one holding 1 where the
+        # parent holds true is not, though Python's True == 1 used to say it was.
+        parent = {"key": "k", "type": "x-custom", "v": [True]}
+        wire.load(self._chain(parent, parent), self.signer)
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(self._chain(parent, {"key": "k", "type": "x-custom", "v": [1]}), self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_a_one_of_that_is_not_an_array_makes_the_token_malformed(self):
+        # An object's keys used to become the members and a string's characters, so such a
+        # token verified; null, a number and a boolean were refused with a TypeError's text.
+        for value, kind in (({"gold": 1}, "an object"), (None, "null"), ("gold", "a string"),
+                            (5, "a number"), (True, "a boolean")):
+            for type_, name in (("allow", "one_of"), ("deny", "not_one_of")):
+                with self.subTest(list=name, value=value):
+                    bad = {"key": "tier", "type": type_, name: value}
+                    with self.assertRaises(wire.WireError) as ctx:
+                        wire.load(self._chain(bad, bad), self.signer)
+                    self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+                    self.assertEqual(ctx.exception.message, "invalid authorization_details: "
+                                     f"{name} of constraint 'tier' is {kind}, not an array")
+
+    def test_a_verified_numeric_cap_refuses_a_string_or_a_boolean(self):
+        # A string raised TypeError out of permits(), and a boolean passed the cap as 0 or 1.
+        cap = {"key": "max_rows", "max": 100}
+        chain = wire.load(self._chain(cap, cap), self.signer)
+        self.assertTrue(chain.permits("crm.read", {"rows": 50}))
+        for value, kind in (("50", "a string"), (True, "a boolean")):
+            with self.subTest(value=value):
+                decision = chain.permits("crm.read", {"rows": value})
+                self.assertFalse(decision)
+                self.assertEqual(decision.reasons[0].message,
+                                 f"{kind} cannot be compared with a maximum; refused")
+
+    def test_a_bound_of_the_wrong_type_makes_the_token_malformed(self):
+        # Each of these verified before: Python read `max: true` as 1 and an unknown rank as wider
+        # than "any", and the TypeScript implementation coerced the rest.
+        for bad, message in (
+            ({"key": "max_rows", "max": "5"}, "max of constraint 'max_rows' is a string, not a number"),
+            ({"key": "max_rows", "max": True}, "max of constraint 'max_rows' is a boolean, not a number"),
+            ({"key": "max_rows"}, "max of constraint 'max_rows' is absent, not a number"),
+            ({"key": "path", "type": "prefix", "prefix": 5}, "prefix of constraint 'path' is a number, not a string"),
+            ({"key": "egress", "rank": "everywhere"},
+             "rank of constraint 'egress' is 'everywhere', not 'none', 'internal' or 'any'"),
+            ({"key": "region", "type": "allow", "one_of": ["us"], "field": 5},
+             "field of constraint 'region' is a number, not a string"),
+            ({"key": "max_calls[x]", "type": "max_calls", "max": 3, "applies_to": True},
+             "applies_to of constraint 'max_calls' is a boolean, not a string"),
+            ({"key": "max_calls[*]", "type": "max_calls", "max": 3, "applies_to": "*"},
+             "applies_to of constraint 'max_calls' is '*', not a scope"),
+            ({"key": 5, "type": "deny", "not_one_of": ["rm"]}, "key of a constraint is a number, not a string"),
+            ({"type": "x-custom", "v": 1}, "key of a constraint is absent, not a string"),
+            ({"key": "region", "type": "deny"}, "not_one_of of constraint 'region' is absent, not an array"),
+            ({"key": "max_rows", "type": None, "max": 5}, "type of constraint 'max_rows' is null, not a string"),
+            ({"key": "allow", "type": None, "one_of": ["us"]}, "type of constraint 'allow' is null, not a string"),
+            ({"key": "max_rows", "type": ["allow"], "max": 5}, "type of constraint 'max_rows' is an array, not a string"),
+            ("max_rows", "a constraint is a string, not an object"),
+            (None, "a constraint is null, not an object"),
+            (["max_rows"], "a constraint is an array, not an object"),
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(wire.WireError) as ctx:
+                    wire.load(self._chain(bad, bad), self.signer)
+                self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+                self.assertEqual(ctx.exception.message, f"invalid authorization_details: {message}")
+
+    def test_a_child_with_another_ceiling_type_under_the_key_is_not_narrower(self):
+        # It raised AttributeError out of load().
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(self._chain({"key": "region", "type": "allow", "one_of": ["us"]},
+                                  {"key": "region", "type": "deny", "not_one_of": ["eu"]}), self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+        # A constraint this build does not define against a bound, in either direction.
+        unknown = {"key": "max_rows", "type": "x-custom", "v": 1}
+        for root, leaf in (({"key": "max_rows", "max": 5}, unknown), (unknown, {"key": "max_rows", "max": 5})):
+            with self.subTest(root=root):
+                with self.assertRaises(wire.WireError) as ctx:
+                    wire.load(self._chain(root, leaf), self.signer)
+                self.assertEqual(ctx.exception.reason, wire.WireReasonCode.NOT_NARROWER)
+
+    def test_two_constraints_under_one_key_make_the_token_malformed(self):
+        pair = [{"key": "region", "type": "allow", "one_of": ["us"]}, {"key": "region", "type": "deny", "not_one_of": ["rm"]}]
+        def set_pair(payload):
+            payload["authorization_details"][0]["constraints"] = pair
+        tokens = _tamper_root_and_repair_chain(self.tokens, self.signer, set_pair)
+        tokens[-1] = _tamper_leaf(tokens[-1], self.signer, set_pair)
+        with self.assertRaises(wire.WireError) as ctx:
+            wire.load(tokens, self.signer)
+        self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
+        self.assertEqual(ctx.exception.message, "invalid authorization_details: two constraints share the key "
+                                                "'region'; an authority holds one per key")
+
+    def test_a_callers_scope_cannot_move_a_call_off_its_meter(self):
+        limit = {"key": "max_calls[crm.read]", "type": "max_calls", "max": 1, "applies_to": "crm.read"}
+        chain = wire.load(self._chain(limit, limit), self.signer)
+        self.assertFalse(chain.permits("crm.read", {"calls[crm.read]": 2, "_scope": "other.x"}))
+
+    def test_a_verified_deny_list_refuses_a_list_it_cannot_compare(self):
+        deny = {"key": "region", "type": "deny", "not_one_of": ["secret"]}
+        chain = wire.load(self._chain(deny, deny), self.signer)
+        decision = chain.permits("crm.read", {"region": ["secret"]})
+        self.assertFalse(decision)
+        self.assertEqual(decision.reasons[0].message,
+                         "an array cannot be compared with not_one_of members; refused")
 
 
 # =========================================================================

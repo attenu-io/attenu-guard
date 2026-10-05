@@ -28,17 +28,11 @@ verifies offline is one the library would have permitted, and vice versa.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import Ceiling, ceiling_from_wire
+from .ceilings import _SCOPE_RE, Ceiling, _UnknownCeiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
-
-
-_SCOPE_RE = re.compile(
-    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*\.(?:[a-z][a-z0-9_-]*|\*)$"
-)
 
 
 def _ceiling_from_wire_whole(c):
@@ -60,7 +54,7 @@ def _ceiling_from_wire_whole(c):
     Comparing whole VALUES instead was tried and reverted before release: it
     could not tell "we ignored a member" from "we normalised a value", and
     several built-ins legitimately normalise. `Allow.to_wire` emits its
-    `one_of` sorted and `from_wire` holds it as a frozenset, and `to_wire`
+    `one_of` sorted and `from_wire` holds it as a set, and `to_wire`
     omits `field` when it equals `key`. RFC 8785 canonicalises object member
     ORDER and never reorders array elements, and the draft puts no ordering or
     uniqueness requirement on `one_of` -- so `["us-west", "us-east"]` is a
@@ -149,12 +143,12 @@ class Authority:
               allowed; the reverse is not. Bare or non-terminal "*" is invalid.
     ceilings: a tuple of typed `Ceiling` objects (RowLimit, SpendCap, ...,
               or any custom Ceiling implementation). Construction accepts any
-              iterable of Ceiling and normalises it to a tuple with at most
-              one ceiling per `.key` (last one wins), sorted by key for a
-              deterministic wire form / integrity seal. A dimension with no
-              ceiling present is unbounded on that dimension unless a parent
-              in the chain bounds it (attenuation can only add/tighten
-              bounds, never remove one — see `meet`).
+              iterable of Ceiling with one ceiling per `.key` (a second one
+              under the same key raises ValueError) and normalises it to a
+              tuple sorted by key for a deterministic wire form / integrity
+              seal. A dimension with no ceiling present is unbounded on that
+              dimension unless a parent in the chain bounds it (attenuation
+              can only add/tighten bounds, never remove one — see `meet`).
     ttl:      seconds this authority remains valid from issuance. meet takes
               the min. None = unbounded (discouraged; templates set a default).
     """
@@ -171,7 +165,11 @@ class Authority:
         object.__setattr__(self, "scopes", scopes)
         by_key: dict[str, Ceiling] = {}
         for c in self.ceilings:
-            by_key[c.key] = c  # last-one-wins on a duplicate key
+            # One constraint per key, on every path (attenu-ops#110): the last one won, silently, so
+            # [allow region in [us], deny region not in [rm]] kept only the deny-list.
+            if c.key in by_key:
+                raise ValueError(f"two constraints share the key {c.key!r}; an authority holds one per key")
+            by_key[c.key] = c
         object.__setattr__(self, "ceilings", tuple(by_key[k] for k in sorted(by_key)))
 
     # ---- ceiling lookup --------------------------------------------------
@@ -206,8 +204,15 @@ class Authority:
     def meet(self, other: "Authority") -> "Authority":
         """Greatest authority within BOTH self and other (the attenuation).
 
-        This is the *only* way a child authority is constructed. It is
-        commutative and can only ever shrink relative to either input.
+        This is the *only* way a child authority is constructed, with `self`
+        the parent and `other` the request. It is commutative and can only ever
+        shrink relative to either input, except in one case, by design
+        (attenu-ops#110): a constraint this build does not define on the
+        parent's side passes down, so the child inherits it, and it denies
+        every action; one in the request under a parent's ceiling of another
+        type is refused with an AuthorityError (reason `not_narrower`), as two
+        different ceiling types under one key are. So `parent.meet(request)`
+        and `request.meet(parent)` differ there.
         """
         # scopes: keep a requested scope only if self covers it; expand self's
         # own concrete scopes that other covers. Net effect: intersection with
@@ -239,6 +244,18 @@ class Authority:
         for k in sorted(set(self_by_key) | set(other_by_key)):
             a = self_by_key.get(k)
             b = other_by_key.get(k)
+            if a is not None and b is not None and type(a) is not type(b):
+                # Two ceiling types under one key have no common narrowing, so the delegation is
+                # refused as not narrower, and `Guard.delegate` records it as `spawn_denied`
+                # (attenu-ops#110). One exception: this side's constraint this build does not define,
+                # which denies every action, is kept, so the child inherits it, as 0.4.0 to 0.19.0
+                # delegated from a parent holding one. A request carrying one under this side's other
+                # ceiling is refused: the child would not be narrower (`is_narrower_than`).
+                if isinstance(a, _UnknownCeiling):
+                    new_ceilings.append(a)
+                    continue
+                raise AuthorityError(f"constraint {k!r} has a different ceiling type on each side; "
+                                     "neither narrows the other", reason="not_narrower", detail={"constraint": k})
             new_ceilings.append(a.narrow(b) if (a is not None and b is not None)
                                  else (a if a is not None else b))
 
@@ -275,7 +292,9 @@ class Authority:
             self_ceiling = self_by_key.get(k)
             if self_ceiling is None:
                 return False  # unbounded on self where other bounds it -> more powerful
-            if not other_ceiling.subsumes(self_ceiling):
+            # Two ceiling types under one key are not comparable, so not narrower (a custom
+            # ceiling's subsumes() need not handle another type).
+            if type(self_ceiling) is not type(other_ceiling) or not other_ceiling.subsumes(self_ceiling):
                 return False
 
         if other.ttl is not None:
@@ -311,11 +330,16 @@ class Authority:
                 message=f"scope {scope!r} not covered by held scopes {sorted(self.scopes)}"))
 
         # Reserved key so SCOPED ceilings (CallLimit(applies_to=...)) can tell whether they apply.
-        cctx = dict(ctx); cctx.setdefault("_scope", scope)
+        # Always the scope being checked: a `_scope` in the caller's context is ignored, so it can
+        # move no call off its own meter or onto another (attenu-ops#110).
+        cctx = dict(ctx); cctx["_scope"] = scope
         for c in self.ceilings:
             decision = c.permits(cctx)
             if not decision:
-                reasons.extend(decision.reasons)
+                # A denial with no reason still denies: an empty list read as an allow, so a custom
+                # ceiling's bare `Decision.deny()` let every call through (attenu-ops#110).
+                reasons.extend(decision.reasons or [Reason(ReasonCode.CEILING_EXCEEDED, c.key,
+                                                           message="denied without a reason")])
 
         if reasons:
             return Decision.deny(*reasons)

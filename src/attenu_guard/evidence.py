@@ -33,7 +33,7 @@ import re
 from typing import Any, Mapping
 
 from attenu_guard import canonical
-from attenu_guard._display import escaped as _escaped, shown as _shown
+from attenu_guard._display import escaped as _escaped, shown as _shown, shown_text as _shown_text
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
@@ -307,9 +307,11 @@ def _ceiling_in_finding(ceiling) -> str:
     `describe()` itself is left alone, so dashboards and `Authority.describe()` print a region
     called "São Paulo" as it is. The built-ins are rendered here in describe()'s own shape, and
     for values in the bare set the two agree character for character (tests/test_cli_verify.py
-    pins that for each built-in). A ceiling this build does not define, or the fail-closed
-    unknown one, prints its own description as it is when that is printable ASCII, spaces
-    included, and as escaped JSON otherwise. Either way the finding stays on one line."""
+    pins that for each built-in), except that an allow-list's or a deny-list's string members
+    are printed in their escaped JSON form, quoted, so the string "1" and the number 1 read
+    differently. A ceiling this build does not define, or the fail-closed unknown one, prints its
+    own description as it is when that is printable ASCII, spaces included, and as escaped JSON
+    otherwise. Either way the finding stays on one line."""
     from attenu_guard import ceilings as _c
     kind = type(ceiling)
     bound = {_c.RowLimit: "max_rows", _c.SpendCap: "max_spend", _c.CallLimit: "max_calls",
@@ -317,8 +319,14 @@ def _ceiling_in_finding(ceiling) -> str:
     if bound is not None:
         return f"{_shown(ceiling.key)}<={_shown(getattr(ceiling, bound))}"
     if kind is _c.Allow or kind is _c.Deny:
+        # The typed members in wire order, as describe() lists them, except that a string member is
+        # printed in its escaped JSON form, quoted, so a finding tells the string "1" from the
+        # number 1 (attenu-ops#110). That form is ASCII, so the text is the same on every Python
+        # version and in the TypeScript implementation; repr printed a printable non-ASCII
+        # character as it is, by the runtime's Unicode tables. Every other member's text is bare.
         members = ceiling.one_of if kind is _c.Allow else ceiling.not_one_of
-        listed = ", ".join(_shown(v) for v in sorted(members, key=str))
+        listed = ", ".join(_escaped(v) if isinstance(v, str) else _shown_text(_c._member_text(v), v)
+                           for v in _c._in_wire_order(members))
         return f"{_shown(ceiling.key)} {'in' if kind is _c.Allow else 'not in'} [{listed}]"
     if kind is _c.Prefix:
         return f"{_shown(ceiling.key)} startswith {_shown(ceiling.prefix)}"
@@ -354,7 +362,7 @@ def _monotonicity_detail(child: Authority, parent: Authority) -> str:
         child_ceiling = child_by_key.get(key)
         if child_ceiling is None:
             return f"ceiling {_shown(key)} unbounded, parent holds {_ceiling_in_finding(parent_ceiling)}"
-        if not parent_ceiling.subsumes(child_ceiling):
+        if type(child_ceiling) is not type(parent_ceiling) or not parent_ceiling.subsumes(child_ceiling):
             return (f"ceiling {_ceiling_in_finding(child_ceiling)} looser than parent "
                     f"{_ceiling_in_finding(parent_ceiling)}")
 

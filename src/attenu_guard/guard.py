@@ -397,9 +397,11 @@ class Guard:
         # "is the context empty?"): a partial context that mentions egress
         # but forgets rows would otherwise let RowLimit go unevaluated —
         # the exact slip an adapter's per-tool context lambda makes.
+        # A null quantity asserts nothing, so it is undeclared too (attenu-ops#110): counting it as
+        # declared let `{"rows": None}` through, since every ceiling reads null as absent.
         if self._strict and metered:
             missing = [c.key for c in auth.ceilings
-                       if is_metered(c) and ctx_field_of(c) not in context]
+                       if is_metered(c) and context.get(ctx_field_of(c)) is None]
             if missing:
                 held = [c.key for c in auth.ceilings if is_metered(c)]
                 return Decision.deny(
@@ -457,8 +459,8 @@ class Guard:
         filled = []
         for c in self._call_limits():
             fld = getattr(c, "ctx_field", "calls")
-            if fld in ctx:
-                continue                                              # explicit count wins
+            if ctx.get(fld) is not None:
+                continue                                              # explicit count wins; null is no count
             applies = getattr(c, "applies_to_scope", lambda s: True)(scope)
             ctx[fld] = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
             if applies:

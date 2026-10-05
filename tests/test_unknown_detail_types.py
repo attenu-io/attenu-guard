@@ -177,7 +177,7 @@ class MembersInsideAConstraint(unittest.TestCase):
         constraint, re-emit it, refuse if the result was not the input. That
         cannot tell "we ignored a member" from "we normalised a value", and
         three built-ins legitimately normalise -- `Allow`/`Deny` emit `one_of` /
-        `not_one_of` sorted and hold them as frozensets, and `to_wire` omits
+        `not_one_of` sorted and hold them as sets, and `to_wire` omits
         `field` when it equals `key`.
 
         RFC 8785 canonicalises object member ORDER and never reorders array

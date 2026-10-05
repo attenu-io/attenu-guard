@@ -22,9 +22,14 @@ which an unrecognised bound is silently dropped.
 """
 from __future__ import annotations
 
+import collections.abc
+import math
+import numbers
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
+from . import canonical
 from .canonical import MAX_SAFE_INTEGER
 from .reasons import Decision, Reason, ReasonCode
 
@@ -36,12 +41,22 @@ def _validate_safe_number(key: str, value) -> None:
     neighbouring integer once canonicalized (see canonical.UnsafeIntegerError),
     so a ceiling built from one would silently admit or deny a different value
     than the one the caller constructed. Fail at construction, not at signing —
-    mirrors authority.py's `_validate_scope`."""
-    if type(value) is int and abs(value) > MAX_SAFE_INTEGER:
+    mirrors authority.py's `_validate_scope`. An integral float past that range is refused too,
+    such as 1e21: the TypeScript implementation cannot write one in RFC 8785, so a token this
+    build minted with `max: 1e+21` loaded here and was refused there."""
+    integral = type(value) is int or (type(value) is float and value.is_integer())
+    if integral and abs(value) > MAX_SAFE_INTEGER:
         raise ValueError(
             f"{key} value {value!r} exceeds the safe integer range "
             f"±{MAX_SAFE_INTEGER} for a binary64 signing surface (RFC 8785)"
         )
+
+#: The scope grammar the draft defines (lowercase dot-separated segments, `*` only as the whole
+#: last segment). `Authority` validates its scopes against it, and a scoped `CallLimit`'s
+#: `applies_to` follows it too.
+_SCOPE_RE = re.compile(
+    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*\.(?:[a-z][a-z0-9_-]*|\*)$"
+)
 
 # Ordered enum for egress: index 0 is the strictest. A value outside this
 # vocabulary is treated as *maximally permissive-requested* (worst case), so
@@ -54,6 +69,92 @@ def _egress_rank(value: object) -> int:
         return _EGRESS_ORDER.index(value)
     except ValueError:
         return len(_EGRESS_ORDER)
+
+
+#: The JSON kinds a ceiling compares, as `_json_kind` names them.
+_NUMBER = ("a number",)
+_STRING = ("a string",)
+_SCALAR = ("a string", "a number", "a boolean")
+
+
+def _json_kind(value) -> str:
+    """`value`'s JSON type as a refusal names it: null, a boolean, a number, a string, an array or
+    an object, or "a value that is not JSON" for anything else passed in-process (a set, bytes).
+    A boolean is never a number here, although Python's bool is an int, and a complex is no JSON
+    number. The TypeScript implementation names the same values the same way."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, numbers.Number) and not isinstance(value, complex):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, (list, tuple)):
+        return "an array"
+    if isinstance(value, collections.abc.Mapping):
+        return "an object"
+    return "a value that is not JSON"
+
+
+def _wrong_kind(value, accepted: tuple) -> str | None:
+    """`_json_kind(value)` when a ceiling that compares `accepted` cannot compare `value`, else None.
+
+    Every built-in ceiling refuses such a request value rather than coercing it (attenu-ops#110):
+    `"50"` raised TypeError against a row cap, `True` passed one as 1 and a prefix as the text
+    "True", and the TypeScript implementation read `["/tmp/x"]` as the path "/tmp/x"."""
+    kind = _json_kind(value)
+    return None if kind in accepted else kind
+
+
+def _refusal(kind: str | None, against: str) -> str:
+    """A denial's message: none when the value had the right type, as before; for one of the wrong
+    type, `<kind> cannot be compared with <against>; refused`, one wording per ceiling kind, and
+    the TypeScript implementation's too."""
+    return "" if kind is None else f"{kind} cannot be compared with {against}; refused"
+
+
+#: What `from_wire` passes for a bound the constraint does not carry, so the constructor refuses it.
+_ABSENT = object()
+
+
+def _malformed(key, member: str, value, expected: str, shown: str | None = None) -> ValueError:
+    """The error for a constraint member of the wrong type, `<member> of constraint <key!r> is
+    <kind>, not <expected>`: the TypeScript implementation's text too, which throws TypeError.
+
+    A bound of the wrong type is malformed (attenu-ops#110), on every path: the draft makes "max" a
+    number and "prefix" a string, an egress rank outside none < internal < any ranked above "any"
+    and admitted every request, and a `field` or `applies_to` that is not a string named a different
+    context field in each implementation. A token carrying one is refused as malformed, and a
+    bundle reports the authority unreadable."""
+    kind = "absent" if value is _ABSENT else (shown if shown is not None else _json_kind(value))
+    return ValueError(f"{member} of constraint {key!r} is {kind}, not {expected}")
+
+
+def _check_max(key, value) -> None:
+    """A `max` is a JSON number, and a boolean is not one, although Python's bool is an int."""
+    if value is _ABSENT or _json_kind(value) != "a number":
+        raise _malformed(key, "max", value, "a number")
+
+
+def _check_key(key) -> None:
+    """A constraint's key is a string: it names the dimension ceilings pair by and, unless `field`
+    says otherwise, the context field the ceiling reads. A number, null or a boolean read a field
+    no JSON context can carry here, so the constraint bounded nothing, while the TypeScript
+    implementation read String(key); an absent key loaded there and read the field "undefined".
+    Every constraint is refused without one, an unknown type included."""
+    if key is _ABSENT or not isinstance(key, str):
+        raise ValueError(f"key of a constraint is {'absent' if key is _ABSENT else _json_kind(key)}, "
+                         "not a string")
+
+
+def _check_string(key, member: str, value, *, optional: bool = False) -> None:
+    """A `prefix`, `field` or `applies_to` is a string. `field` and `applies_to` are optional, and
+    null leaves them unset, as before."""
+    if optional and value is None:
+        return
+    if value is _ABSENT or not isinstance(value, str):
+        raise _malformed(key, member, value, "a string")
 
 
 @runtime_checkable
@@ -151,13 +252,18 @@ class RowLimit:
     ctx_field: str = field(default="rows", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_max(self.key, self.max_rows)
         _validate_safe_number(self.key, self.max_rows)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("rows")
-        if n is None or n <= self.max_rows:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_rows:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_rows, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_rows}"
@@ -166,14 +272,14 @@ class RowLimit:
         return RowLimit(min(self.max_rows, other.max_rows))
 
     def subsumes(self, other: "RowLimit") -> bool:
-        return self.max_rows >= other.max_rows
+        return type(other) is type(self) and self.max_rows >= other.max_rows
 
     def to_wire(self) -> dict:
         return {"key": self.key, "max": self.max_rows}
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "RowLimit":
-        return cls(d["max"])
+        return cls(d.get("max", _ABSENT))
 
 
 @dataclass(frozen=True)
@@ -184,13 +290,18 @@ class SpendCap:
     ctx_field: str = field(default="spend", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_max(self.key, self.max_spend)
         _validate_safe_number(self.key, self.max_spend)
 
     def permits(self, ctx: Mapping) -> Decision:
         n = ctx.get("spend")
-        if n is None or n <= self.max_spend:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_spend:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_spend, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_spend}"
@@ -199,14 +310,14 @@ class SpendCap:
         return SpendCap(min(self.max_spend, other.max_spend))
 
     def subsumes(self, other: "SpendCap") -> bool:
-        return self.max_spend >= other.max_spend
+        return type(other) is type(self) and self.max_spend >= other.max_spend
 
     def to_wire(self) -> dict:
         return {"key": self.key, "max": self.max_spend}
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "SpendCap":
-        return cls(d["max"])
+        return cls(d.get("max", _ABSENT))
 
 
 @dataclass(frozen=True)
@@ -229,9 +340,16 @@ class CallLimit:
     ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
 
     def __post_init__(self):
+        _check_string(self.key, "applies_to", self.applies_to, optional=True)
+        # A pattern no scope matches ("*", "crm", "CRM.READ") applied to no call, so the limit bounded
+        # nothing. It follows the scope grammar: an exact scope, or a terminal `.*` wildcard.
+        if self.applies_to is not None and _SCOPE_RE.fullmatch(self.applies_to) is None:
+            raise _malformed(self.key, "applies_to", self.applies_to, "a scope", repr(self.applies_to))
+        scoped_key = f"max_calls[{self.applies_to}]" if self.applies_to else self.key
+        _check_max(scoped_key, self.max_calls)
         _validate_safe_number(self.key, self.max_calls)
         if self.applies_to:
-            object.__setattr__(self, "key", f"max_calls[{self.applies_to}]")
+            object.__setattr__(self, "key", scoped_key)
             object.__setattr__(self, "ctx_field", f"calls[{self.applies_to}]")   # own meter, coexists with unscoped `calls`
 
     @property
@@ -249,9 +367,13 @@ class CallLimit:
         if not self.applies_to_scope(ctx.get("_scope")):
             return Decision.allow()
         n = ctx.get(self.ctx_field)
-        if n is None or n <= self.max_calls:
+        if n is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n))
+        kind = _wrong_kind(n, _NUMBER)
+        if kind is None and n <= self.max_calls:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.max_calls, n,
+                                    _refusal(kind, "a maximum")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.max_calls}"
@@ -260,7 +382,7 @@ class CallLimit:
         return CallLimit(min(self.max_calls, other.max_calls), self.applies_to)
 
     def subsumes(self, other: "CallLimit") -> bool:
-        return self.max_calls >= other.max_calls
+        return type(other) is type(self) and self.max_calls >= other.max_calls
 
     def to_wire(self) -> dict:
         if not self.applies_to:
@@ -269,7 +391,7 @@ class CallLimit:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "CallLimit":
-        return cls(d["max"], d.get("applies_to"))
+        return cls(d.get("max", _ABSENT), d.get("applies_to"))
 
 
 @dataclass(frozen=True)
@@ -279,11 +401,21 @@ class EgressRank:
     key: str = field(default="egress", init=False, repr=False)
     ctx_field: str = field(default="egress", init=False, repr=False, compare=False)
 
+    def __post_init__(self):
+        # A rank outside the vocabulary ranked above "any", so the ceiling admitted every request.
+        if not isinstance(self.level, str) or self.level not in _EGRESS_ORDER:
+            raise _malformed(self.key, "rank", self.level, "'none', 'internal' or 'any'",
+                             repr(self.level) if isinstance(self.level, str) else None)
+
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get("egress")
-        if val is None or _egress_rank(val) <= _egress_rank(self.level):
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val))
+        kind = _wrong_kind(val, _STRING)
+        if kind is None and _egress_rank(val) <= _egress_rank(self.level):
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.level, val,
+                                    _refusal(kind, "an egress rank")))
 
     def describe(self) -> str:
         return f"{self.key}<={self.level}"
@@ -293,14 +425,14 @@ class EgressRank:
         return EgressRank(stricter)
 
     def subsumes(self, other: "EgressRank") -> bool:
-        return _egress_rank(self.level) >= _egress_rank(other.level)
+        return type(other) is type(self) and _egress_rank(self.level) >= _egress_rank(other.level)
 
     def to_wire(self) -> dict:
         return {"key": self.key, "rank": self.level}
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "EgressRank":
-        return cls(d["rank"])
+        return cls(d.get("rank", _ABSENT))
 
 
 # =========================================================================
@@ -314,88 +446,263 @@ class EgressRank:
 # extra argument).
 # =========================================================================
 
+def _member_key(value) -> tuple:
+    """A `one_of` / `not_one_of` member as JSON tells members apart: its JSON type, then its value.
+
+    Python has `True == 1` and `hash(True) == hash(1)`, so a frozenset of the raw members merged
+    the two (attenu-ops#110): `one_of: [1]` admitted `true`, and the same signed
+    `not_one_of: ["secret", true, 1]` held two members here and three in the TypeScript
+    implementation, whose Set keeps them apart. Keyed by type, a boolean is never a number, a
+    string is never the number it spells, and null is its own kind. A number, any
+    `numbers.Number`, is its numeric value, so `1.0` is 1, as in JavaScript and in RFC 8785. Any
+    other value outside the JSON data model is a kind of its own, compared by Python's equality.
+    A list or an object raises TypeError here, `unhashable type: 'list'`, which is how a member
+    that is one was always refused."""
+    if value is None:
+        return ("null", None)
+    if isinstance(value, bool):
+        return ("boolean", value)
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, numbers.Number):
+        return ("number", value)
+    hash(value)   # raises for a list or an object, in the same words on every Python version
+    return ("other", value)
+
+
+def _member_text(value) -> str:
+    """A member as `describe()` and a finding print it, and the text the wire form sorts by.
+
+    The TypeScript implementation's `strOf` of the member its Set holds, so the two print and
+    order the same members the same way: Python's `str` of a string, a boolean or null, and a
+    number the way JavaScript holds it, which has no separate float. An integral number prints in
+    decimal with no `.0` (`1.0` prints 1, the integral-number rule), and that includes -0.0,
+    which a JavaScript Set stores as 0. Any other number prints as Python's `repr`, the same
+    digits."""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        if value.is_integer() and abs(value) < 1e21:
+            return str(int(value))
+        return repr(value)
+    return value if isinstance(value, str) else str(value)
+
+
+def _not_an_array(values) -> str | None:
+    """What a refusal calls a `one_of` / `not_one_of` that is not a list of members, or None for
+    one that is: a JSON array, or in-process any other collection of members (a set, a tuple).
+
+    The draft defines both as an array. An object used to be read by its keys and a string by its
+    characters, so `{"us": 1}` became the allow-list `["us"]`; null, a number and a boolean raised
+    TypeError; and an absent list read as an empty one, so an absent deny-list bounded nothing. Each
+    is malformed now, as in the TypeScript implementation: a token carrying one is refused as
+    malformed, and a bundle reports the authority unreadable."""
+    if values is _ABSENT:
+        return "absent"
+    if values is None:
+        return "null"
+    if isinstance(values, bool):
+        return "a boolean"
+    if isinstance(values, numbers.Number):
+        return "a number"
+    if isinstance(values, str):
+        return "a string"
+    if isinstance(values, collections.abc.Mapping):
+        return "an object"
+    if isinstance(values, (bytes, bytearray)) or not isinstance(values, collections.abc.Iterable):
+        return "a value that is not an array"
+    return None
+
+
+def _members_of(key, list_name: str, values) -> "_Members":
+    """`values` as the members of an `Allow` or a `Deny`. Raises ValueError naming the list and
+    the key when `values` is not a list of members (`_not_an_array`)."""
+    kind = _not_an_array(values)
+    if kind is not None:
+        raise ValueError(f"{list_name} of constraint {key!r} is {kind}, not an array")
+    return _Members(values)
+
+
+#: Where two members print alike ("1" and 1), JSON type decides their order: null, boolean,
+#: number, string, then a value outside JSON.
+_KIND_RANK = {"null": 0, "boolean": 1, "number": 2, "string": 3, "other": 4}
+
+
+def _wire_sort_key(value) -> tuple:
+    return (_member_text(value), _KIND_RANK[_member_key(value)[0]])
+
+
+def _in_wire_order(members) -> list:
+    """`members` as the wire form, a denial's `limit` and `describe()` list them: sorted by
+    `_member_text`, then by JSON type (`_KIND_RANK`). That is a total order on distinct members,
+    so an equal member set re-emits the same bytes whatever order it arrived in and whatever the
+    hash seed, in both implementations; ties used to keep their arrival order. The members of an
+    `Allow` or a `Deny` are sorted once (`_Members._wire_order`); each caller gets its own list."""
+    if isinstance(members, _Members):
+        return list(members._wire_order())
+    return sorted(members, key=_wire_sort_key)
+
+
+class _Members(collections.abc.Set):
+    """The members of an `Allow` or a `Deny`: a set of JSON values told apart by `_member_key`.
+
+    Holds the first value given for each key, in the order given, which is what a JavaScript Set
+    holds. Read-only and hashable, and a `collections.abc.Set`, so `in`, `len`, iteration, `<=`,
+    `&` and `|` work as they did on the frozenset this replaces, with members compared by type.
+    Compared against a plain set or frozenset, the plain set's own equality decides, and that
+    still merges `true` and 1."""
+
+    __slots__ = ("_values", "_keys", "_hash", "_order")
+
+    def __init__(self, values=()):
+        by_key: dict = {}
+        for value in values:
+            by_key.setdefault(_member_key(value), value)
+        self._values = tuple(by_key.values())
+        self._keys = frozenset(by_key)
+        # The hash of a frozenset of the same values, so this and a plain set it compares equal to
+        # hash alike (`true` and 1 share a hash without being equal, which a hash allows). Computed
+        # once, as a frozenset caches its own.
+        self._hash = hash(frozenset(self._values))
+        self._order = None
+
+    def _wire_order(self) -> tuple:
+        """The members in wire order (`_in_wire_order`), sorted on first use and kept: a denial,
+        `to_wire()` and `describe()` each sorted the whole set again."""
+        if self._order is None:
+            self._order = tuple(sorted(self._values, key=_wire_sort_key))
+        return self._order
+
+    def __contains__(self, value) -> bool:
+        # An unhashable value raises TypeError, as it would against a frozenset: membership cannot
+        # be decided, so the check fails closed. A ceiling refuses a list or an object before it
+        # asks (`_wrong_kind`); swallowing the error let a deny-list pass an unhashable number.
+        return _member_key(value) in self._keys
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __eq__(self, other):
+        if isinstance(other, _Members):
+            return self._keys == other._keys
+        return super().__eq__(other)
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({list(self._values)!r})"
+
+    def __reduce__(self):
+        return (type(self), (self._values,))
+
+
 @dataclass(frozen=True)
 class Allow:
-    """Membership allow-list: the ctx value MUST be one of `one_of`."""
+    """Membership allow-list: the ctx value MUST be one of `one_of`.
+
+    A member is its JSON type plus its value (`_member_key`): `one_of: [1]` admits 1 and 1.0,
+    and refuses `true` and `"1"`. A ctx value that is not a JSON scalar is refused
+    (`_wrong_kind`)."""
     key: str
-    one_of: frozenset
+    one_of: _Members
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "one_of", frozenset(self.one_of))
+        _check_key(self.key)
+        object.__setattr__(self, "one_of", _members_of(self.key, "one_of", self.one_of))
+        _check_string(self.key, "field", self.field, optional=True)
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or val in self.one_of:
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     sorted(self.one_of, key=str), val))
+        kind = _wrong_kind(val, _SCALAR)
+        if kind is None and val in self.one_of:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, _in_wire_order(self.one_of),
+                                    val, _refusal(kind, "one_of members")))
 
     def describe(self) -> str:
-        return f"{self.key} in [{', '.join(sorted(map(str, self.one_of)))}]"
+        return f"{self.key} in [{', '.join(map(_member_text, _in_wire_order(self.one_of)))}]"
 
     def narrow(self, other: "Allow") -> "Allow":
-        # admits fewer values -> stricter: set intersection.
-        return Allow(self.key, self.one_of & frozenset(other.one_of), self.field)
+        # admits fewer values -> stricter: set intersection, in self's order.
+        return Allow(self.key, [v for v in self.one_of if v in other.one_of], self.field)
 
     def subsumes(self, other: "Allow") -> bool:
-        return frozenset(other.one_of) <= self.one_of
+        return type(other) is type(self) and all(v in self.one_of for v in other.one_of)
 
     def to_wire(self) -> dict:
-        d = {"key": self.key, "type": "allow", "one_of": sorted(self.one_of, key=str)}
+        d = {"key": self.key, "type": "allow", "one_of": _in_wire_order(self.one_of)}
         if self.field is not None and self.field != self.key:
             d["field"] = self.field
         return d
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Allow":
-        return cls(d["key"], frozenset(d.get("one_of", ())), d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("one_of", _ABSENT), d.get("field"))
 
 
 @dataclass(frozen=True)
 class Deny:
-    """Membership deny-list: the ctx value MUST NOT be one of `not_one_of`."""
+    """Membership deny-list: the ctx value MUST NOT be one of `not_one_of`.
+
+    A member is its JSON type plus its value (`_member_key`): `not_one_of: [1]` refuses 1 and
+    1.0, and does not refuse `true` or `"1"`. A ctx value that is not a JSON scalar is refused
+    as well (`_wrong_kind`): a deny-list never waves through a value it cannot compare, since
+    waving `["rm"]` through because it is not the string "rm" would fail open."""
     key: str
-    not_one_of: frozenset
+    not_one_of: _Members
     field: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "not_one_of", frozenset(self.not_one_of))
+        _check_key(self.key)
+        object.__setattr__(self, "not_one_of", _members_of(self.key, "not_one_of", self.not_one_of))
+        _check_string(self.key, "field", self.field, optional=True)
 
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or val not in self.not_one_of:
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key,
-                                     sorted(self.not_one_of, key=str), val))
+        kind = _wrong_kind(val, _SCALAR)
+        if kind is None and val not in self.not_one_of:
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, _in_wire_order(self.not_one_of),
+                                    val, _refusal(kind, "not_one_of members")))
 
     def describe(self) -> str:
-        return f"{self.key} not in [{', '.join(sorted(map(str, self.not_one_of)))}]"
+        return f"{self.key} not in [{', '.join(map(_member_text, _in_wire_order(self.not_one_of)))}]"
 
     def narrow(self, other: "Deny") -> "Deny":
-        # denying MORE values is stricter: set union.
-        return Deny(self.key, self.not_one_of | frozenset(other.not_one_of), self.field)
+        # denying MORE values is stricter: set union, self's members first.
+        return Deny(self.key, [*self.not_one_of, *other.not_one_of], self.field)
 
     def subsumes(self, other: "Deny") -> bool:
         # self admits a superset of other's admitted set iff self forbids a
         # subset of what other forbids.
-        return self.not_one_of <= frozenset(other.not_one_of)
+        return type(other) is type(self) and all(v in other.not_one_of for v in self.not_one_of)
 
     def to_wire(self) -> dict:
-        d = {"key": self.key, "type": "deny", "not_one_of": sorted(self.not_one_of, key=str)}
+        d = {"key": self.key, "type": "deny", "not_one_of": _in_wire_order(self.not_one_of)}
         if self.field is not None and self.field != self.key:
             d["field"] = self.field
         return d
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Deny":
-        return cls(d["key"], frozenset(d.get("not_one_of", ())), d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("not_one_of", _ABSENT), d.get("field"))
 
 
 @dataclass(frozen=True)
@@ -405,14 +712,23 @@ class Prefix:
     prefix: str
     field: str | None = None
 
+    def __post_init__(self):
+        _check_key(self.key)
+        _check_string(self.key, "prefix", self.prefix)
+        _check_string(self.key, "field", self.field, optional=True)
+
     def _field(self) -> str:
         return self.field if self.field is not None else self.key
 
     def permits(self, ctx: Mapping) -> Decision:
         val = ctx.get(self._field())
-        if val is None or str(val).startswith(self.prefix):
+        if val is None:
             return Decision.allow()
-        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val))
+        kind = _wrong_kind(val, _STRING)
+        if kind is None and val.startswith(self.prefix):
+            return Decision.allow()
+        return Decision.deny(Reason(ReasonCode.CEILING_EXCEEDED, self.key, self.prefix, val,
+                                    _refusal(kind, "a prefix")))
 
     def describe(self) -> str:
         return f"{self.key} startswith {self.prefix}"
@@ -434,7 +750,7 @@ class Prefix:
         return Prefix(self.key, self.prefix + "\x00" + other.prefix, self.field)
 
     def subsumes(self, other: "Prefix") -> bool:
-        return other.prefix.startswith(self.prefix)
+        return type(other) is type(self) and other.prefix.startswith(self.prefix)
 
     def to_wire(self) -> dict:
         d = {"key": self.key, "type": "prefix", "prefix": self.prefix}
@@ -444,7 +760,7 @@ class Prefix:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Prefix":
-        return cls(d["key"], d["prefix"], d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("prefix", _ABSENT), d.get("field"))
 
 
 # =========================================================================
@@ -481,11 +797,17 @@ class _UnknownCeiling:
                        permits, no matter what ctx is asked about).
       * narrow()    -> meeting with anything stays an (still-denying)
                        unknown ceiling; it can never resolve to something
-                       more permissive than "deny everything".
+                       more permissive than "deny everything". `Authority.meet`
+                       keeps a parent's against a request of any other type,
+                       so the child inherits it.
       * subsumes()  -> can never be proven true against a *different*
                        constraint (we don't understand its semantics), so
                        it only subsumes an identical unknown ceiling —
                        just enough reflexivity for is_narrower_than(self).
+                       Identical means the same RFC 8785 bytes, which is
+                       equality as JSON: `true` is not 1, `1.0` is 1, and
+                       key order is no difference at any depth. A value
+                       RFC 8785 cannot write is identical to nothing.
       * to_wire()   -> preserves the original bytes losslessly, so a chain
                        that merely forwards tokens (without needing to
                        interpret every constraint type) can still do so.
@@ -502,7 +824,14 @@ class _UnknownCeiling:
         return self
 
     def subsumes(self, other: "Ceiling") -> bool:
-        return isinstance(other, _UnknownCeiling) and dict(other.raw) == dict(self.raw)
+        # Compared as RFC 8785 bytes, as the TypeScript implementation compares them, never by
+        # Python's `==`: `{"v": [true]}` == `{"v": [1]}` there (attenu-ops#110).
+        if not isinstance(other, _UnknownCeiling):
+            return False
+        try:
+            return canonical.dumps(dict(other.raw)) == canonical.dumps(dict(self.raw))
+        except canonical.CanonicalizationError:
+            return False
 
     def to_wire(self) -> dict:
         return dict(self.raw)
@@ -519,7 +848,20 @@ def ceiling_from_wire(d: Mapping) -> "Ceiling":
     ceilings like Allow/Deny/Prefix), else falls back to "key" (sufficient
     for the fixed built-ins, where key IS the type). An unrecognised
     discriminator fails closed via `_UnknownCeiling` — see its docstring.
+
+    A constraint is a JSON object with a string `key`, and a `type` that, when present, is a
+    string; anything else is malformed (attenu-ops#110), in the TypeScript implementation's words
+    too: `a constraint is a string, not an object`, `type of constraint 'max_rows' is null, not a
+    string`. A constraint that is not an object raised AttributeError here; a `type` of null or a
+    number loaded as an unknown constraint, a list or an object raised TypeError in words that
+    changed with the Python version, and the TypeScript implementation routed a null `type` by
+    the key.
     """
+    if not isinstance(d, collections.abc.Mapping):
+        raise ValueError(f"a constraint is {_json_kind(d)}, not an object")
+    _check_key(d.get("key", _ABSENT))
+    if "type" in d and not isinstance(d["type"], str):
+        raise _malformed(d["key"], "type", d["type"], "a string")
     discriminator = d.get("type", d.get("key"))
     cls = _REGISTRY.get(discriminator)
     if cls is None:
