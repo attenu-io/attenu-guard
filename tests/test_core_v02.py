@@ -462,7 +462,6 @@ class TestMembersAreKeyedByJsonType(unittest.TestCase):
         for given in (["us", "eu"], ("us", "eu"), {"us", "eu"}, frozenset({"us", "eu"})):
             with self.subTest(given=type(given).__name__):
                 self.assertEqual(sorted(Allow("region", given).one_of), ["eu", "us"])
-        self.assertEqual(len(ceiling_from_wire({"key": "region", "type": "allow"}).one_of), 0)
 
     def test_the_members_still_compare_with_a_plain_set(self):
         self.assertEqual(Allow("region", {"eu", "us"}).one_of, frozenset({"eu", "us"}))
@@ -670,6 +669,45 @@ class TestMalformedBounds(unittest.TestCase):
         self.assertEqual(ceiling_from_wire({"key": "region", "type": "allow", "one_of": ["us"],
                                             "field": None}).field, None)
         self.assertEqual(CallLimit(3, None).key, "max_calls")
+
+    def test_a_key_that_is_not_a_string(self):
+        # A constraint's key names its dimension and, by default, the context field it reads. A
+        # number, null or a boolean read a field no JSON object can carry here, so the constraint
+        # bounded nothing, and the TypeScript implementation read String(key) instead; an absent
+        # key loaded there and read the field "undefined".
+        for wire, kind in (({"type": "allow", "one_of": ["us"]}, "absent"),
+                           ({"key": 5, "type": "allow", "one_of": ["us"]}, "a number"),
+                           ({"key": None, "type": "deny", "not_one_of": ["rm"]}, "null"),
+                           ({"key": True, "type": "prefix", "prefix": "/"}, "a boolean"),
+                           ({"key": ["k"], "type": "x-custom"}, "an array"),
+                           ({"key": {"a": 1}, "type": "x-custom"}, "an object"),
+                           ({"type": "x-custom", "v": 1}, "absent"),
+                           ({"max": 5}, "absent")):
+            with self.subTest(wire=wire):
+                self._refused(lambda: ceiling_from_wire(wire), f"key of a constraint is {kind}, not a string")
+        self._refused(lambda: Allow(5, ["us"]), "key of a constraint is a number, not a string")
+        self._refused(lambda: Deny(None, ["rm"]), "key of a constraint is null, not a string")
+        self._refused(lambda: Prefix(True, "/"), "key of a constraint is a boolean, not a string")
+
+    def test_an_absent_one_of_or_not_one_of(self):
+        # An absent deny-list used to read as an empty one, which bounds nothing.
+        self._refused(lambda: ceiling_from_wire({"key": "region", "type": "allow"}),
+                      "one_of of constraint 'region' is absent, not an array")
+        self._refused(lambda: ceiling_from_wire({"key": "tool", "type": "deny"}),
+                      "not_one_of of constraint 'tool' is absent, not an array")
+        self.assertEqual(len(ceiling_from_wire({"key": "region", "type": "allow", "one_of": []}).one_of), 0)
+
+    def test_an_applies_to_that_is_not_a_scope(self):
+        # A scoped limit applies to the scopes its pattern covers, and "*", "crm" or "CRM.READ"
+        # covers none, so the limit bounded nothing. It follows the scope grammar now.
+        for value in ("*", "crm", "CRM.READ", "", "crm.", ".crm.read", "crm.*.read", "crm read"):
+            with self.subTest(value=value):
+                message = f"applies_to of constraint 'max_calls' is {value!r}, not a scope"
+                self._refused(lambda: CallLimit(3, value), message)
+                self._refused(lambda: ceiling_from_wire({"key": f"max_calls[{value}]", "type": "max_calls",
+                                                         "max": 3, "applies_to": value}), message)
+        for value in ("crm.read", "crm.*", "a.b-c.d_e"):
+            self.assertEqual(CallLimit(3, value).key, f"max_calls[{value}]")
 
     def test_guard_issue_refuses_an_authority_built_with_one(self):
         self._refused(lambda: Guard.issue("root", Authority(scopes={"crm.read"}, ceilings=[RowLimit("5")])),

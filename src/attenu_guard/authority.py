@@ -28,17 +28,11 @@ verifies offline is one the library would have permitted, and vice versa.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import Ceiling, ceiling_from_wire
+from .ceilings import _SCOPE_RE, Ceiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
-
-
-_SCOPE_RE = re.compile(
-    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*\.(?:[a-z][a-z0-9_-]*|\*)$"
-)
 
 
 def _ceiling_from_wire_whole(c):

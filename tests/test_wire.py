@@ -708,6 +708,11 @@ class TestTypedMembersOnTheWire(unittest.TestCase):
              "field of constraint 'region' is a number, not a string"),
             ({"key": "max_calls[x]", "type": "max_calls", "max": 3, "applies_to": True},
              "applies_to of constraint 'max_calls' is a boolean, not a string"),
+            ({"key": "max_calls[*]", "type": "max_calls", "max": 3, "applies_to": "*"},
+             "applies_to of constraint 'max_calls' is '*', not a scope"),
+            ({"key": 5, "type": "deny", "not_one_of": ["rm"]}, "key of a constraint is a number, not a string"),
+            ({"type": "x-custom", "v": 1}, "key of a constraint is absent, not a string"),
+            ({"key": "region", "type": "deny"}, "not_one_of of constraint 'region' is absent, not an array"),
         ):
             with self.subTest(bad=bad):
                 with self.assertRaises(wire.WireError) as ctx:

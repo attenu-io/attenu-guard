@@ -25,6 +25,7 @@ from __future__ import annotations
 import collections.abc
 import math
 import numbers
+import re
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
@@ -46,6 +47,13 @@ def _validate_safe_number(key: str, value) -> None:
             f"{key} value {value!r} exceeds the safe integer range "
             f"±{MAX_SAFE_INTEGER} for a binary64 signing surface (RFC 8785)"
         )
+
+#: The scope grammar the draft defines (lowercase dot-separated segments, `*` only as the whole
+#: last segment). `Authority` validates its scopes against it, and a scoped `CallLimit`'s
+#: `applies_to` follows it too.
+_SCOPE_RE = re.compile(
+    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*\.(?:[a-z][a-z0-9_-]*|\*)$"
+)
 
 # Ordered enum for egress: index 0 is the strictest. A value outside this
 # vocabulary is treated as *maximally permissive-requested* (worst case), so
@@ -124,6 +132,17 @@ def _check_max(key, value) -> None:
     """A `max` is a JSON number, and a boolean is not one, although Python's bool is an int."""
     if value is _ABSENT or _json_kind(value) != "a number":
         raise _malformed(key, "max", value, "a number")
+
+
+def _check_key(key) -> None:
+    """A constraint's key is a string: it names the dimension ceilings pair by and, unless `field`
+    says otherwise, the context field the ceiling reads. A number, null or a boolean read a field
+    no JSON context can carry here, so the constraint bounded nothing, while the TypeScript
+    implementation read String(key); an absent key loaded there and read the field "undefined".
+    Every constraint is refused without one, an unknown type included."""
+    if key is _ABSENT or not isinstance(key, str):
+        raise ValueError(f"key of a constraint is {'absent' if key is _ABSENT else _json_kind(key)}, "
+                         "not a string")
 
 
 def _check_string(key, member: str, value, *, optional: bool = False) -> None:
@@ -319,6 +338,10 @@ class CallLimit:
 
     def __post_init__(self):
         _check_string(self.key, "applies_to", self.applies_to, optional=True)
+        # A pattern no scope matches ("*", "crm", "CRM.READ") applied to no call, so the limit bounded
+        # nothing. It follows the scope grammar: an exact scope, or a terminal `.*` wildcard.
+        if self.applies_to is not None and _SCOPE_RE.fullmatch(self.applies_to) is None:
+            raise _malformed(self.key, "applies_to", self.applies_to, "a scope", repr(self.applies_to))
         scoped_key = f"max_calls[{self.applies_to}]" if self.applies_to else self.key
         _check_max(scoped_key, self.max_calls)
         _validate_safe_number(self.key, self.max_calls)
@@ -470,8 +493,11 @@ def _not_an_array(values) -> str | None:
 
     The draft defines both as an array. An object used to be read by its keys and a string by its
     characters, so `{"us": 1}` became the allow-list `["us"]`; null, a number and a boolean raised
-    TypeError. Each is malformed now, as in the TypeScript implementation: a token carrying one is
-    refused as malformed, and a bundle reports the authority unreadable."""
+    TypeError; and an absent list read as an empty one, so an absent deny-list bounded nothing. Each
+    is malformed now, as in the TypeScript implementation: a token carrying one is refused as
+    malformed, and a bundle reports the authority unreadable."""
+    if values is _ABSENT:
+        return "absent"
     if values is None:
         return "null"
     if isinstance(values, bool):
@@ -563,6 +589,7 @@ class Allow:
     field: str | None = None
 
     def __post_init__(self):
+        _check_key(self.key)
         object.__setattr__(self, "one_of", _members_of(self.key, "one_of", self.one_of))
         _check_string(self.key, "field", self.field, optional=True)
 
@@ -597,7 +624,7 @@ class Allow:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Allow":
-        return cls(d["key"], d.get("one_of", ()), d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("one_of", _ABSENT), d.get("field"))
 
 
 @dataclass(frozen=True)
@@ -613,6 +640,7 @@ class Deny:
     field: str | None = None
 
     def __post_init__(self):
+        _check_key(self.key)
         object.__setattr__(self, "not_one_of", _members_of(self.key, "not_one_of", self.not_one_of))
         _check_string(self.key, "field", self.field, optional=True)
 
@@ -649,7 +677,7 @@ class Deny:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Deny":
-        return cls(d["key"], d.get("not_one_of", ()), d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("not_one_of", _ABSENT), d.get("field"))
 
 
 @dataclass(frozen=True)
@@ -660,6 +688,7 @@ class Prefix:
     field: str | None = None
 
     def __post_init__(self):
+        _check_key(self.key)
         _check_string(self.key, "prefix", self.prefix)
         _check_string(self.key, "field", self.field, optional=True)
 
@@ -706,7 +735,7 @@ class Prefix:
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "Prefix":
-        return cls(d["key"], d.get("prefix", _ABSENT), d.get("field"))
+        return cls(d.get("key", _ABSENT), d.get("prefix", _ABSENT), d.get("field"))
 
 
 # =========================================================================
@@ -793,6 +822,7 @@ def ceiling_from_wire(d: Mapping) -> "Ceiling":
     for the fixed built-ins, where key IS the type). An unrecognised
     discriminator fails closed via `_UnknownCeiling` — see its docstring.
     """
+    _check_key(d.get("key", _ABSENT))
     discriminator = d.get("type", d.get("key"))
     cls = _REGISTRY.get(discriminator)
     if cls is None:
