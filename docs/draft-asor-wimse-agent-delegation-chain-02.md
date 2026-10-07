@@ -384,11 +384,17 @@ are distinct constraint types because they are enforced by different machinery:
 a per-action bound is decided from the request alone, a per-lifetime bound
 needs a running total held by the component that authorizes actions under that
 token, and a per-subtree bound needs a total that spans tokens. A producer MUST
-NOT emit a cumulative bound under the "max" type. A verifier that holds only
+NOT emit a cumulative bound under the "max" type. A per-action "max" on a
+quantity that exists only as a running count, such as a count of calls, bounds
+nothing, since each action contributes one; a producer bounds a count with
+"max_lifetime" or "max_subtree". A verifier that holds only
 the chain checks that a child's per-lifetime and per-subtree bounds are no
 wider than its parent's ({{subsumption}}); whether the spend is under the
 bound is checked only where the running total is held, and an enforcement
-point that has no access to that total denies ({{verify}}, step 8).
+point that has no access to that total denies ({{verify}}, step 8). The
+running total is supplied by the component that holds it, through a channel
+separate from the request's own parameters; a value the request asserts
+about its own total is not a total.
 
 Within one authorization detail object, the pair (key, type) identifies a
 constraint. A detail MUST NOT carry two constraints with the same key and the
@@ -523,9 +529,9 @@ following, denying on the first failure:
    different one. DT_0 MUST verify under a trusted root key.
 2. For each i > 0, compute SHA-256 of DT_{i-1}'s JWS Signing Input and compare,
    in constant time, to DT_i's "par_hash". Any mismatch: deny.
-3. Check chain shape. Depth: DT_0.del_depth == 0; DT_i.del_depth == i; n <
-   DT_0.del_max_depth. Principal: DT_0.sub is a non-empty string, and for every
-   i, DT_i.sub is identical to DT_0.sub. Otherwise deny.
+3. Check chain shape, depth first. Depth: DT_0.del_depth == 0; DT_i.del_depth
+   == i; n < DT_0.del_max_depth. Then principal: DT_0.sub is a non-empty
+   string, and for every i, DT_i.sub is identical to DT_0.sub. Otherwise deny.
 4. For each i > 0, verify DT_i.Authority <= DT_{i-1}.Authority under rules 1,
    2, 3, and 5 of {{subsumption}}. A token carrying a second detail, or a
    detail of a type other than "agent_delegation", was rejected as malformed
@@ -551,10 +557,14 @@ following, denying on the first failure:
    ("max_lifetime", "max_subtree"). A cumulative constraint is checked where
    the running total it is measured over is held: by the Enforcement Point
    itself, or by a component that holds that total and authorizes A on the
-   Enforcement Point's behalf ({{fanout}}). An Enforcement Point that neither
-   holds the running total for a cumulative constraint DT_n carries nor has A
-   authorized by a component that does MUST deny. Permit only if A is within
-   DT_n.Authority on every count.
+   Enforcement Point's behalf ({{fanout}}). The total reaches the check
+   through a channel separate from the request's own parameters, never from
+   the request: a cumulative constraint is evaluated against that total only,
+   and a per-action constraint against the request only, so a name the two
+   share cannot let one stand in for the other. An Enforcement Point that
+   neither holds the running total for a cumulative constraint DT_n carries
+   nor has A authorized by a component that does MUST deny. Permit only if A
+   is within DT_n.Authority on every count.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The one
@@ -877,26 +887,22 @@ document is published as an RFC.
 Two reference implementations are maintained by the author under the Apache
 License 2.0: "attenu-guard", in Python, which mints Delegation Tokens and runs
 the verification algorithm of {{verify}}, and "attenu-guard-ts", in TypeScript,
-which runs the verification algorithm and mints nothing. At the time of
-posting, both implement steps 1 to 5 of the algorithm as the previous revision
-of this document stated them, under a single-signer trust model, and neither
+which runs the verification algorithm and mints nothing. Both released
+libraries implement steps 1 to 5 of the algorithm as the previous revision of
+this document stated them, under a single-signer trust model, and neither
 implements step 6 (holder binding) or step 7 (status list), which both document
-as not performed. Of step 8, both authorize an action against the leaf
-Authority, its scope and its per-action constraints, and the Python library
-meters a per-token call count; the audience check and the denial for a
-cumulative constraint whose total is not held are not implemented. Of the
-changes this revision makes ({{changes}}), the principal invariance check of
-step 3 is implemented in the Python library on a development branch. Not
-implemented in either library at the time of posting: the accepted-algorithm
-list of step 1 (both deny a header "alg" that differs from the configured
-signer's, and neither holds a list); the opaque scope form; the two cumulative
-constraint types (the Python library's call-count ceiling emits a cumulative
-bound under "max", which this revision forbids); the "order" member of "rank";
-the one-per-(key, type) rule (both reject a second constraint on a key whatever
-its type); and the audience check. Both libraries already refuse a token
-carrying more than one detail or a detail of another type. The Python library
-ships the test vectors of {{vectors}} and regenerates them on every test run;
-the TypeScript library runs them in its test suite.
+as not performed. At the time of posting, the Python library implements this
+revision on a development branch as an opt-in profile beside the previous
+one: the claim rules of {{token-format}} at parse, the accepted-algorithm list
+of step 1, principal invariance, the three-form scope grammar, the two
+cumulative constraint types with their totals supplied through a channel
+separate from the request, the "order" member of "rank", one constraint per
+(key, type), the closed detail and constraint objects, and the audience check
+of step 8; it checks the presence and shape of "cnf" and still performs
+neither step 6 nor step 7. A port of the same profile to the TypeScript
+library is in progress. The vector set of {{vectors}} for this revision has
+thirty-five files and is generated and scored by the Python branch; the
+previous revision's twenty files ship in both libraries unchanged.
 
 Two implementations independent of the author's code have run the twenty test
 vectors of the previous revision and published their results, as reported by
@@ -1073,3 +1079,7 @@ claim layout.
 - An Implementation Status section is added.
 - The test-vector appendix records that the -01 set stays byte-stable and does
   not conform to this revision, and describes the second set that does.
+- Step 8 and the constraint vocabulary state that a running total reaches a
+  cumulative constraint through a channel separate from the request, that
+  cumulative and per-action constraints are evaluated against different
+  inputs, and that a per-action "max" on a running count bounds nothing.
