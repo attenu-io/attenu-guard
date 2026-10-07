@@ -318,5 +318,58 @@ class Round2_DecisionD_DepthBeforePrincipal(unittest.TestCase):
         _reject(self, tokens, WireReasonCode.DEPTH_INVALID)
 
 
+class Round3_TwoNamespacesNeverMerge(unittest.TestCase):
+    """BLOCKER (round 3): a held total field can be another held constraint's per-action
+    field, and merging the trusted total into the context let it overwrite the request
+    quantity. Cumulative ceilings read the totals mapping only; per-action ceilings read the
+    request context only; the two are never merged, so no name can collide."""
+
+    def test_x1_a_total_never_overwrites_a_request_quantity(self):
+        a = A02({"shop.buy"}, [d.MaxLifetime("spend", 1000), d.Max("spend_total", 10)])
+        self.assertFalse(a.permits("shop.buy", {"spend_total": 1_000_000}, totals={"spend_total": 0}))
+        self.assertTrue(a.permits("shop.buy", {"spend_total": 5}, totals={"spend_total": 0}))
+        g = Guard.issue("g", a)
+        self.assertFalse(g.check("shop.buy", context={"spend_total": 1_000_000}, totals={"spend_total": 0}))
+
+    def test_x2_the_meter_never_replaces_a_request_quantity(self):
+        a = A02({"a.b"}, [d.MaxLifetime("max_calls", 100), d.Max("calls", 5)])
+        g = Guard.issue("g", a)
+        self.assertFalse(g.check("a.b", context={"calls": 1000}))
+        self.assertTrue(g.check("a.b", context={"calls": 3}))
+
+    def test_a_request_value_never_satisfies_a_cumulative_bound(self):
+        a = A02({"a.b"}, [d.MaxLifetime("spend", 100)])
+        self.assertFalse(a.permits("a.b", {"spend_total": 1}), "the request cannot assert its own total")
+        self.assertTrue(a.permits("a.b", {"spend_total": 1_000_000}, totals={"spend_total": 1}))
+
+    def test_namespaces_do_not_collide_for_any_field_name(self):
+        """Property trial: for random field names, including identical names on a per-action
+        and a cumulative constraint, a request-context value never satisfies a cumulative
+        bound and a totals value never satisfies a per-action bound."""
+        import random
+        rng = random.Random(3)
+        names = ["spend", "spend_total", "calls", "rows", "x_total", "x_subtree_total", "max_rows", "max_spend"]
+        for _ in range(500):
+            per_key, cum_key = rng.choice(names), rng.choice(["spend", "max_spend", "max_calls", "x", "rows"])
+            if per_key in ("max_calls",):
+                continue
+            cum = rng.choice([d.MaxLifetime, d.MaxSubtree])(cum_key, 10)
+            per = d.Max(per_key, 10)
+            a = A02({"a.b"}, [cum, per])
+            pf, cf = per.ctx_field, cum.ctx_field
+            # A satisfying total in the request and no trusted total: the cumulative bound denies.
+            self.assertFalse(a.permits("a.b", {cf: 1}), (per, cum))
+            # A violating request value beside a satisfying trusted total: the per-action bound denies.
+            self.assertFalse(a.permits("a.b", {pf: 1000}, totals={cf: 1}), (per, cum))
+            # A satisfying request value beside a violating trusted total: the cumulative bound denies.
+            self.assertFalse(a.permits("a.b", {pf: 1}, totals={cf: 1000}), (per, cum))
+            # Both satisfied, each in its own namespace: allowed.
+            self.assertTrue(a.permits("a.b", {pf: 1}, totals={cf: 1}), (per, cum))
+
+    def test_totals_under_the_default_profile_is_refused(self):
+        with self.assertRaises(ValueError):
+            Authority({"a.b"}, [CallLimit(2)], 60).permits("a.b", {}, totals={"calls": 1})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

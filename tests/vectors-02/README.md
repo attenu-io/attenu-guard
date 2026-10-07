@@ -123,8 +123,9 @@ and the cumulative-constraint denial are exercised by `tests/test_wire_02.py` an
 constraint is measured over never comes from the request context; the reference verifier
 takes it through a separate `totals` parameter (`VerifiedChain.permits(scope, ctx, audience=...,
 totals=...)`), which may name only the total fields of the cumulative constraints the leaf
-holds, and drops exactly those fields from the context it was given (an ordinary constraint
-keyed like `order_total` keeps reading its own field). Two library restrictions under the
+holds. A cumulative constraint reads that mapping only, and a per-action constraint reads the
+request context only; the two are never merged, so a name shared between them (`spend_total`
+as a total and as another constraint's per-action field) cannot collide. Two library restrictions under the
 -02 profile, which the draft does not impose because it reserves no key names: a per-action
 `max` on a `max_calls` key is refused as malformed (a cap on a count caps nothing; a count
 bound is `max_lifetime` or `max_subtree`), and the guard's own call meter is the only source

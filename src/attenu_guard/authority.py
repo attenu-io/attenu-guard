@@ -391,7 +391,8 @@ class Authority:
         and are treated as satisfied (mirrors v0.1: an omitted quantity
         simply isn't checked).
         """
-        ctx = self.effective_context(ctx, totals)
+        ctx = self.effective_context(ctx)
+        totals = self.effective_totals(totals)
         reasons: list[Reason] = []
 
         if not self.covers_scope(scope):
@@ -403,8 +404,14 @@ class Authority:
         # Always the scope being checked: a `_scope` in the caller's context is ignored, so it can
         # move no call off its own meter or onto another (attenu-ops#110).
         cctx = dict(ctx); cctx["_scope"] = scope
+        tctx = dict(totals); tctx["_scope"] = scope
         for c in self.ceilings:
-            decision = c.permits(cctx)
+            # Under the -02 a cumulative ceiling reads the trusted totals and nothing else; a
+            # per-action ceiling reads the request context and nothing else.
+            if self.profile == draft02.PROFILE_02 and self.is_cumulative(c):
+                decision = c.permits(tctx)
+            else:
+                decision = c.permits(cctx)
             if not decision:
                 # A denial with no reason still denies: an empty list read as an allow, so a custom
                 # ceiling's bare `Decision.deny()` let every call through (attenu-ops#110).
@@ -426,23 +433,38 @@ class Authority:
         return frozenset(ctx_field_of(c) for c in self.ceilings
                          if draft02.draft_type_of(c) in draft02.CUMULATIVE_TYPES)
 
+    @staticmethod
+    def is_cumulative(ceiling) -> bool:
+        """Whether a ceiling is measured over a running total (`max_lifetime`, `max_subtree`,
+        the library's metered call count) rather than over one action."""
+        return draft02.draft_type_of(ceiling) in draft02.CUMULATIVE_TYPES
+
     def effective_context(self, ctx: Mapping | None, totals: Mapping | None = None) -> dict:
-        """The context an evaluation reads: the caller's context with the held total fields
-        removed under the -02 profile, then the trusted `totals` applied. `totals` may name only
-        held total fields; anything else is a ValueError, so a misuse is loud rather than a
-        silent overwrite. `Guard` builds its strict-metering check from this same function, so
-        the two never read different contexts."""
-        ctx = dict(ctx or {})
+        """The per-action context an evaluation reads: the caller's context, unchanged. The
+        trusted `totals` are NEVER merged into it: under the -02 profile a cumulative ceiling
+        reads `totals` only and a per-action ceiling reads the context only (two namespaces,
+        so a total field that is also another constraint's per-action field cannot overwrite
+        the request quantity, security review of 2026-10-07, round 3). `Guard` builds its
+        strict-metering check from this function and `effective_totals`, so it reads what the
+        evaluation reads."""
+        return dict(ctx or {})
+
+    def effective_totals(self, totals: Mapping | None) -> dict:
+        """The trusted totals an evaluation reads. They may name only the total fields of the
+        cumulative constraints this authority holds; anything else is a ValueError, so a misuse
+        is loud. Under the default profile there is no totals namespace: the -01 algorithm reads
+        one context, and the guard's meter writes into it."""
+        if not totals:
+            return {}
+        if self.profile != draft02.PROFILE_02:
+            raise ValueError("totals is a parameter of the -02 profile; the default profile reads "
+                             "one context, which the guard's meter fills")
         held = self.total_fields()
-        if self.profile == draft02.PROFILE_02:
-            ctx = {k: v for k, v in ctx.items() if k not in held}
-        if totals:
-            stray = sorted(k for k in totals if k not in held)
-            if stray:
-                raise ValueError(f"totals names fields no held cumulative constraint reads: {stray}; "
-                                 f"held total fields are {sorted(held)}")
-            ctx.update(totals)
-        return ctx
+        stray = sorted(k for k in totals if k not in held)
+        if stray:
+            raise ValueError(f"totals names fields no held cumulative constraint reads: {stray}; "
+                             f"held total fields are {sorted(held)}")
+        return dict(totals)
 
     # ---- wire form ----------------------------------------------------
     def to_wire(self) -> dict:

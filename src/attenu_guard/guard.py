@@ -402,9 +402,14 @@ class Guard:
         # A null quantity asserts nothing, so it is undeclared too (attenu-ops#110): counting it as
         # declared let `{"rows": None}` through, since every ceiling reads null as absent.
         if self._strict and metered:
-            declared = auth.effective_context(context, totals)      # the context permits() reads
+            # Exactly what permits() reads: per-action ceilings the request context, cumulative
+            # ceilings (under the -02) the trusted totals; the two are never merged.
+            declared_ctx = auth.effective_context(context)
+            declared_totals = auth.effective_totals(totals)
+            is_02 = getattr(auth, "profile", None) == "02"
             missing = [c.key for c in auth.ceilings
-                       if is_metered(c) and declared.get(ctx_field_of(c)) is None]
+                       if is_metered(c) and (declared_totals if is_02 and auth.is_cumulative(c)
+                                             else declared_ctx).get(ctx_field_of(c)) is None]
             if missing:
                 held = [c.key for c in auth.ceilings if is_metered(c)]
                 return Decision.deny(
@@ -686,9 +691,8 @@ class Guard:
         record as though the action were actually attempted. Never allocates
         a `call_id` (there is nothing to bind an outcome to)."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
-        self._auto_meter(scope, ctx)                                  # read the meters, never consume them
         totals = dict(totals or {})
-        self._auto_meter(scope, ctx, totals)                                  # read the meters, never consume them
+        self._auto_meter(scope, ctx, totals)                          # read the meters, never consume them
         return self._evaluate(scope, ctx, metered, totals)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,
