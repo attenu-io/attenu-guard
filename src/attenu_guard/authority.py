@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Mapping
 
-from .ceilings import _SCOPE_RE, Ceiling, _UnknownCeiling, ceiling_from_wire
+from .ceilings import _SCOPE_RE, Ceiling, _UnknownCeiling, ceiling_from_wire, ctx_field_of
 from .reasons import Decision, Reason, ReasonCode
 from . import draft02
 
@@ -391,11 +391,7 @@ class Authority:
         and are treated as satisfied (mirrors v0.1: an omitted quantity
         simply isn't checked).
         """
-        ctx = dict(ctx or {})
-        if self.profile == draft02.PROFILE_02:
-            ctx = {k: v for k, v in ctx.items() if not (isinstance(k, str) and k.endswith("_total"))}
-        if totals:
-            ctx.update(totals)
+        ctx = self.effective_context(ctx, totals)
         reasons: list[Reason] = []
 
         if not self.covers_scope(scope):
@@ -421,6 +417,32 @@ class Authority:
 
     def with_ttl(self, ttl: int) -> "Authority":
         return replace(self, ttl=ttl)
+
+    def total_fields(self) -> frozenset:
+        """The context fields the cumulative constraints this authority HOLDS read their running
+        total from (`calls`, `spend_total`, `spend_subtree_total`, ...). Only these are stripped
+        from a caller's context and only these may be supplied through `totals`; an ordinary
+        constraint keyed `order_total` keeps reading its own field."""
+        return frozenset(ctx_field_of(c) for c in self.ceilings
+                         if draft02.draft_type_of(c) in draft02.CUMULATIVE_TYPES)
+
+    def effective_context(self, ctx: Mapping | None, totals: Mapping | None = None) -> dict:
+        """The context an evaluation reads: the caller's context with the held total fields
+        removed under the -02 profile, then the trusted `totals` applied. `totals` may name only
+        held total fields; anything else is a ValueError, so a misuse is loud rather than a
+        silent overwrite. `Guard` builds its strict-metering check from this same function, so
+        the two never read different contexts."""
+        ctx = dict(ctx or {})
+        held = self.total_fields()
+        if self.profile == draft02.PROFILE_02:
+            ctx = {k: v for k, v in ctx.items() if k not in held}
+        if totals:
+            stray = sorted(k for k in totals if k not in held)
+            if stray:
+                raise ValueError(f"totals names fields no held cumulative constraint reads: {stray}; "
+                                 f"held total fields are {sorted(held)}")
+            ctx.update(totals)
+        return ctx
 
     # ---- wire form ----------------------------------------------------
     def to_wire(self) -> dict:

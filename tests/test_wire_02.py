@@ -157,10 +157,10 @@ class ClaimRulesAtParse(unittest.TestCase):
         tokens = _mint()
         _reject(self, tokens, WireReasonCode.AUDIENCE_MISMATCH, audience="https://other.example")
         v = wire.load(tokens, _signer(), draft="02")
-        denied = v.permits("crm.read", {"rows": 1, "calls": 1, "spend": 1}, audience="https://other.example")
+        denied = v.permits("crm.read", {"rows": 1, "spend": 1}, totals={"calls": 1}, audience="https://other.example")
         self.assertFalse(denied)
         self.assertEqual(denied.reasons[0].code, WireReasonCode.AUDIENCE_MISMATCH)
-        self.assertTrue(v.permits("crm.read", {"rows": 1, "calls": 1, "spend": 1}, audience=AUD))
+        self.assertTrue(v.permits("crm.read", {"rows": 1, "spend": 1}, totals={"calls": 1}, audience=AUD))
 
     def test_missing_cnf_on_any_token(self):
         for i in range(3):

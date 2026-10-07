@@ -943,24 +943,6 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
                             f"token[{i}] par_hash does not match parent token[{i-1}]'s "
                             f"signing input (splice, wrong parent, or tampered parent)")
 
-    # ---- step 3 (draft -02): principal invariance -------------------------------
-    # R5 of draft-reece-wimse-cross-org-delegation asks for two things: convey
-    # the on-behalf-of principal along the chain, AND let a relying party verify
-    # that intermediaries did not alter it. par_hash (step 2, above, so that a
-    # broken commitment is named first) stops re-parenting; this stops a child
-    # carrying a different `sub`. It runs under the -02 profile only: the default
-    # profile is the -01 algorithm unchanged, where `sub` is the agent id and
-    # differs per hop, whether or not a token also carries `client_id`.
-    if draft == draft02.PROFILE_02:
-        root_sub = parsed[0][1].get("sub")
-        for i, (_h, payload, _s, _si) in enumerate(parsed):
-            if payload.get("sub") != root_sub:
-                raise WireError(
-                    WireReasonCode.PRINCIPAL_ALTERED,
-                    f"token[{i}] sub {payload.get('sub')!r} != DT_0 sub "
-                    f"{root_sub!r}; the accountable principal MUST be identical "
-                    f"in every token of the chain")
-
     # ---- step 3: del_depth / del_max_depth ---------------------------------
     root_payload = parsed[0][1]
     if root_payload.get("del_depth") != 0:
@@ -978,6 +960,23 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
         if payload.get("del_depth") != i:
             raise WireError(WireReasonCode.DEPTH_INVALID,
                             f"token[{i}].del_depth = {payload.get('del_depth')!r}, expected {i}")
+
+    # ---- step 3 (draft -02), after depth as the text orders it: principal invariance
+    # R5 of draft-reece-wimse-cross-org-delegation asks for two things: convey
+    # the on-behalf-of principal along the chain, AND let a relying party verify
+    # that intermediaries did not alter it. par_hash (step 2) stops re-parenting;
+    # this stops a child carrying a different `sub`. It runs under the -02 profile
+    # only: the default profile is the -01 algorithm unchanged, where `sub` is the
+    # agent id and differs per hop, whether or not a token also carries `client_id`.
+    if draft == draft02.PROFILE_02:
+        root_sub = root_payload.get("sub")
+        for i, (_h, payload, _s, _si) in enumerate(parsed):
+            if payload.get("sub") != root_sub:
+                raise WireError(
+                    WireReasonCode.PRINCIPAL_ALTERED,
+                    f"token[{i}] sub {payload.get('sub')!r} != DT_0 sub "
+                    f"{root_sub!r}; the accountable principal MUST be identical "
+                    f"in every token of the chain")
 
     # ---- step 4: subsumption (reuse Authority.is_narrower_than) -----------
     authorities = authorities_02 if authorities_02 is not None else \

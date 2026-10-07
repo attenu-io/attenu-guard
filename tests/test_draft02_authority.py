@@ -125,8 +125,10 @@ class CumulativeConstraintsDenyWithoutATotal(unittest.TestCase):
 
     def test_a_subtree_bound_reads_its_own_total(self):
         a = A02({"a.b"}, [d.MaxSubtree("spend", 100)])
-        self.assertFalse(a.permits("a.b", {}, totals={"spend_total": 1}))
+        with self.assertRaises(ValueError):
+            a.permits("a.b", {}, totals={"spend_total": 1})       # not a field this authority holds
         self.assertTrue(a.permits("a.b", {}, totals={"spend_subtree_total": 100}))
+        self.assertFalse(a.permits("a.b", {}, totals={"spend_subtree_total": 101}))
 
     def test_a_per_action_max_still_asserts_nothing_when_absent(self):
         self.assertTrue(A02({"a.b"}, [d.Max("spend", 100)]).permits("a.b", {}))
@@ -142,9 +144,10 @@ class CumulativeConstraintsDenyWithoutATotal(unittest.TestCase):
         generic = Authority.from_wire(root.authority.to_wire(), profile="02")
         self.assertIsInstance(generic.ceilings[0], d.MaxLifetime)
         self.assertEqual(generic.ceilings[0].ctx_field, "calls")
-        self.assertTrue(generic.permits("crm.read", {"calls": 2}))
-        self.assertFalse(generic.permits("crm.read", {"calls": 3}))
+        self.assertTrue(generic.permits("crm.read", {}, totals={"calls": 2}))
+        self.assertFalse(generic.permits("crm.read", {}, totals={"calls": 3}))
         self.assertFalse(generic.permits("crm.read", {}), "no total held: deny")
+        self.assertFalse(generic.permits("crm.read", {"calls": 2}), "a context count is not a total")
 
 
 class RankWithOrdering(unittest.TestCase):

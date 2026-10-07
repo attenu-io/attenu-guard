@@ -170,6 +170,14 @@ class Max:
 
     def __post_init__(self):
         _check_key(self.key)
+        # A per-action cap on a COUNT caps nothing (every action is one call), and it is exactly
+        # what a -01 producer emits as a call cap. This library meters `max_calls` as a running
+        # count, so under the -02 a count bound is `max_lifetime` or `max_subtree`; a `max` on
+        # that key is refused, in-process and at load (library profile restriction, not a rule
+        # of the draft, which reserves no key names).
+        if isinstance(self.key, str) and (self.key == "max_calls" or self.key.startswith("max_calls[")):
+            raise ValueError(f"a per-action 'max' on the count key {self.key!r} bounds nothing; use "
+                             "max_lifetime or max_subtree for a call count")
         _check_number(self.key, "max", self.value)
 
     @property

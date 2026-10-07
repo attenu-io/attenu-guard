@@ -402,8 +402,7 @@ class Guard:
         # A null quantity asserts nothing, so it is undeclared too (attenu-ops#110): counting it as
         # declared let `{"rows": None}` through, since every ceiling reads null as absent.
         if self._strict and metered:
-            declared = dict(context)
-            declared.update(totals or {})
+            declared = auth.effective_context(context, totals)      # the context permits() reads
             missing = [c.key for c in auth.ceilings
                        if is_metered(c) and declared.get(ctx_field_of(c)) is None]
             if missing:
@@ -463,17 +462,28 @@ class Guard:
                 if isinstance(c, CallLimit)
                 or (isinstance(c, MaxLifetime) and str(c.key).startswith("max_calls"))]
 
-    def _auto_meter(self, scope: str, ctx: dict) -> list:
+    def _auto_meter(self, scope: str, ctx: dict, totals: dict | None = None) -> list:
         """Fill in `calls` / `calls[<pattern>]` for every held CallLimit the caller left
         undeclared, reading the per-(node, pattern) meter. Returns the limits that were
-        auto-filled AND apply to this scope (to be counted on allow)."""
+        auto-filled AND apply to this scope (to be counted on allow).
+
+        Under the -02 profile the meter is the ONLY source: the count is written into `totals`
+        (the trusted channel), overriding anything the caller put in the context or in `totals`
+        for that field, and every applicable limit is counted on allow. The default profile
+        keeps its documented behaviour: an explicit `calls` in the context wins."""
         filled = []
+        is_02 = getattr(self._node.authority, "profile", None) == "02"
         for c in self._call_limits():
             fld = getattr(c, "ctx_field", "calls")
-            if ctx.get(fld) is not None:
-                continue                                              # explicit count wins; null is no count
             applies = getattr(c, "applies_to_scope", lambda s: True)(scope)
-            ctx[fld] = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
+            count = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
+            if is_02:
+                if totals is not None:
+                    totals[fld] = count
+            else:
+                if ctx.get(fld) is not None:
+                    continue                                          # explicit count wins; null is no count
+                ctx[fld] = count
             if applies:
                 filled.append(c)
         return filled
@@ -570,7 +580,8 @@ class Guard:
                 filled = []
             else:
                 # 2. evaluate authority/ceilings; update meters on allow.
-                filled = self._auto_meter(scope, ctx)
+                totals = dict(totals or {})
+                filled = self._auto_meter(scope, ctx, totals)
                 decision = self._evaluate(scope, ctx, metered, totals)
                 if decision:
                     for c in filled:
@@ -676,6 +687,8 @@ class Guard:
         a `call_id` (there is nothing to bind an outcome to)."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         self._auto_meter(scope, ctx)                                  # read the meters, never consume them
+        totals = dict(totals or {})
+        self._auto_meter(scope, ctx, totals)                                  # read the meters, never consume them
         return self._evaluate(scope, ctx, metered, totals)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,

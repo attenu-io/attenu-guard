@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from attenu_guard import Authority, AuthorityError, CallLimit, Guard, RowLimit, wire  # noqa: E402
+from attenu_guard import Allow, Authority, AuthorityError, CallLimit, Guard, RowLimit, wire  # noqa: E402
 from attenu_guard import draft02 as d  # noqa: E402
 from attenu_guard.wire import WireError, WireReasonCode  # noqa: E402
 
@@ -103,15 +103,15 @@ class Finding1_SubtreeBoundNeverFedFromANodeMeter(unittest.TestCase):
 class Finding2_AudienceIsNotOptInAtStep8(unittest.TestCase):
     def test_permits_denies_when_no_audience_was_ever_supplied(self):
         v = wire.load(_mint02(_chain02()[2]), _signer(), draft="02")
-        denied = v.permits("crm.read", {"rows": 1, "calls": 1})
+        denied = v.permits("crm.read", {"rows": 1}, totals={"calls": 1})
         self.assertFalse(denied)
         self.assertEqual(denied.reasons[0].code, WireReasonCode.AUDIENCE_MISMATCH)
-        self.assertTrue(v.permits("crm.read", {"rows": 1, "calls": 1}, audience=AUD))
+        self.assertTrue(v.permits("crm.read", {"rows": 1}, totals={"calls": 1}, audience=AUD))
 
     def test_an_audience_confirmed_at_load_carries_into_permits(self):
         v = wire.load(_mint02(_chain02()[2]), _signer(), draft="02", audience=AUD)
-        self.assertTrue(v.permits("crm.read", {"rows": 1, "calls": 1}))
-        self.assertFalse(v.permits("crm.read", {"rows": 1, "calls": 1}, audience="https://evil.example"))
+        self.assertTrue(v.permits("crm.read", {"rows": 1}, totals={"calls": 1}))
+        self.assertFalse(v.permits("crm.read", {"rows": 1}, totals={"calls": 1}, audience="https://evil.example"))
 
     def test_the_default_profile_is_unchanged(self):
         root = Guard.issue("o", Authority({"crm.read"}, [], ttl=60), max_depth=2)
@@ -231,6 +231,91 @@ class Finding9_MixedProfilesAreARefusedDelegation(unittest.TestCase):
         with self.assertRaises(AuthorityError):
             root.delegate("kid", Authority({"a.b"}, [], 600), "t")
         self.assertIn("spawn_denied", [e["event"] for e in root.audit_log()])
+
+
+class Round2_OnlyHeldTotalFieldsAreStripped(unittest.TestCase):
+    """BLOCKER (round 2): stripping every `*_total` key dropped the per-action field of an
+    ordinary constraint keyed like that, so Max("order_total", 100) passed order_total=1e6,
+    and the strict-metering check read the unstripped context."""
+
+    def test_an_ordinary_constraint_keyed_with_total_still_reads_its_field(self):
+        a = A02({"shop.buy"}, [d.Max("order_total", 100)])
+        self.assertFalse(a.permits("shop.buy", {"order_total": 1_000_000}))
+        self.assertTrue(a.permits("shop.buy", {"order_total": 50}))
+        g = Guard.issue("g", a, strict_metering=True)
+        self.assertFalse(g.check("shop.buy", context={"order_total": 1_000_000}, metered=True))
+        self.assertTrue(g.check("shop.buy", context={"order_total": 50}, metered=True))
+
+    def test_strict_metering_and_evaluation_read_the_same_context(self):
+        """A held lifetime bound's field is stripped from the context for BOTH the strict check
+        and the evaluation: a caller cannot declare it, so under strict metering the call is
+        unmetered unless the trusted channel supplies it."""
+        a = A02({"pay.send"}, [d.MaxLifetime("max_spend", 100), d.Max("max_spend", 10)])
+        g = Guard.issue("g", a, strict_metering=True)
+        self.assertFalse(g.check("pay.send", context={"spend": 1, "spend_total": 5}, metered=True))
+        self.assertTrue(g.check("pay.send", context={"spend": 1}, totals={"spend_total": 5}, metered=True))
+
+    def test_only_held_cumulative_fields_are_stripped(self):
+        a = A02({"a.b"}, [d.MaxLifetime("max_spend", 100), Allow("region_total", ["eu"])])
+        self.assertTrue(a.permits("a.b", {"region_total": "eu"}, totals={"spend_total": 1}))
+        self.assertFalse(a.permits("a.b", {"region_total": "us"}, totals={"spend_total": 1}))
+
+
+class Round2_DecisionA_NoPerActionCapOnACount(unittest.TestCase):
+    """A per-action `max` on a `max_calls*` key caps nothing (every action is one call) and is
+    exactly what a -01 producer emits as a call cap. Under "02" this library refuses it."""
+
+    def test_max_on_a_count_key_is_refused_at_construction_and_at_load(self):
+        for key in ("max_calls", "max_calls[fs.write]"):
+            with self.assertRaises(ValueError, msg=key):
+                d.Max(key, 1)
+            with self.assertRaises(ValueError, msg=key):
+                d.ceiling_from_wire_02({"key": key, "max": 1})
+        tokens = _mint02(_chain02()[2])
+        tokens[2] = _resign(tokens[2], lambda p: p["authorization_details"][0]["constraints"].append(
+            {"key": "max_calls[x.y]", "max": 1}))
+        _reject(self, tokens, WireReasonCode.MALFORMED)
+
+
+class Round2_DecisionB_TheMeterIsTheOnlySourceUnder02(unittest.TestCase):
+    def test_a_caller_supplied_calls_cannot_override_the_meter(self):
+        root = Guard.issue("root", A02({"a.b"}, [CallLimit(2)]))
+        self.assertTrue(root.check("a.b", context={"calls": 0}))
+        self.assertTrue(root.check("a.b", context={"calls": 0}))
+        self.assertFalse(root.check("a.b", context={"calls": 0}), "the third call is the meter's third")
+        self.assertFalse(root.check("a.b", totals={"calls": 0}), "nor through totals, in-process")
+
+    def test_the_default_profile_still_honours_a_declared_calls(self):
+        root = Guard.issue("root", Authority({"a.b"}, [CallLimit(2)], ttl=60))
+        self.assertTrue(root.check("a.b", context={"calls": 1}))
+        self.assertFalse(root.check("a.b", context={"calls": 3}))
+
+
+class Round2_DecisionC_TotalsAcceptOnlyHeldFields(unittest.TestCase):
+    def test_an_unheld_totals_key_is_loud(self):
+        a = A02({"a.b"}, [d.MaxLifetime("max_spend", 100), d.Max("order_total", 5)])
+        with self.assertRaises(ValueError):
+            a.permits("a.b", {}, totals={"order_total": 0})          # a per-action field, not a total
+        with self.assertRaises(ValueError):
+            a.permits("a.b", {}, totals={"rows_total": 0})           # nothing held reads it
+        self.assertTrue(a.permits("a.b", {"order_total": 1}, totals={"spend_total": 1}))
+
+    def test_the_same_on_the_guard_and_a_verified_chain(self):
+        g = Guard.issue("g", A02({"a.b"}, [d.MaxLifetime("max_spend", 100)]))
+        with self.assertRaises(ValueError):
+            g.check("a.b", totals={"spend": 0})
+        root = Guard.issue("o", A02({"a.b"}, [d.MaxLifetime("max_spend", 100)]), max_depth=2)
+        v = wire.load(_mint02(root), _signer(), draft="02", audience=AUD)
+        with self.assertRaises(ValueError):
+            v.permits("a.b", totals={"calls": 0})
+
+
+class Round2_DecisionD_DepthBeforePrincipal(unittest.TestCase):
+    def test_a_bad_depth_beside_an_altered_sub_is_depth_invalid(self):
+        tokens = _mint02(_chain02()[2])
+        tokens[2] = _resign(tokens[2], lambda p: (p.__setitem__("sub", "acct:mallory"),
+                                                  p.__setitem__("del_depth", 7)))
+        _reject(self, tokens, WireReasonCode.DEPTH_INVALID)
 
 
 if __name__ == "__main__":
