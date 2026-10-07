@@ -61,7 +61,8 @@ from typing import Mapping, Protocol, runtime_checkable
 
 from .authority import Authority
 from . import canonical
-from .reasons import Decision, ReasonCode
+from . import draft02
+from .reasons import Decision, Reason, ReasonCode
 
 __all__ = [
     "Signer", "HS256TestSigner", "Ed25519Signer", "Ed25519Verifier", "ECDSAP256Verifier",
@@ -314,6 +315,7 @@ class WireReasonCode:
     DUPLICATE_MEMBER = "duplicate_member"
     NON_CANONICAL = "non_canonical"
     PRINCIPAL_ALTERED = "principal_altered"
+    AUDIENCE_MISMATCH = "audience_mismatch"   # draft -02 step 8: DT_n's aud does not name this verifier
     EXPIRED = ReasonCode.EXPIRED  # "expired" — reuse, don't reinvent
 
 
@@ -332,14 +334,25 @@ class WireError(Exception):
 # Authority <-> authorization_details (draft {{authority}})
 # =========================================================================
 
-def _authority_detail(authority: Authority) -> dict:
+def _authority_detail(authority: Authority, draft: str = draft02.PROFILE_01) -> dict:
     """One RFC 9396 authorization detail object for `authority`, per draft
     {{authority}}. Built from the CORE's own `Authority.to_wire()` (never
     hand-rolled) — `ttl` is deliberately dropped here: token lifetime is
     carried once, at the top level, via the standard `iat`/`exp` claims
     (RFC 9068), not duplicated inside authorization_details where it could
-    drift out of sync with them."""
-    wire = authority.to_wire()
+    drift out of sync with them. Under the -02 profile the authority is
+    re-expressed under that profile first, so its constraints take their -02
+    wire shapes (draft02.ceiling_to_wire_02) whatever profile it was built
+    under in-process."""
+    if draft == draft02.PROFILE_02 and authority.profile != draft02.PROFILE_02:
+        try:
+            authority = Authority(authority.scopes, authority.ceilings, authority.ttl, draft02.PROFILE_02)
+        except ValueError as e:
+            raise WireError(WireReasonCode.MALFORMED, f"authority cannot be expressed under the -02: {e}") from e
+    try:
+        wire = authority.to_wire()
+    except ValueError as e:
+        raise WireError(WireReasonCode.MALFORMED, f"authority cannot be expressed under the -02: {e}") from e
     return {
         "type": "agent_delegation",
         "scopes": wire["scopes"],
@@ -448,15 +461,52 @@ def _resolve(guard_or_node):
 # serialize() — one Delegation Token
 # =========================================================================
 
+def _is_audience(aud) -> bool:
+    """RFC 7519 Section 4.1.3 as the -02 Section 3 profiles it: a string, or a non-empty
+    array of strings. null, absent and an empty array are malformed."""
+    if isinstance(aud, str):
+        return True
+    return isinstance(aud, list) and bool(aud) and all(isinstance(a, str) for a in aud)
+
+
+def _cnf_for(cnf, node):
+    """The `cnf` claim for one hop: a mapping used as-is, or a callable given the node
+    (each hop has its own holder key, so a chain usually needs one `cnf` per hop)."""
+    value = cnf(node) if callable(cnf) else cnf
+    if not isinstance(value, Mapping) or not value:
+        raise WireError(WireReasonCode.MALFORMED,
+                        f"draft -02 requires a non-empty cnf object on every token; got {value!r} "
+                        f"for {getattr(node, 'agent_id', node)!r}")
+    return dict(value)
+
+
 def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
                   del_max_depth: int | None, par_hash: str | None,
-                  principal: str | None = None) -> str:
+                  principal: str | None = None, draft: str = draft02.PROFILE_01,
+                  cnf=None) -> str:
+    draft02.check_profile(draft)
     authority = node.authority
     if authority.ttl is None:
         raise WireError(
             WireReasonCode.MALFORMED,
             "Authority.ttl is None; a Delegation Token requires a finite "
             "ttl to compute the required 'exp' claim (RFC 9068)")
+    if draft == draft02.PROFILE_02:
+        # Section 3 of the -02: the Principal in `sub` (non-empty), the Acting Agent in
+        # `client_id`, an audience that is a string or a non-empty array, and `cnf` on every
+        # token. None of these is optional there, so minting refuses rather than emitting a
+        # token the -02 verifier would reject as malformed.
+        if not isinstance(principal, str) or not principal:
+            raise WireError(WireReasonCode.MALFORMED,
+                            "draft -02 requires principal=<non-empty string>: the accountable "
+                            "principal goes in 'sub', identical at every hop")
+        if not _is_audience(aud):
+            raise WireError(WireReasonCode.MALFORMED,
+                            "draft -02 requires aud to be a string or a non-empty array of strings")
+        if cnf is None:
+            raise WireError(WireReasonCode.MALFORMED,
+                            "draft -02 requires cnf=<mapping or callable(node) -> mapping>: every "
+                            "token is bound to its holder's key (RFC 7800)")
 
     header = {
         "typ": "at+jwt",
@@ -478,12 +528,14 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
         "iat": iat,
         "exp": iat + authority.ttl,
         "jti": jti if jti is not None else node.node_id,
-        "authorization_details": [_authority_detail(authority)],
+        "authorization_details": [_authority_detail(authority, draft)],
         "del_depth": node.depth,
     }
     if principal is not None:
         # The agent that acted at THIS hop. Varies per hop; `sub` does not.
         payload["client_id"] = node.agent_id
+    if draft == draft02.PROFILE_02:
+        payload["cnf"] = _cnf_for(cnf, node)
     if del_max_depth is not None:
         payload["del_max_depth"] = del_max_depth
     if par_hash is not None:
@@ -498,7 +550,8 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
 
 def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
               aud=None, jti: str | None = None, iat: int = 0,
-              max_depth: int | None = None, principal: str | None = None) -> str:
+              max_depth: int | None = None, principal: str | None = None,
+              draft: str = draft02.PROFILE_01, cnf=None) -> str:
     """Emit ONE Delegation Token for `guard_or_node` (a `Guard`, or a bare
     `chain.Node`) as a compact JWT: `b64url(header).b64url(payload).b64url(sig)`.
 
@@ -519,6 +572,11 @@ def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
     `iat` defaults to 0 and is never derived from a real clock (see the
     module docstring on determinism) — pass a real epoch-seconds value
     explicitly if you want one.
+
+    `draft` selects the revision of the Internet-Draft the token follows: "01"
+    (the default, unchanged) or "02", which additionally requires `principal`,
+    a well-formed `aud` and `cnf` (a mapping, or a callable given the node),
+    puts the agent in `client_id`, and writes constraints in their -02 shapes.
     """
     node, chain = _resolve(guard_or_node)
     del_max_depth = None
@@ -534,7 +592,7 @@ def serialize(guard_or_node, signer: Signer, *, iss: str = "attenu-guard",
                 "(reads chain.max_depth) or serialize(..., max_depth=N)")
     return _build_token(node, signer, iss=iss, aud=aud, jti=jti, iat=iat,
                         del_max_depth=del_max_depth, par_hash=None,
-                        principal=principal)
+                        principal=principal, draft=draft, cnf=cnf)
 
 
 # =========================================================================
@@ -556,7 +614,8 @@ def _root_to_leaf_path(chain, leaf_node_id: str) -> list:
 
 def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "attenu-guard",
                     principal: str | None = None,
-                    aud=None, iat: int = 0) -> list[str]:
+                    aud=None, iat: int = 0, draft: str = draft02.PROFILE_01,
+                    cnf=None) -> list[str]:
     """Serialize every node from root to `leaf_guard`, inclusive, as a
     Delegation Chain: `[DT_0, DT_1, ..., DT_n]` (draft {{chain-linkage}}).
 
@@ -595,7 +654,8 @@ def serialize_chain(leaf_guard, signer: Signer, *, iss: str = "attenu-guard",
         if n.depth != 0:
             par_hash = b64url_encode(hashlib.sha256(prev_signing_input).digest())
         token = _build_token(n, signer, iss=iss, aud=aud, jti=None, iat=iat,
-                             del_max_depth=del_max_depth, par_hash=par_hash, principal=principal)
+                             del_max_depth=del_max_depth, par_hash=par_hash, principal=principal,
+                             draft=draft, cnf=cnf)
         header_b64, payload_b64, _sig_b64 = token.split(".")
         prev_signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
         tokens.append(token)
@@ -618,12 +678,84 @@ class VerifiedChain:
     leaf_authority: Authority
     depth: int
     del_max_depth: int
+    draft: str = draft02.PROFILE_01
+    #: The audience `load(audience=...)` confirmed DT_n names, or None when none was given.
+    audience: object = None
 
-    def permits(self, scope: str, ctx: Mapping | None = None) -> Decision:
+    def permits(self, scope: str, ctx: Mapping | None = None, *,
+                audience: str | None = None) -> Decision:
         """Authorize `scope` (with request context `ctx`) against the LEAF
         authority — draft {{verify}} step 8. Delegates entirely to
-        `Authority.permits`; no policy logic is reimplemented here."""
+        `Authority.permits`; no policy logic is reimplemented here. Under the
+        -02, `audience` names this Enforcement Point and is checked against
+        DT_n's `aud` first (reason `audience_mismatch`); a cumulative
+        constraint whose running total `ctx` does not carry denies (draft02)."""
+        if audience is not None and self.draft == draft02.PROFILE_02:
+            if not _names_audience(self.payloads[-1].get("aud"), audience):
+                return Decision.deny(Reason(WireReasonCode.AUDIENCE_MISMATCH, "aud",
+                                            self.payloads[-1].get("aud"), audience,
+                                            "DT_n's aud does not identify this Enforcement Point"))
         return self.leaf_authority.permits(scope, ctx)
+
+
+def _names_audience(aud, audience: str) -> bool:
+    return aud == audience or (isinstance(aud, list) and audience in aud)
+
+
+_DETAIL_MEMBERS = frozenset({"type", "scopes", "constraints"})
+
+
+def _check_token_02(header: Mapping, payload: Mapping, i: int) -> Authority:
+    """The -02's parse-time rules for one token (Sections 3, 4, 4.4), applied to every DT_i
+    before step 1 so that DT_0 is subject to them as every other token is. Each failure is
+    `malformed`. Returns the token's Authority under the -02 profile."""
+    def bad(msg):
+        return WireError(WireReasonCode.MALFORMED, f"token[{i}] {msg}")
+    for claim in ("iss", "jti"):
+        if not isinstance(payload.get(claim), str) or not payload[claim]:
+            raise bad(f"{claim} must be a non-empty string (RFC 9068)")
+    if not isinstance(payload.get("sub"), str) or not payload["sub"]:
+        raise bad("sub must be a non-empty string naming the Principal (draft -02 Section 3)")
+    if not isinstance(payload.get("client_id"), str):
+        raise bad("client_id must be a string naming the Acting Agent (draft -02 Section 3)")
+    if not _is_audience(payload.get("aud")):
+        raise bad("aud must be a string or a non-empty array of strings; null is malformed "
+                  "(draft -02 Section 3)")
+    for claim in ("iat", "exp"):
+        if not _is_json_number(payload.get(claim)):
+            raise bad(f"{claim} must be a number")
+    cnf = payload.get("cnf")
+    if not isinstance(cnf, Mapping) or not cnf:
+        raise bad("cnf must be a non-empty object binding the token to its holder's key "
+                  "(draft -02 Sections 3 and 7)")
+    for claim, value in payload.items():
+        if type(value) is int:
+            try:
+                draft02.check_integer_safe(value)
+            except ValueError as e:
+                raise bad(str(e)) from e
+    details = payload.get("authorization_details")
+    if not isinstance(details, list) or len(details) != 1:
+        n = len(details) if isinstance(details, list) else "no"
+        raise bad(f"authorization_details must carry exactly one detail, of type "
+                  f"'agent_delegation'; found {n} (draft -02 Section 4)")
+    d0 = details[0]
+    if not isinstance(d0, Mapping) or d0.get("type") != "agent_delegation":
+        got = d0.get("type") if isinstance(d0, Mapping) else d0
+        raise bad(f"authorization detail type {got!r} is not 'agent_delegation'; a type this "
+                  "verifier does not implement is a rejection (draft -02 Section 4.4)")
+    unknown_members = sorted(set(d0) - _DETAIL_MEMBERS)
+    if unknown_members:
+        raise bad("the agent_delegation detail carries members this verifier cannot evaluate "
+                  f"and will not ignore: {', '.join(map(repr, unknown_members))}")
+    scopes = d0.get("scopes")
+    if not isinstance(scopes, list) or any(not isinstance(sc, str) for sc in scopes):
+        raise bad("scopes must be an array of strings")
+    try:
+        return Authority.from_wire({"scopes": scopes, "constraints": d0.get("constraints", []),
+                                    "ttl": payload["exp"] - payload["iat"]}, profile=draft02.PROFILE_02)
+    except Exception as e:  # invalid scope, malformed or repeated constraint
+        raise bad(f"invalid authorization_details: {e}") from e
 
 
 def _parse_token(token: str):
@@ -687,7 +819,9 @@ def _parse_token(token: str):
     return header, payload, sig, signing_input
 
 
-def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) -> VerifiedChain:
+def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
+         draft: str = draft02.PROFILE_01, accepted_algs=None,
+         audience: str | None = None) -> VerifiedChain:
     """Run the Offline Verification Algorithm (draft {{verify}}) over
     `tokens` (`[DT_0, ..., DT_n]`, root-first) and, on success, return a
     `VerifiedChain`. Denies on the FIRST failure by raising `WireError`
@@ -723,14 +857,36 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
     OUT OF SCOPE for v0.2 (not silently skipped — documented here and in the
     module docstring): step 6 (`cnf`/DPoP holder-binding proof) and step 7
     (Token Status List revocation). Neither is checked.
+
+    `draft` selects the revision whose rules apply. "01" (the default) is the
+    algorithm above, unchanged. "02" (draft-asor-wimse-agent-delegation-chain-02)
+    adds, before step 1, the parse-time claim and constraint rules of
+    `_check_token_02` (every failure `malformed`); in step 1, a list of
+    accepted algorithms (`accepted_algs`, defaulting to the signer's own) that
+    denies a token whose `alg` is off the list even where its signature
+    verifies; in step 3, principal invariance unconditionally; in step 4, the
+    -02 subsumption relation (draft02); and in step 8, the audience check
+    (`audience`, applied at load when given, and by `VerifiedChain.permits`).
+    `accepted_algs` given under "01" is honoured too; it is never implied there.
     """
+    draft02.check_profile(draft)
     if not tokens:
         raise WireError(WireReasonCode.MALFORMED, "empty token chain")
 
     parsed = [_parse_token(t) for t in tokens]
 
+    authorities_02 = None
+    if draft == draft02.PROFILE_02:
+        authorities_02 = [_check_token_02(h, p, i) for i, (h, p, _s, _si) in enumerate(parsed)]
+
     # ---- step 1: signatures ------------------------------------------------
+    if accepted_algs is None and draft == draft02.PROFILE_02:
+        accepted_algs = (signer.alg,)
     for i, (header, _payload, sig, signing_input) in enumerate(parsed):
+        if accepted_algs is not None and header.get("alg") not in accepted_algs:
+            raise WireError(WireReasonCode.SIGNATURE_INVALID,
+                            f"token[{i}] header alg {header.get('alg')!r} is not on the "
+                            f"verifier's accepted list {list(accepted_algs)!r}")
         if header.get("alg") != signer.alg:
             raise WireError(WireReasonCode.SIGNATURE_INVALID,
                             f"token[{i}] header alg {header.get('alg')!r} != "
@@ -751,11 +907,13 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
     # from carrying a DIFFERENT `sub` than its parent, so the second half of R5
     # was not met. It is met here.
     #
-    # A chain is -02 shaped when any token carries `client_id` (the claim that
+    # Under the -02 profile the check is unconditional (every token carries
+    # `client_id` by then, or parsing refused it). Under the default profile a
+    # chain is -02 shaped when any token carries `client_id` (the claim that
     # moved the agent id out of `sub`). Chains minted before that, and the
     # frozen -01 vector set, carry no `client_id` and keep the -01 meaning of
     # `sub`, so they are not subject to this check and still verify.
-    if any("client_id" in payload for _h, payload, _s, _si in parsed):
+    if draft == draft02.PROFILE_02 or any("client_id" in payload for _h, payload, _s, _si in parsed):
         root_sub = parsed[0][1].get("sub")
         if not isinstance(root_sub, str) or not root_sub:
             raise WireError(
@@ -810,7 +968,8 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
                             f"token[{i}].del_depth = {payload.get('del_depth')!r}, expected {i}")
 
     # ---- step 4: subsumption (reuse Authority.is_narrower_than) -----------
-    authorities = [_authority_from_payload(p) for (_h, p, _s, _si) in parsed]
+    authorities = authorities_02 if authorities_02 is not None else \
+        [_authority_from_payload(p) for (_h, p, _s, _si) in parsed]
     for i in range(1, len(authorities)):
         if not authorities[i].is_narrower_than(authorities[i - 1]):
             raise WireError(WireReasonCode.NOT_NARROWER,
@@ -839,14 +998,24 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0) 
         prev_exp = exp
 
     # ---- steps 6-7: OUT OF SCOPE for v0.2 (see docstring) ------------------
-    #   step 6: cnf/DPoP holder-binding proof — not checked.
+    #   step 6: cnf/DPoP holder-binding proof — not checked (the -02 profile
+    #           checks that `cnf` is present and shaped; a verifier that sees no
+    #           request cannot run step 6, draft -02 Table 1).
     #   step 7: Token Status List revocation — not checked.
 
     leaf_payload = parsed[-1][1]
+    # ---- step 8, the audience half (draft -02): DT_n's aud names this verifier
+    if audience is not None and draft == draft02.PROFILE_02:
+        if not _names_audience(leaf_payload.get("aud"), audience):
+            raise WireError(WireReasonCode.AUDIENCE_MISMATCH,
+                            f"DT_n aud {leaf_payload.get('aud')!r} does not identify this "
+                            f"Enforcement Point {audience!r} (RFC 9068 Section 4)")
     return VerifiedChain(
         tokens=tuple(tokens),
         payloads=tuple(p for (_h, p, _s, _si) in parsed),
         leaf_authority=authorities[-1],
         depth=leaf_payload.get("del_depth"),
         del_max_depth=del_max_depth,
+        draft=draft,
+        audience=audience,
     )
