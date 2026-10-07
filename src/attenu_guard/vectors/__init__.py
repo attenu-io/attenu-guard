@@ -56,8 +56,23 @@ bytes as received:
         for expected in case["expect_failures"]:
             assert expected in report.failures              # reason AND position
 
-tests/vectors/README.md documents all three file formats and how to use them
-from another implementation.
+`draft02/*.json` is the fourth suite: the Delegation Token vectors of
+draft-asor-wimse-agent-delegation-chain-02, a second, separately named set (the twenty
+-01 files above are byte-stable and do not conform to the -02). Each carries a
+`verifier` block beside `signer`, because the -02's step 1 needs the verifier's
+accepted-algorithm list and step 8 its audience, neither of which is in a token:
+
+    from attenu_guard import vectors
+
+    for name, data in vectors.load_vectors_02().items():
+        outcome = my_verifier_02(data["tokens"], data["signer"], data["now"],
+                                 data["verifier"]["accepted_algs"], data["verifier"]["audience"])
+        assert outcome == (data.get("expect") or data["expect_reject_reason"])
+
+Written by tests/vectors-02/generate_02.py on the same single-writer discipline.
+
+tests/vectors/README.md documents the first three file formats and
+tests/vectors-02/README.md the fourth, and how to use them from another implementation.
 """
 from __future__ import annotations
 
@@ -66,7 +81,8 @@ from importlib import resources
 
 __all__ = ["VECTOR_NAMES", "read_vector_bytes", "load_vector", "load_vectors",
            "BUNDLE_VECTORS_PATH", "read_bundle_vectors_bytes", "load_bundle_vectors",
-           "ENVELOPE_VECTORS_PATH", "read_envelope_vectors_bytes", "load_envelope_vectors"]
+           "ENVELOPE_VECTORS_PATH", "read_envelope_vectors_bytes", "load_envelope_vectors",
+           "VECTOR_NAMES_02", "read_vector_bytes_02", "load_vector_02", "load_vectors_02"]
 
 #: Every shipped vector, valid chain first. Kept explicit rather than globbed so
 #: a file that fails to make it into a wheel is a failure, not a shorter list.
@@ -181,3 +197,63 @@ def load_envelope_vectors() -> dict:
     that envelope covers, never on a hop coverage skipped, and no chain-level integrity failure
     is ever raised because an envelope failed. See tests/vectors/README.md."""
     return json.loads(read_envelope_vectors_bytes())
+
+
+#: The -02 set (draft-asor-wimse-agent-delegation-chain-02), under `draft02/`. Explicit, like
+#: VECTOR_NAMES, so a file missing from a wheel is a failure rather than a shorter list.
+VECTOR_NAMES_02 = (
+    "valid_chain.json",
+    "valid_audience_array.json",
+    "valid_opaque_exact.json",
+    "valid_range_min_max.json",
+    "valid_unknown_constraint_identical.json",
+    "reject_principal_altered.json",
+    "reject_root_without_principal.json",
+    "reject_missing_client_id.json",
+    "reject_aud_null.json",
+    "reject_aud_empty_array.json",
+    "reject_audience_mismatch.json",
+    "reject_missing_cnf.json",
+    "reject_cnf_without_confirmation.json",
+    "reject_unsafe_integer.json",
+    "reject_alg_not_accepted.json",
+    "reject_wildcard_over_opaque.json",
+    "reject_opaque_over_wildcard.json",
+    "reject_opaque_case_folded.json",
+    "reject_mixed_case_wildcard.json",
+    "reject_newline_scope.json",
+    "reject_max_lifetime_widened.json",
+    "reject_max_subtree_widened.json",
+    "reject_cross_type_lifetime_for_max.json",
+    "reject_child_exp_exceeds_parent.json",
+    "reject_child_raises_del_max_depth.json",
+    "reject_rank_order_mismatch.json",
+    "reject_rank_without_order.json",
+    "reject_rank_outside_order.json",
+    "reject_duplicate_key_type.json",
+    "reject_constraint_extra_member.json",
+    "reject_detail_extra_member.json",
+    "reject_second_detail.json",
+    "reject_unknown_detail_type.json",
+    "reject_altered_sub_and_par_hash.json",
+    "reject_reissued_parent.json",
+)
+
+
+def read_vector_bytes_02(name: str) -> bytes:
+    """The raw bytes of one -02 vector file, read from the installed package."""
+    if name not in VECTOR_NAMES_02:
+        raise KeyError(f"unknown -02 vector {name!r}; expected one of {list(VECTOR_NAMES_02)}")
+    return (resources.files(__name__) / "draft02" / name).read_bytes()
+
+
+def load_vector_02(name: str) -> dict:
+    """One -02 vector, parsed: `draft` ("02"), `signer`, `verifier` (`accepted_algs`,
+    `audience`), `now`, `tokens`, and exactly one of `expect` or `expect_reject_reason`.
+    See tests/vectors-02/README.md."""
+    return json.loads(read_vector_bytes_02(name))
+
+
+def load_vectors_02() -> dict:
+    """Every -02 vector, parsed, keyed by filename, in `VECTOR_NAMES_02` order."""
+    return {name: load_vector_02(name) for name in VECTOR_NAMES_02}
