@@ -33,6 +33,7 @@ from typing import Mapping
 
 from .ceilings import _SCOPE_RE, Ceiling, _UnknownCeiling, ceiling_from_wire
 from .reasons import Decision, Reason, ReasonCode
+from . import draft02
 
 
 def _ceiling_from_wire_whole(c):
@@ -106,8 +107,12 @@ def _ceiling_from_wire_whole(c):
     return ceiling
 
 
-def _validate_scope(scope: str) -> None:
-    """Validate the agent_delegation scope grammar defined by the I-D."""
+def _validate_scope(scope: str, profile: str = draft02.PROFILE_01) -> None:
+    """Validate the agent_delegation scope grammar defined by the I-D: the -01's two forms by
+    default, the -02's three forms (literal, wildcard, opaque) under profile "02"."""
+    if profile == draft02.PROFILE_02:
+        draft02.validate_scope(scope)
+        return
     if not isinstance(scope, str) or _SCOPE_RE.fullmatch(scope) is None:
         raise ValueError(
             f"invalid scope {scope!r}: expected lowercase dot-separated segments; "
@@ -156,39 +161,73 @@ class Authority:
     scopes: frozenset = field(default_factory=frozenset)
     ceilings: tuple = field(default_factory=tuple)
     ttl: int | None = None
+    #: Which revision of the Internet-Draft this authority follows: "01" (the default, and
+    #: every pre-existing caller) or "02" (draft02.py: three-form scope grammar, generic
+    #: constraint types, one constraint per (key, type)). The profile is not on the wire;
+    #: `wire.load(draft=...)` and `Authority.from_wire(profile=...)` set it.
+    profile: str = draft02.PROFILE_01
 
     def __post_init__(self):
+        draft02.check_profile(self.profile)
         # Normalise to immutable, comparable, deterministically-ordered forms.
         scopes = frozenset(self.scopes)
         for scope in scopes:
-            _validate_scope(scope)
+            _validate_scope(scope, self.profile)
         object.__setattr__(self, "scopes", scopes)
-        by_key: dict[str, Ceiling] = {}
+        by_key: dict = {}
         for c in self.ceilings:
             # One constraint per key, on every path (attenu-ops#110): the last one won, silently, so
-            # [allow region in [us], deny region not in [rm]] kept only the deny-list.
-            if c.key in by_key:
+            # [allow region in [us], deny region not in [rm]] kept only the deny-list. Under the -02
+            # the unit is (key, type), so a `min` and a `max` on one quantity form a range, while
+            # two `max` on one key are still malformed (draft -02 Section 4.2).
+            k = self._pair_key(c)
+            if k in by_key:
+                if self.profile == draft02.PROFILE_02:
+                    raise ValueError(f"two constraints share the key {c.key!r} and the type "
+                                     f"{draft02.draft_type_of(c)!r}; an authority holds one per (key, type)")
                 raise ValueError(f"two constraints share the key {c.key!r}; an authority holds one per key")
-            by_key[c.key] = c
-        object.__setattr__(self, "ceilings", tuple(by_key[k] for k in sorted(by_key)))
+            by_key[k] = c
+        object.__setattr__(self, "ceilings", tuple(by_key[k] for k in self._sorted_keys(by_key)))
+
+    def _sorted_keys(self, keys):
+        """Deterministic wire order of pairing keys. The -01 order (plain string sort) is
+        unchanged; the -02's (key, type) tuples sort by key, then type."""
+        if self.profile == draft02.PROFILE_02:
+            return sorted(keys, key=lambda k: (k[0], str(k[1])))
+        return sorted(keys)
+
+    def _pair_key(self, c):
+        """What two constraints are paired by in meet/is_narrower_than: the key (-01), or the
+        (key, type) pair (-02)."""
+        if self.profile == draft02.PROFILE_02:
+            return (str(c.key), draft02.draft_type_of(c))
+        return c.key
 
     # ---- ceiling lookup --------------------------------------------------
     def _by_key(self) -> dict:
-        """Index ceilings by `.key` for pairwise comparison in meet/subsumption.
-        Recomputed on demand rather than cached: `ceilings` tuples are small
+        """Index ceilings by their pairing key (`_pair_key`) for pairwise comparison in
+        meet/subsumption. Recomputed on demand rather than cached: `ceilings` tuples are small
         (a handful of bounds), and Authority must stay a plain frozen
         dataclass (hashable, trivially comparable) rather than carry mutable
         cache state.
         """
-        return {c.key: c for c in self.ceilings}
+        return {self._pair_key(c): c for c in self.ceilings}
 
     def ceiling(self, key: str):
-        """Convenience accessor: the Ceiling bound to `key`, or None."""
-        return self._by_key().get(key)
+        """Convenience accessor: the Ceiling bound to `key`, or None. Under the -02 a key may
+        carry several constraints of different types; this returns the first in wire order, and
+        `ceilings_for(key)` returns them all."""
+        for c in self.ceilings:
+            if c.key == key:
+                return c
+        return None
+
+    def ceilings_for(self, key: str) -> tuple:
+        return tuple(c for c in self.ceilings if c.key == key)
 
     # ---- scope helpers -----------------------------------------------------
     @staticmethod
-    def _scope_covers(held: str, requested: str) -> bool:
+    def _scope_covers_01(held: str, requested: str) -> bool:
         """Exact match, or a terminal `x.*` prefix at the retained dot boundary."""
         if held == requested:
             return True
@@ -196,6 +235,11 @@ class Authority:
             prefix = held[:-1]  # keep the dot: "crm."
             return requested.startswith(prefix)
         return False
+
+    def _scope_covers(self, held: str, requested: str) -> bool:
+        if self.profile == draft02.PROFILE_02:
+            return draft02.scope_covers(held, requested)
+        return self._scope_covers_01(held, requested)
 
     def covers_scope(self, requested: str) -> bool:
         return any(self._scope_covers(h, requested) for h in self.scopes)
@@ -214,6 +258,9 @@ class Authority:
         different ceiling types under one key are. So `parent.meet(request)`
         and `request.meet(parent)` differ there.
         """
+        if other.profile != self.profile:
+            raise ValueError(f"cannot meet an authority of profile {self.profile!r} with one of "
+                             f"profile {other.profile!r}")
         # scopes: keep a requested scope only if self covers it; expand self's
         # own concrete scopes that other covers. Net effect: intersection with
         # wildcard awareness, never larger than either side's coverage.
@@ -241,7 +288,7 @@ class Authority:
         self_by_key = self._by_key()
         other_by_key = other._by_key()
         new_ceilings = []
-        for k in sorted(set(self_by_key) | set(other_by_key)):
+        for k in self._sorted_keys(set(self_by_key) | set(other_by_key)):
             a = self_by_key.get(k)
             b = other_by_key.get(k)
             if a is not None and b is not None and type(a) is not type(b):
@@ -256,14 +303,21 @@ class Authority:
                     continue
                 raise AuthorityError(f"constraint {k!r} has a different ceiling type on each side; "
                                      "neither narrows the other", reason="not_narrower", detail={"constraint": k})
-            new_ceilings.append(a.narrow(b) if (a is not None and b is not None)
-                                 else (a if a is not None else b))
+            if a is not None and b is not None:
+                try:
+                    new_ceilings.append(a.narrow(b))
+                except ValueError as e:
+                    # A -02 rank whose ordering differs from the request's: no common narrowing.
+                    raise AuthorityError(str(e), reason="not_narrower",
+                                         detail={"constraint": getattr(a, "key", k)}) from e
+            else:
+                new_ceilings.append(a if a is not None else b)
 
         # ttl: strictest (min) of the two, ignoring None
         ttls = [t for t in (self.ttl, other.ttl) if t is not None]
         new_ttl = min(ttls) if ttls else None
 
-        return Authority(frozenset(pruned), tuple(new_ceilings), new_ttl)
+        return Authority(frozenset(pruned), tuple(new_ceilings), new_ttl, self.profile)
 
     def is_narrower_than(self, other: "Authority") -> bool:
         """self <= other: is self provably no more powerful than other in
@@ -284,6 +338,8 @@ class Authority:
         identical, so anything the library would delegate is exactly what an
         offline verifier would accept, and vice versa.
         """
+        if other.profile != self.profile:
+            return False
         if not all(other.covers_scope(s) for s in self.scopes):
             return False
 
@@ -350,16 +406,23 @@ class Authority:
 
     # ---- wire form ----------------------------------------------------
     def to_wire(self) -> dict:
+        """The authority's wire form under its own profile: the -01 constraint shapes by
+        default; under "02", every constraint in its -02 shape (draft02.ceiling_to_wire_02).
+        The profile itself is not written: it is a property of the token format around it."""
+        if self.profile == draft02.PROFILE_02:
+            constraints = [draft02.ceiling_to_wire_02(c) for c in self.ceilings]
+        else:
+            constraints = [c.to_wire() for c in self.ceilings]
         return {
             "scopes": sorted(self.scopes),
-            "constraints": [c.to_wire() for c in self.ceilings],
+            "constraints": constraints,
             "ttl": self.ttl,
         }
 
     _WIRE_MEMBERS = frozenset({"scopes", "constraints", "ttl"})
 
     @classmethod
-    def from_wire(cls, d: Mapping) -> "Authority":
+    def from_wire(cls, d: Mapping, profile: str = draft02.PROFILE_01) -> "Authority":
         # Read the authority object WHOLE, for the same reason the constraint
         # inside it is read whole. The token path was safe only by accident --
         # `wire._authority_from_payload` builds this dict itself after checking
@@ -377,8 +440,13 @@ class Authority:
                     f"evaluate and will not ignore: {', '.join(map(repr, unknown))}")
         scopes = d.get("scopes", ())
         constraints = d.get("constraints", ())
-        ceilings = tuple(_ceiling_from_wire_whole(c) for c in constraints)
-        return cls(frozenset(scopes), ceilings, d.get("ttl"))
+        if not isinstance(constraints, (list, tuple)):
+            raise ValueError(f"constraints is {draft02._json_kind(constraints)}, not an array")
+        if profile == draft02.PROFILE_02:
+            ceilings = tuple(draft02.ceiling_from_wire_02(c) for c in constraints)
+        else:
+            ceilings = tuple(_ceiling_from_wire_whole(c) for c in constraints)
+        return cls(frozenset(scopes), ceilings, d.get("ttl"), profile)
 
     # continuity aliases (v0.1 called these to_dict/from_dict)
     to_dict = to_wire
@@ -394,4 +462,5 @@ class Authority:
 
     def __repr__(self) -> str:
         constraints = [c.to_wire() for c in self.ceilings]
-        return f"Authority(scopes={sorted(self.scopes)}, ceilings={constraints}, ttl={self.ttl})"
+        tail = "" if self.profile == draft02.PROFILE_01 else f", profile={self.profile!r}"
+        return f"Authority(scopes={sorted(self.scopes)}, ceilings={constraints}, ttl={self.ttl}{tail})"
