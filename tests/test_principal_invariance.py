@@ -12,8 +12,10 @@ The -02 layout, committed publicly on the WIMSE list 2026-09-17:
   * verification denies on any change to `sub` along the chain.
 
 Backward compatibility is not optional: the twenty published -01 vector files are frozen and
-byte-stable, and third parties have vendored them. A chain is only subject to the new check
-when it is -02 shaped, which is signalled by `client_id` being present.
+byte-stable, and third parties have vendored them. The check is a rule of the -02 profile
+(`wire.load(..., draft="02")`) and never runs on the default path, whatever claims a token
+carries: the default path is the -01 algorithm, behaviour-identical to every earlier release
+(security review of 2026-10-07, finding 5).
 """
 import sys
 import unittest
@@ -31,6 +33,17 @@ PRINCIPAL = "acct:finance-ops@example.com"
 
 def _signer():
     return wire.HS256TestSigner(SECRET, kid="test")
+
+
+AUD = "https://crm.example.com"
+
+
+def _cnf(node):
+    return {"jkt": f"thumb-{node.agent_id}"}
+
+
+def _mint02(leaf):
+    return wire.serialize_chain(leaf, _signer(), principal=PRINCIPAL, aud=AUD, draft="02", cnf=_cnf)
 
 
 def _chain():
@@ -66,8 +79,7 @@ def _resign(payload, header_b64, signer):
 class PrincipalGoesInSubAgentGoesInClientId(unittest.TestCase):
     def test_every_hop_carries_the_same_principal_and_its_own_agent(self):
         _r, _c, leaf = _chain()
-        signer = _signer()
-        tokens = wire.serialize_chain(leaf, signer, principal=PRINCIPAL, aud="https://crm.example.com")
+        tokens = _mint02(leaf)
         subs = [_payload(t)["sub"] for t in tokens]
         agents = [_payload(t)["client_id"] for t in tokens]
         self.assertEqual(subs, [PRINCIPAL] * 3,
@@ -77,9 +89,8 @@ class PrincipalGoesInSubAgentGoesInClientId(unittest.TestCase):
 
     def test_a_conformant_minted_chain_verifies(self):
         _r, _c, leaf = _chain()
-        signer = _signer()
-        tokens = wire.serialize_chain(leaf, signer, principal=PRINCIPAL, aud="https://crm.example.com")
-        verified = wire.load(tokens, signer)
+        tokens = _mint02(leaf)
+        verified = wire.load(tokens, _signer(), draft="02")
         self.assertIsNotNone(verified)
 
 
@@ -89,46 +100,48 @@ class IntermediaryCannotAlterThePrincipal(unittest.TestCase):
     def test_a_child_swapping_sub_is_denied(self):
         _r, _c, leaf = _chain()
         signer = _signer()
-        tokens = wire.serialize_chain(leaf, signer, principal=PRINCIPAL, aud="https://crm.example.com")
+        tokens = _mint02(leaf)
         header_b64 = tokens[1].split(".")[0]
         tampered = _payload(tokens[1])
         tampered["sub"] = "acct:someone-else@example.com"
         forged = _resign(tampered, header_b64, signer)
-
-        # The forged token is validly SIGNED — this is not a signature test.
+        # The grandchild's commitment is repaired so that the ONLY thing wrong is the sub;
+        # the forged token is validly signed, so this is not a signature test either.
+        chain = _repair([tokens[0], forged, tokens[2]], signer)
         with self.assertRaises(wire.WireError) as ctx:
-            wire.load([tokens[0], forged, tokens[2]], signer)
+            wire.load(chain, signer, draft="02")
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.PRINCIPAL_ALTERED)
 
     def test_the_leaf_cannot_claim_a_different_principal(self):
         _r, _c, leaf = _chain()
         signer = _signer()
-        tokens = wire.serialize_chain(leaf, signer, principal=PRINCIPAL, aud="https://crm.example.com")
+        tokens = _mint02(leaf)
         header_b64 = tokens[2].split(".")[0]
         tampered = _payload(tokens[2])
         tampered["sub"] = "acct:attacker@example.com"
         forged = _resign(tampered, header_b64, signer)
         with self.assertRaises(wire.WireError) as ctx:
-            wire.load([tokens[0], tokens[1], forged], signer)
+            wire.load([tokens[0], tokens[1], forged], signer, draft="02")
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.PRINCIPAL_ALTERED)
 
     def test_an_02_chain_without_a_principal_on_the_root_is_malformed(self):
         _r, _c, leaf = _chain()
         signer = _signer()
-        tokens = wire.serialize_chain(leaf, signer, principal=PRINCIPAL, aud="https://crm.example.com")
+        tokens = _mint02(leaf)
         header_b64 = tokens[0].split(".")[0]
         stripped = _payload(tokens[0])
         stripped["sub"] = ""
         forged = _resign(stripped, header_b64, signer)
+        chain = _repair([forged, tokens[1], tokens[2]], signer)
         with self.assertRaises(wire.WireError) as ctx:
-            wire.load([forged, tokens[1], tokens[2]], signer)
+            wire.load(chain, signer, draft="02")
         self.assertEqual(ctx.exception.reason, wire.WireReasonCode.MALFORMED)
 
 
 class TheFrozenMinusOneShapeStillVerifies(unittest.TestCase):
     """The twenty published vector files are byte-stable and vendored by third parties.
-    A chain with no `client_id` keeps the -01 meaning of `sub` and is not subject to the
-    invariance check, so it must still load."""
+    The default path is the -01 algorithm: `sub` is the agent id there, differs per hop, and
+    is never compared, whether or not a token also carries `client_id`."""
 
     def test_a_legacy_chain_puts_the_agent_in_sub_and_verifies(self):
         _r, _c, leaf = _chain()
@@ -150,6 +163,35 @@ class TheFrozenMinusOneShapeStillVerifies(unittest.TestCase):
         subs = [_payload(t)["sub"] for t in tokens]
         self.assertNotEqual(len(set(subs)), 1, "precondition: the -01 subs differ")
         self.assertIsNotNone(wire.load(tokens, signer))
+
+    def test_a_01_chain_that_also_carries_client_id_verifies_under_the_default_path(self):
+        """Finding 5 of the 2026-10-07 security review: the check used to fire whenever any
+        token carried client_id, which changed the default path's behaviour."""
+        _r, _c, leaf = _chain()
+        signer = _signer()
+        tokens = wire.serialize_chain(leaf, signer)
+        for i, agent in enumerate(("orchestrator", "summarizer", "formatter")):
+            header_b64 = tokens[i].split(".")[0]
+            p = _payload(tokens[i])
+            p["client_id"] = agent
+            tokens[i] = _resign(p, header_b64, signer)
+        tokens = _repair(tokens, signer)
+        self.assertNotEqual(len({_payload(t)["sub"] for t in tokens}), 1)
+        self.assertIsNotNone(wire.load(tokens, signer))
+
+
+def _repair(tokens, signer):
+    """Recompute par_hash down the chain after an earlier token was re-signed."""
+    import hashlib
+    tokens = list(tokens)
+    for i in range(1, len(tokens)):
+        h, pl, _ = tokens[i - 1].split(".")
+        expected = wire.b64url_encode(hashlib.sha256(f"{h}.{pl}".encode("ascii")).digest())
+        p = _payload(tokens[i])
+        if p.get("par_hash") != expected:
+            p["par_hash"] = expected
+            tokens[i] = _resign(p, tokens[i].split(".")[0], signer)
+    return tokens
 
 
 if __name__ == "__main__":

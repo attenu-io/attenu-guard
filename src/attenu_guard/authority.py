@@ -259,8 +259,11 @@ class Authority:
         and `request.meet(parent)` differ there.
         """
         if other.profile != self.profile:
-            raise ValueError(f"cannot meet an authority of profile {self.profile!r} with one of "
-                             f"profile {other.profile!r}")
+            # A request under another revision's rules has no common narrowing with this
+            # authority: refused as a delegation, so Guard.delegate records spawn_denied.
+            raise AuthorityError(f"cannot meet an authority of profile {self.profile!r} with one of "
+                                 f"profile {other.profile!r}", reason="not_narrower",
+                                 detail={"profile": other.profile})
         # scopes: keep a requested scope only if self covers it; expand self's
         # own concrete scopes that other covers. Net effect: intersection with
         # wildcard awareness, never larger than either side's coverage.
@@ -365,9 +368,20 @@ class Authority:
         return self.is_narrower_than(other)
 
     # ---- policy evaluation ------------------------------------------------
-    def permits(self, scope: str, ctx: Mapping | None = None) -> Decision:
+    def permits(self, scope: str, ctx: Mapping | None = None, *,
+                totals: Mapping | None = None) -> Decision:
         """Is `scope` permitted under this authority, given a request
         context `ctx` (e.g. {"rows": 5000, "egress": "none"})?
+
+        `totals` is the TRUSTED channel for the running totals a cumulative -02 constraint
+        (`max_lifetime`, `max_subtree`) is measured over: the component holding a total
+        supplies it here, keyed by the ceiling's total field (`spend_total`,
+        `spend_subtree_total`, ...). Under the -02 profile any `*_total` key in `ctx` is
+        dropped before evaluation, as `_scope` is: the context is what an adapter fills from
+        the tool call's own arguments, and a total that the caller asserts about itself is the
+        #110 defect class (security review of 2026-10-07, finding 3). `calls` stays the
+        guard's own meter, filled by `Guard._auto_meter`, with the documented declared-quantity
+        exception.
 
         Aggregates: checks scope coverage AND every ceiling this authority
         holds, and collects every failing Reason (not just the first) so a
@@ -377,7 +391,11 @@ class Authority:
         and are treated as satisfied (mirrors v0.1: an omitted quantity
         simply isn't checked).
         """
-        ctx = ctx or {}
+        ctx = dict(ctx or {})
+        if self.profile == draft02.PROFILE_02:
+            ctx = {k: v for k, v in ctx.items() if not (isinstance(k, str) and k.endswith("_total"))}
+        if totals:
+            ctx.update(totals)
         reasons: list[Reason] = []
 
         if not self.covers_scope(scope):

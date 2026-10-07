@@ -81,7 +81,8 @@ from .audit import AuditLog, CommittedAuditError
 from .reasons import (
     Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult, Policy,
 )
-from .ceilings import ctx_field_of, is_metered
+from .ceilings import CallLimit, ctx_field_of, is_metered
+from .draft02 import MaxLifetime
 from . import params as params_mod
 
 __all__ = ["Guard", "AuthorityDenied", "DuplicateOutcomeError"]
@@ -367,7 +368,8 @@ class Guard:
         merged.update(legacy)
         return merged
 
-    def _evaluate(self, scope: str, context: Mapping, metered: bool) -> Decision:
+    def _evaluate(self, scope: str, context: Mapping, metered: bool,
+                  totals: Mapping | None = None) -> Decision:
         """The actual policy evaluation, shared verbatim by check() and
         would_allow() (would_allow just skips the audit write the caller
         does afterwards). Order mirrors v0.1: node state (integrity,
@@ -400,8 +402,10 @@ class Guard:
         # A null quantity asserts nothing, so it is undeclared too (attenu-ops#110): counting it as
         # declared let `{"rows": None}` through, since every ceiling reads null as absent.
         if self._strict and metered:
+            declared = dict(context)
+            declared.update(totals or {})
             missing = [c.key for c in auth.ceilings
-                       if is_metered(c) and context.get(ctx_field_of(c)) is None]
+                       if is_metered(c) and declared.get(ctx_field_of(c)) is None]
             if missing:
                 held = [c.key for c in auth.ceilings if is_metered(c)]
                 return Decision.deny(
@@ -410,7 +414,7 @@ class Guard:
                                    f"metered ceilings held: {held}"),
                     node=nid)
 
-        decision = auth.permits(scope, context)
+        decision = auth.permits(scope, context, totals=totals)
         if decision.determining_node is None:
             decision = Decision(decision.allowed, decision.reasons, nid)
         return decision
@@ -450,7 +454,14 @@ class Guard:
 
     # ---- enforcement ---------------------------------------------------
     def _call_limits(self):
-        return [c for c in self._node.authority.ceilings if str(c.key).startswith("max_calls")]
+        """The ceilings the guard's own per-(node, pattern) call meter feeds: a `CallLimit`,
+        or its -02 wire form, a `max_lifetime` on `max_calls`. Never a per-subtree bound: a
+        subtree total spans nodes and no node meter holds it, so filling it from this node's
+        count let three nodes make six calls under a bound of two (security review of
+        2026-10-07, finding 1). A subtree total arrives only through `check(totals=...)`."""
+        return [c for c in self._node.authority.ceilings
+                if isinstance(c, CallLimit)
+                or (isinstance(c, MaxLifetime) and str(c.key).startswith("max_calls"))]
 
     def _auto_meter(self, scope: str, ctx: dict) -> list:
         """Fill in `calls` / `calls[<pattern>]` for every held CallLimit the caller left
@@ -498,9 +509,15 @@ class Guard:
               rows=None, spend=None, egress=None,
               disposition: str | None = None,
               authorized_params=_UNSET, capture: str | None = None,
-              adapter: Mapping | None = None) -> Decision:
+              adapter: Mapping | None = None,
+              totals: Mapping | None = None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
+
+        `totals` (the -02 profile): the running totals this component holds for the node's
+        cumulative constraints, keyed by total field (`spend_total`, `calls_subtree_total`).
+        They are the only source of a total: a `*_total` key in `context` is ignored. A
+        cumulative constraint with no total held denies.
 
         Auto-metering: when this node holds a `CallLimit` and the caller did
         not supply `calls`, the guard supplies the running count for
@@ -554,7 +571,7 @@ class Guard:
             else:
                 # 2. evaluate authority/ceilings; update meters on allow.
                 filled = self._auto_meter(scope, ctx)
-                decision = self._evaluate(scope, ctx, metered)
+                decision = self._evaluate(scope, ctx, metered, totals)
                 if decision:
                     for c in filled:
                         self._chain.count_call(nid, getattr(c, "meter_key", "*"))
@@ -650,7 +667,8 @@ class Guard:
 
     def would_allow(self, scope: str, *, context: Mapping | None = None,
                     metered: bool = False, tool: str | None = None,
-                    rows=None, spend=None, egress=None) -> Decision:
+                    rows=None, spend=None, egress=None,
+                    totals: Mapping | None = None) -> Decision:
         """Pure dry-run: identical policy evaluation to `check()`, but never
         raises and — critically — writes NOTHING to the audit log. For
         planners/UIs that want to ask "could I do this?" without leaving a
@@ -658,7 +676,7 @@ class Guard:
         a `call_id` (there is nothing to bind an outcome to)."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         self._auto_meter(scope, ctx)                                  # read the meters, never consume them
-        return self._evaluate(scope, ctx, metered)
+        return self._evaluate(scope, ctx, metered, totals)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,
                       tool: str | None = None, context: Mapping | None = None,

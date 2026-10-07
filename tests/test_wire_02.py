@@ -238,7 +238,7 @@ class AuthorityRulesOnTheWire(unittest.TestCase):
         root = Guard.issue("o", Authority({"User.Read", "repo:status"}, [], ttl=60, profile="02"), max_depth=3)
         child = root.delegate("c", Authority({"repo:status"}, [], ttl=30, profile="02"), task="t")
         tokens = _mint(child)
-        v = wire.load(tokens, _signer(), draft="02")
+        v = wire.load(tokens, _signer(), draft="02", audience=AUD)
         self.assertEqual(sorted(v.leaf_authority.scopes), ["repo:status"])
         self.assertTrue(v.permits("repo:status"))
         self.assertFalse(v.permits("User.Read"))
@@ -283,10 +283,10 @@ class AuthorityRulesOnTheWire(unittest.TestCase):
         _reject(self, wider, WireReasonCode.NOT_NARROWER)
 
     def test_a_cumulative_constraint_with_no_total_held_denies_at_step_8(self):
-        v = wire.load(_mint(), _signer(), draft="02")
+        v = wire.load(_mint(), _signer(), draft="02", audience=AUD)
         self.assertFalse(v.permits("crm.read", {"rows": 1, "spend": 1}), "no `calls` total: deny")
-        self.assertTrue(v.permits("crm.read", {"rows": 1, "spend": 1, "calls": 2}))
-        self.assertFalse(v.permits("crm.read", {"rows": 1, "spend": 1, "calls": 3}))
+        self.assertTrue(v.permits("crm.read", {"rows": 1, "spend": 1}, totals={"calls": 2}))
+        self.assertFalse(v.permits("crm.read", {"rows": 1, "spend": 1}, totals={"calls": 3}))
 
     def test_rank_ordering_rules(self):
         tokens = self._leaf_detail(_mint(), lambda det: [c.__setitem__("order", ["none", "any"])
@@ -322,8 +322,8 @@ class AuthorityRulesOnTheWire(unittest.TestCase):
 
     def test_a_single_unimplemented_constraint_type_fails_closed_not_malformed(self):
         tokens = self._leaf_detail(_mint(), lambda det: det["constraints"].append({"key": "quota", "cap": 5}))
-        v = wire.load(tokens, _signer(), draft="02")
-        decision = v.permits("crm.read", {"rows": 1, "spend": 1, "calls": 1})
+        v = wire.load(tokens, _signer(), draft="02", audience=AUD)
+        decision = v.permits("crm.read", {"rows": 1, "spend": 1}, totals={"calls": 1})
         self.assertFalse(decision)
         self.assertEqual(decision.reasons[0].code, "unknown_constraint")
 

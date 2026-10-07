@@ -87,11 +87,13 @@ def classify_scope(scope) -> str | None:
     invalid and the token carrying it is malformed). No case folding at any step."""
     if not isinstance(scope, str):
         return None
-    if _LITERAL_RE.match(scope):
+    # fullmatch, never match: `$` accepts a string ending in a newline, so "crm.read\n" would
+    # classify as a literal and verify under crm.* (security review of 2026-10-07, finding 4).
+    if _LITERAL_RE.fullmatch(scope):
         return LITERAL
-    if _WILDCARD_RE.match(scope):
+    if _WILDCARD_RE.fullmatch(scope):
         return WILDCARD
-    if _OPAQUE_RE.match(scope):
+    if _OPAQUE_RE.fullmatch(scope):
         return OPAQUE
     return None
 

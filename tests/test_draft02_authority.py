@@ -119,13 +119,14 @@ class CumulativeConstraintsDenyWithoutATotal(unittest.TestCase):
         decision = a.permits("a.b", {"spend": 10})
         self.assertFalse(decision)
         self.assertIn("no running total", decision.reasons[0].message)
-        self.assertTrue(a.permits("a.b", {"spend_total": 90}))
-        self.assertFalse(a.permits("a.b", {"spend_total": 101}))
+        self.assertTrue(a.permits("a.b", {"spend": 10}, totals={"spend_total": 90}))
+        self.assertFalse(a.permits("a.b", {"spend": 10}, totals={"spend_total": 101}))
+        self.assertFalse(a.permits("a.b", {"spend_total": 90}), "a total in the caller context is ignored")
 
     def test_a_subtree_bound_reads_its_own_total(self):
         a = A02({"a.b"}, [d.MaxSubtree("spend", 100)])
-        self.assertFalse(a.permits("a.b", {"spend_total": 1}))
-        self.assertTrue(a.permits("a.b", {"spend_subtree_total": 100}))
+        self.assertFalse(a.permits("a.b", {}, totals={"spend_total": 1}))
+        self.assertTrue(a.permits("a.b", {}, totals={"spend_subtree_total": 100}))
 
     def test_a_per_action_max_still_asserts_nothing_when_absent(self):
         self.assertTrue(A02({"a.b"}, [d.Max("spend", 100)]).permits("a.b", {}))
@@ -219,8 +220,9 @@ class ProfilesDoNotMix(unittest.TestCase):
         a02 = A02({"a.b"}, [RowLimit(1)], 10)
         self.assertFalse(a01.is_narrower_than(a02))
         self.assertFalse(a02.is_narrower_than(a01))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(AuthorityError) as cm:
             a01.meet(a02)
+        self.assertEqual(cm.exception.reason, "not_narrower")
         with self.assertRaises(ValueError):
             Authority({"a.b"}, profile="03")
 

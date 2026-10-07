@@ -56,7 +56,7 @@ import base64
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Mapping, Protocol, runtime_checkable
 
 from .authority import Authority
@@ -469,14 +469,24 @@ def _is_audience(aud) -> bool:
     return isinstance(aud, list) and bool(aud) and all(isinstance(a, str) for a in aud)
 
 
+#: The confirmation members a -02 `cnf` may bind the holder key with: a JWK thumbprint (RFC
+#: 9449 DPoP), a JWK (RFC 7800), or a certificate thumbprint (RFC 8705 mTLS, which Section 7
+#: of the draft allows). An object carrying none of them confirms nothing.
+_CNF_MEMBERS = ("jkt", "jwk", "x5t#S256")
+
+
+def _is_cnf(value) -> bool:
+    return isinstance(value, Mapping) and any(m in value for m in _CNF_MEMBERS)
+
+
 def _cnf_for(cnf, node):
     """The `cnf` claim for one hop: a mapping used as-is, or a callable given the node
     (each hop has its own holder key, so a chain usually needs one `cnf` per hop)."""
     value = cnf(node) if callable(cnf) else cnf
-    if not isinstance(value, Mapping) or not value:
+    if not _is_cnf(value):
         raise WireError(WireReasonCode.MALFORMED,
-                        f"draft -02 requires a non-empty cnf object on every token; got {value!r} "
-                        f"for {getattr(node, 'agent_id', node)!r}")
+                        f"draft -02 requires a cnf object carrying one of {list(_CNF_MEMBERS)} on "
+                        f"every token; got {value!r} for {getattr(node, 'agent_id', node)!r}")
     return dict(value)
 
 
@@ -683,19 +693,27 @@ class VerifiedChain:
     audience: object = None
 
     def permits(self, scope: str, ctx: Mapping | None = None, *,
-                audience: str | None = None) -> Decision:
+                audience: str | None = None, totals: Mapping | None = None) -> Decision:
         """Authorize `scope` (with request context `ctx`) against the LEAF
         authority — draft {{verify}} step 8. Delegates entirely to
         `Authority.permits`; no policy logic is reimplemented here. Under the
         -02, `audience` names this Enforcement Point and is checked against
         DT_n's `aud` first (reason `audience_mismatch`); a cumulative
         constraint whose running total `ctx` does not carry denies (draft02)."""
-        if audience is not None and self.draft == draft02.PROFILE_02:
+        if self.draft == draft02.PROFILE_02:
+            # Step 8 is not opt-in: an Enforcement Point that never said who it is cannot have
+            # confirmed that DT_n was issued for it (security review of 2026-10-07, finding 2).
+            audience = audience if audience is not None else self.audience
+            if audience is None:
+                return Decision.deny(Reason(WireReasonCode.AUDIENCE_MISMATCH, "aud",
+                                            self.payloads[-1].get("aud"), None,
+                                            "no audience was supplied at load or at this call; "
+                                            "DT_n's aud cannot have been checked"))
             if not _names_audience(self.payloads[-1].get("aud"), audience):
                 return Decision.deny(Reason(WireReasonCode.AUDIENCE_MISMATCH, "aud",
                                             self.payloads[-1].get("aud"), audience,
                                             "DT_n's aud does not identify this Enforcement Point"))
-        return self.leaf_authority.permits(scope, ctx)
+        return self.leaf_authority.permits(scope, ctx, totals=totals)
 
 
 def _names_audience(aud, audience: str) -> bool:
@@ -724,10 +742,9 @@ def _check_token_02(header: Mapping, payload: Mapping, i: int) -> Authority:
     for claim in ("iat", "exp"):
         if not _is_json_number(payload.get(claim)):
             raise bad(f"{claim} must be a number")
-    cnf = payload.get("cnf")
-    if not isinstance(cnf, Mapping) or not cnf:
-        raise bad("cnf must be a non-empty object binding the token to its holder's key "
-                  "(draft -02 Sections 3 and 7)")
+    if not _is_cnf(payload.get("cnf")):
+        raise bad(f"cnf must be an object carrying one of {list(_CNF_MEMBERS)}, binding the token "
+                  "to its holder's key (draft -02 Sections 3 and 7)")
     for claim, value in payload.items():
         if type(value) is int:
             try:
@@ -870,6 +887,12 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
     `accepted_algs` given under "01" is honoured too; it is never implied there.
     """
     draft02.check_profile(draft)
+    if accepted_algs is not None:
+        # A configuration error, not a chain outcome: a bare string would give substring
+        # membership ("S256" in "HS256"), so only a list or tuple of strings is a list.
+        if isinstance(accepted_algs, (str, bytes)) or not isinstance(accepted_algs, (list, tuple)) \
+                or not all(isinstance(a, str) for a in accepted_algs):
+            raise TypeError(f"accepted_algs must be a list or tuple of algorithm names; got {accepted_algs!r}")
     if not tokens:
         raise WireError(WireReasonCode.MALFORMED, "empty token chain")
 
@@ -899,35 +922,6 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
             raise WireError(WireReasonCode.SIGNATURE_INVALID,
                             f"token[{i}] signature does not verify")
 
-    # ---- principal invariance (draft -02) ---------------------------------
-    # R5 of draft-reece-wimse-cross-org-delegation asks for two things: convey
-    # the on-behalf-of principal along the chain, AND let a relying party verify
-    # that intermediaries did not alter it. par_hash already makes a child
-    # unable to re-parent onto a different token, but nothing stopped a child
-    # from carrying a DIFFERENT `sub` than its parent, so the second half of R5
-    # was not met. It is met here.
-    #
-    # Under the -02 profile the check is unconditional (every token carries
-    # `client_id` by then, or parsing refused it). Under the default profile a
-    # chain is -02 shaped when any token carries `client_id` (the claim that
-    # moved the agent id out of `sub`). Chains minted before that, and the
-    # frozen -01 vector set, carry no `client_id` and keep the -01 meaning of
-    # `sub`, so they are not subject to this check and still verify.
-    if draft == draft02.PROFILE_02 or any("client_id" in payload for _h, payload, _s, _si in parsed):
-        root_sub = parsed[0][1].get("sub")
-        if not isinstance(root_sub, str) or not root_sub:
-            raise WireError(
-                WireReasonCode.MALFORMED,
-                "chain carries client_id (draft -02 claim layout) so DT_0 MUST "
-                "carry a non-empty 'sub' naming the accountable principal")
-        for i, (_h, payload, _s, _si) in enumerate(parsed):
-            if payload.get("sub") != root_sub:
-                raise WireError(
-                    WireReasonCode.PRINCIPAL_ALTERED,
-                    f"token[{i}] sub {payload.get('sub')!r} != DT_0 sub "
-                    f"{root_sub!r}; the accountable principal MUST be identical "
-                    f"in every token of the chain")
-
     # ---- step 2: par_hash byte-commitment (constant-time, over hex) -------
     if "par_hash" in parsed[0][1]:
         raise WireError(WireReasonCode.MALFORMED,
@@ -948,6 +942,24 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
             raise WireError(WireReasonCode.PAR_HASH_MISMATCH,
                             f"token[{i}] par_hash does not match parent token[{i-1}]'s "
                             f"signing input (splice, wrong parent, or tampered parent)")
+
+    # ---- step 3 (draft -02): principal invariance -------------------------------
+    # R5 of draft-reece-wimse-cross-org-delegation asks for two things: convey
+    # the on-behalf-of principal along the chain, AND let a relying party verify
+    # that intermediaries did not alter it. par_hash (step 2, above, so that a
+    # broken commitment is named first) stops re-parenting; this stops a child
+    # carrying a different `sub`. It runs under the -02 profile only: the default
+    # profile is the -01 algorithm unchanged, where `sub` is the agent id and
+    # differs per hop, whether or not a token also carries `client_id`.
+    if draft == draft02.PROFILE_02:
+        root_sub = parsed[0][1].get("sub")
+        for i, (_h, payload, _s, _si) in enumerate(parsed):
+            if payload.get("sub") != root_sub:
+                raise WireError(
+                    WireReasonCode.PRINCIPAL_ALTERED,
+                    f"token[{i}] sub {payload.get('sub')!r} != DT_0 sub "
+                    f"{root_sub!r}; the accountable principal MUST be identical "
+                    f"in every token of the chain")
 
     # ---- step 3: del_depth / del_max_depth ---------------------------------
     root_payload = parsed[0][1]
@@ -970,11 +982,33 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
     # ---- step 4: subsumption (reuse Authority.is_narrower_than) -----------
     authorities = authorities_02 if authorities_02 is not None else \
         [_authority_from_payload(p) for (_h, p, _s, _si) in parsed]
-    for i in range(1, len(authorities)):
-        if not authorities[i].is_narrower_than(authorities[i - 1]):
-            raise WireError(WireReasonCode.NOT_NARROWER,
-                            f"token[{i}] authority is not narrower than token[{i-1}]'s "
-                            f"(widened scope, loosened/dropped ceiling, or looser ttl)")
+    if draft == draft02.PROFILE_02:
+        # Rules 1, 2, 3 and 5 here; rule 4 (exp) is step 5, so a later child expiry is
+        # `expired`, never `not_narrower`. The library's ttl is a derived quantity (exp - iat)
+        # the -02 does not compare, so it is left out of this step.
+        bound = root_payload.get("del_max_depth")
+        for i in range(1, len(authorities)):
+            child, parent = authorities[i], authorities[i - 1]
+            if not replace(child, ttl=None).is_narrower_than(replace(parent, ttl=None)):
+                raise WireError(WireReasonCode.NOT_NARROWER,
+                                f"token[{i}] authority is not narrower than token[{i-1}]'s "
+                                f"(widened scope, or a loosened, dropped or re-typed constraint)")
+            own = parsed[i][1].get("del_max_depth")
+            if own is not None:
+                if not isinstance(own, int) or isinstance(own, bool) or own <= 0:
+                    raise WireError(WireReasonCode.MALFORMED,
+                                    f"token[{i}].del_max_depth must be a positive integer")
+                if own > bound:
+                    raise WireError(WireReasonCode.NOT_NARROWER,
+                                    f"token[{i}] del_max_depth {own} exceeds its parent's {bound} "
+                                    "(subsumption rule 5)")
+                bound = own
+    else:
+        for i in range(1, len(authorities)):
+            if not authorities[i].is_narrower_than(authorities[i - 1]):
+                raise WireError(WireReasonCode.NOT_NARROWER,
+                                f"token[{i}] authority is not narrower than token[{i-1}]'s "
+                                f"(widened scope, loosened/dropped ceiling, or looser ttl)")
 
     # ---- step 5: time -------------------------------------------------------
     prev_exp = None
