@@ -697,9 +697,12 @@ re-run them. Each carries the claim boundary its author stated, and nothing wide
   run by a second delegation protocol, not by a general-purpose verifier. Stated by its author
   as a conformance score with three gaps declared, nothing wider. The score was taken at Cred SDK
   commit `4a24376` (`cred-ninja/sdk` `4a24376638764ab93fcfbf981ab62635cbb83264`), confirmed by its
-  author on 2026-10-06. The retained result is
-  `conformance/asor-delegation-chain/results/2026-09-03-sdk-4a24376.json` in `cred-ninja/protocol`
-  PR #6, open as of 2026-10-07; a re-run at SDK `ff00421` on 2026-10-06 is in the same PR.
+  author on 2026-10-06; the retained result is
+  `conformance/asor-delegation-chain/results/2026-09-03-sdk-4a24376.json`. **Update, 2026-10-07:**
+  after Cred implemented all six constraint types and a strict JSON decoder, the same harness scores
+  **20 of 20** (0 FAIL, 0 GAP) at Cred SDK `a41366e` (`a41366e1eb505b6c8a3b6dcc1d39c6b913e38b2c`),
+  retained as `conformance/asor-delegation-chain/results/2026-10-07-sdk-a41366e.json` on
+  `cred-ninja/protocol` main at `ea5a511`. Both results are in that repository, merged.
 - **@safal207, 2026-09-06** — a standalone Node.js verifier that imports no attenu-guard
   runtime scored the twenty **Delegation Token vectors** (`tests/vectors/`: `valid_chain` and the
   six `valid_jcs_*` canonicalisation variants that must verify, thirteen `reject_*` chains a
