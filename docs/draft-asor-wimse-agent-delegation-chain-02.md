@@ -56,27 +56,6 @@ informative:
   Biscuit:
     title: "Biscuit Authorization Token Specification, v3"
     target: https://doc.biscuitsec.org/reference/specifications.html
-  BoundedCounters:
-    title: "Extending Eventually Consistent Cloud Databases for Enforcing Numeric Invariants"
-    author:
-      -
-        ins: V. Balegas
-      -
-        ins: D. Serra
-      -
-        ins: S. Duarte
-      -
-        ins: C. Ferreira
-      -
-        ins: R. Rodrigues
-      -
-        ins: N. Preguica
-      -
-        ins: M. Shapiro
-      -
-        ins: M. Najafzadeh
-    date: 2015
-    seriesinfo: arXiv 1503.09052
 --- abstract
 
 AI agents increasingly delegate tasks to other agents. Each delegation should
@@ -171,7 +150,7 @@ Principal:
 
 Acting Agent:
 : The agent that holds, and acts under, one Delegation Token. Carried in
-  "client_id", and different at each hop.
+  "client_id", which names the agent acting at each hop.
 
 Authority:
 : The set of permitted scope values carried by an "agent_delegation"
@@ -268,9 +247,8 @@ is accountable for what the chain does, and which agents took part. The first
 is answered by "sub", which names the Principal and is invariant along the
 chain: a child token is issued under the same grant as its parent, so it names
 the same Principal, and a token that names a different one is not a member of
-the chain. The second is answered by "client_id", which names the Acting Agent
-at each hop and therefore changes at each hop. Together they make a chain
-auditable as well as verifiable.
+the chain. The second is answered by "client_id", which names the agent acting
+at each hop. Together they make a chain auditable as well as verifiable.
 
 The "par_hash" commitment ({{chain-linkage}}) already prevents a child from
 being re-parented onto a different token. It does not, by itself, prevent a
@@ -278,6 +256,12 @@ child from carrying a different "sub" than its parent, because the child is a
 new token with its own payload. The invariance check in step 3 of {{verify}} is
 what closes that gap, and it is a comparison of two strings, not new
 machinery.
+
+This revision defines no transition mode for chains shaped by the previous
+revision. A chain whose tokens carry no "client_id" or no "cnf", or whose
+"aud" is null, is malformed under this revision. A verifier that also accepts
+such chains under the previous revision's rules does so outside this document
+and reports which revision's rules it applied.
 
 # Authority Representation {#authority}
 
@@ -341,7 +325,7 @@ One consequence of classifying by bytes alone is stated here so that
 deployments can plan for it: a scope string issued by an authorization server
 that happens to match "literal-scope" is treated as a literal scope, and a
 wildcard over its prefix covers it. A deployment that needs such a scope to
-match exactly SHOULD NOT grant a wildcard over its prefix; doing so also gives
+match exactly should not grant a wildcard over its prefix; doing so also gives
 up wildcard coverage for every other scope under that prefix. This document
 provides no registry by which a verifier could tell a dotted provider string
 from a structured literal, and does not add one.
@@ -354,7 +338,10 @@ type; see {{detail-types}} for how the relation is bound to the type.
 The "constraints" member is an array of objects. Each object contains a
 REQUIRED "key" member, a string identifying the constrained dimension, and
 exactly one typed constraint value, whose member name is the constraint type.
-This document defines:
+A constraint object is closed: its members are "key", that one type member,
+and any member the type's definition adds ("order" for "rank"). A constraint
+object carrying any other member is malformed, and a verifier MUST reject the
+token. This document defines:
 
 - "max" : a number. The value of the associated quantity in one authorized
   action MUST NOT exceed it (e.g. {"key": "max_rows", "max": 5000}). It is
@@ -393,7 +380,11 @@ are distinct constraint types because they are enforced by different machinery:
 a per-action bound is decided from the request alone, a per-lifetime bound
 needs a running total held by the component that authorizes actions under that
 token, and a per-subtree bound needs a total that spans tokens. A producer MUST
-NOT emit a cumulative bound under the "max" type.
+NOT emit a cumulative bound under the "max" type. A verifier that holds only
+the chain checks that a child's per-lifetime and per-subtree bounds are no
+wider than its parent's ({{subsumption}}); whether the spend is under the
+bound is checked only where the running total is held, and an enforcement
+point that has no access to that total denies ({{verify}}, step 8).
 
 Within one authorization detail object, the pair (key, type) identifies a
 constraint. A detail MUST NOT carry two constraints with the same key and the
@@ -458,9 +449,15 @@ A verifier MUST evaluate every authorization detail object in every DT_i, or
 reject the token. A detail whose type the verifier does not implement is one it
 cannot evaluate, and the token MUST be rejected as malformed; a verifier that
 skips a detail it does not understand has reported success on a token it did
-not read. For a chain carrying details of more than one type, subsumption is
-evaluated per type: for each type present in DT_i, DT_{i-1} MUST carry a detail
-of that type and that type's covering relation MUST hold between them. A
+not read. The verifier classifies detail types when it parses a token, before
+step 1 of {{verify}}, so that DT_0 is subject to the rule as every other token
+is. A type other than "agent_delegation" that appears in two details of one
+token is malformed unless that type's definition says otherwise. For a chain
+carrying details of more than one type, subsumption is evaluated per type: for
+each type present in DT_i, DT_{i-1} MUST carry a detail of that type and that
+type's covering relation MUST hold between them; and a child MUST NOT omit a
+detail type its parent carries, since the omitted detail may have expressed a
+restriction, so a verifier MUST treat such a chain as not subsumed. A
 resource server SHOULD declare the types it implements in the
 "authorization_details_types_supported" member of its protected resource
 metadata ({{RFC9728}}, Section 2), so that an issuer can learn which chains it will accept.
@@ -528,11 +525,12 @@ following, denying on the first failure:
 3. Check chain shape. Depth: DT_0.del_depth == 0; DT_i.del_depth == i; n <
    DT_0.del_max_depth. Principal: DT_0.sub is a non-empty string, and for every
    i, DT_i.sub is identical to DT_0.sub. Otherwise deny.
-4. For each i > 0, verify DT_i.Authority <= DT_{i-1}.Authority per {{subsumption}},
-   having first confirmed per {{detail-types}} that every authorization detail
-   in DT_i is of a type the verifier implements. Any violation: deny.
+4. For each i > 0, verify DT_i.Authority <= DT_{i-1}.Authority under rules 1,
+   2, 3, and 5 of {{subsumption}}. A detail of a type the verifier does not
+   implement was rejected as malformed when the token was parsed
+   ({{detail-types}}). Any violation: deny.
 5. Check time: for every i, nbf (if present) <= now <= exp, and exp is monotonic
-   non-increasing along the chain. Otherwise deny.
+   non-increasing along the chain (rule 4 of {{subsumption}}). Otherwise deny.
 6. Verify holder binding: the presenter proves possession of the key in DT_n.cnf
    via a valid DPoP proof {{RFC9449}} bound to this request. Otherwise deny.
 7. Check revocation: consult the Token Status List {{I-D.ietf-oauth-status-list}}
@@ -547,10 +545,15 @@ following, denying on the first failure:
    ({{revocation}}) and is not denied on that account.
 8. Authorize A against DT_n: confirm that the Enforcement Point is identified by
    DT_n's "aud" as {{RFC9068}} Section 4 requires; then check A against
-   DT_n.Authority, its scope and every per-action constraint ("max", "min",
-   "one_of", "not_one_of", "prefix", "rank"), and, where the Enforcement Point
-   holds the running total for DT_n, every "max_lifetime" constraint. Permit
-   only if A is within it.
+   DT_n.Authority: its scope, every per-action constraint ("max", "min",
+   "one_of", "not_one_of", "prefix", "rank"), and every cumulative constraint
+   ("max_lifetime", "max_subtree"). A cumulative constraint is checked where
+   the running total it is measured over is held: by the Enforcement Point
+   itself, or by a component that holds that total and authorizes A on the
+   Enforcement Point's behalf ({{fanout}}). An Enforcement Point that neither
+   holds the running total for a cumulative constraint DT_n carries nor has A
+   authorized by a component that does MUST deny. Permit only if A is within
+   DT_n.Authority on every count.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The order of
@@ -577,9 +580,13 @@ Verifier may and may not conclude.
 | No token in the chain is revoked, within the status list's time to live | yes, if the list is reachable | yes, if the list is reachable |
 | The presenter holds the key DT_n is bound to | no | yes |
 | A specific action is permitted | no | yes |
-| A per-lifetime total is within bound | no | only where the total is held |
-| A per-subtree total is within bound | no | no ({{fanout}}) |
+| A per-lifetime total is within bound | no | only where the total is held; otherwise step 8 denies |
+| A per-subtree total is within bound | no | only where the total is held ({{fanout}}); otherwise step 8 denies |
 {: #table-conclusions title="What a Verifier may conclude, by the steps it performed"}
+
+The "subset" row holds for the constraint types the Verifier implements. A
+constraint type it does not implement fails closed under the rule in
+{{subsumption}}, so it can turn a "yes" into a "no" and never the reverse.
 
 A Verifier that has not performed step 6 has established that the chain is
 valid, not that the party presenting it is its holder, and MUST NOT report the
@@ -600,16 +607,16 @@ not carried in any token and have no effect on the wire.
 
 | Name | Step | Meaning |
 |---|---|---|
-| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, or a detail type is not implemented |
+| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, an integer is outside the range a binary64 number represents exactly, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, or a detail type is not implemented |
 | non_canonical | parse | a decoded header or payload is not the JCS serialization of what it parses to |
 | duplicate_member | parse | a JSON object repeats a member name |
-| non_finite | parse | a number is not finite or cannot be represented in JCS |
+| non_finite | parse | a number is NaN or an infinity, which JSON and JCS do not represent |
 | signature_invalid | 1 | a signature does not verify, the algorithm is not on the verifier's list, the algorithm differs from the one configured for the key, or DT_0 is not under a trusted root key |
 | par_hash_mismatch | 2 | a child's commitment does not match the parent presented with it |
 | depth_invalid | 3 | a del_depth is out of sequence or the chain exceeds del_max_depth |
 | principal_altered | 3 | a token's "sub" differs from DT_0's |
-| not_narrower | 4 | a child's Authority is not subsumed by its parent's |
-| expired | 5 | a token is outside its validity window or its expiry exceeds its parent's |
+| not_narrower | 4 | a child's Authority is not subsumed by its parent's under rules 1, 2, 3, or 5 |
+| expired | 5 | a token is outside its validity window, or its expiry exceeds its parent's (rule 4) |
 | holder_binding_failed | 6 | the proof of possession is absent or invalid for this request |
 | revoked | 7 | a token in the chain is revoked |
 | status_unknown | 7 | a status reference is present and its current status cannot be established |
@@ -629,7 +636,10 @@ only if that chain permits it. An Enforcement Point MUST NOT combine the
 Authority of tokens from different chains, and a chain that fails verification
 has no effect on the evaluation of another chain the same agent presents. A
 presenter holding several valid chains chooses which to present; one valid
-chain that permits the action suffices.
+chain that permits the action suffices. {{I-D.jackson-wimse-evaluation}}
+treats the same situation from the verifier's side, in its rule that each
+delegation path is evaluated independently and fails closed on its own; this
+document cites that rule informatively and does not depend on it.
 
 ## Open Issue: Trust-Anchor Provenance {#provenance}
 
@@ -753,7 +763,9 @@ deployment that enforces aggregate budgets uses one of them:
   checks and debits atomically at authorization time. A ledger that is read at
   authorization and debited afterwards, or debited by more than one writer
   without coordination, does not close the hole; the check and the debit are
-  one operation or the budget is not enforced.
+  one operation or the budget is not enforced. The online Delegation Server of
+  {{I-D.sweeney-wimse-credential-delegation}} is one way to provide shared
+  accounting.
 - Coordinated allocation with local enforcement: a single-writer allocator
   reserves disjoint allocations for the children (for example 60 units to the
   child acting at gateway A and 40 to the child acting at gateway B, leaving
@@ -763,9 +775,7 @@ deployment that enforces aggregate budgets uses one of them:
   against three hazards that a signed ceiling does not: duplicate allocation of
   the same units to two children; local rollback, where an enforcement point
   loses or reverts a debit it has already honored; and premature reuse of
-  allocated units before the action that consumed them is settled. The
-  bounded-counter construction of {{BoundedCounters}} is one treatment of the
-  local-enforcement half of this shape.
+  allocated units before the action that consumed them is settled.
 
 Either way, the division is the one this document is built on: the offline
 chain bounds each action and produces the audit trail; the online half holds
@@ -867,24 +877,32 @@ which runs the verification algorithm and mints nothing. At the time of
 posting, both implement steps 1 to 5 of the algorithm as the previous revision
 of this document stated them, under a single-signer trust model, and neither
 implements step 6 (holder binding) or step 7 (status list), which both document
-as not performed. Of the changes this revision makes
-({{changes}}), the principal invariance check of step 3 is implemented in the
-Python library on a development branch; the algorithm list of step 1, the
-opaque scope form, the two new constraint types, the "order" member of "rank",
-the per-type detail rule, and the audience check are not implemented in either
-library at the time of posting. The Python library ships the test vectors of
-{{vectors}} and regenerates them on every test run; the TypeScript library
-runs them in its test suite.
+as not performed. Of step 8, both authorize an action against the leaf
+Authority, its scope and its per-action constraints, and the Python library
+meters a per-token call count; the audience check and the denial for a
+cumulative constraint whose total is not held are not implemented. Of the
+changes this revision makes ({{changes}}), the principal invariance check of
+step 3 is implemented in the Python library on a development branch. Not
+implemented in either library at the time of posting: the accepted-algorithm
+list of step 1 (both deny a header "alg" that differs from the configured
+signer's, and neither holds a list); the opaque scope form; the two cumulative
+constraint types (the Python library's call-count ceiling emits a cumulative
+bound under "max", which this revision forbids); the "order" member of "rank";
+the one-per-(key, type) rule (both reject a second constraint on a key whatever
+its type); the per-type detail rule; and the audience check. The Python library
+ships the test vectors of {{vectors}} and regenerates them on every test run;
+the TypeScript library runs them in its test suite.
 
 Two implementations independent of the author's code have run the twenty test
 vectors of the previous revision and published their results, as reported by
-their authors: the conformance harness of the Cred delegation protocol, which
-reported 17 of 20 with three declared gaps at a pinned commit of its SDK, and a
-standalone Node.js verifier that imports no code from either reference
-implementation, which reported 20 of 20 with verdicts and declared reasons both
-matching. Neither
-result is reproduced here, and neither author has reported a run against the
-vectors of this revision.
+their authors: the conformance harness of the Cred delegation protocol, whose
+published result of 2026-10-07 reports 20 of 20, with no failures and no
+declared gaps, at a pinned commit of the Cred SDK; and a standalone Node.js
+verifier that imports no code from either reference implementation, which
+reported 20 of 20 with verdicts and declared reasons both matching, under the
+boundary its author states: the vectors' HS256 single-signer, public-test-key
+profile, and steps 1 to 5 only. Neither result is reproduced here, and neither
+author has reported a run against the vectors of this revision.
 
 --- back
 
@@ -901,8 +919,8 @@ acknowledged. The "min" constraint type was added after Amr Hassan, author of
 floor tightened upward; the duration-typed "tenureMin" axis of that document is
 the motivating example.
 
-The following contributions were made on the WIMSE mailing list in review of
-the -01 and shaped this revision. Naming a contributor records where their
+The following contributions were made in review of the -01 and shaped this
+revision. Naming a contributor records where their
 contribution landed; it does not imply that they endorse this document.
 
 Wes Jackson: the binding of the chain to an accountable Principal in "sub",
@@ -915,8 +933,9 @@ distinct registered types ({{constraints}}, {{fanout}}); the atomic
 check-and-debit requirement on shared accounting and the single-writer
 constraint on delegation-time allocation ({{fanout}}); root issuance as the
 policy decision point ({{root-issuance}}); the scope-vocabulary limit
-({{vocabulary}}); and the questions that led to the process-every-detail rule
-and the per-type interoperability statement ({{detail-types}}).
+({{vocabulary}}); the questions that led to the process-every-detail rule
+and the per-type interoperability statement ({{detail-types}}); and the
+per-path evaluation rule answered in {{several-chains}}.
 
 Iman Schrock: the two-gateway example in which two verified chains overspend a
 root ceiling, the distinction between allocation, which needs coordination,
@@ -936,10 +955,8 @@ re-issued, answered in {{chain-linkage}}, and the counting of child
 re-issuance in the refresh rate ({{latency}}).
 
 Kieran Sweeney: the proposal to admit scope strings issued by OAuth providers,
-which became the opaque scope form ({{scopes}}); the observation that a
-chain-only verifier cannot see a running total, stated in {{constraints}} and
-{{without-request}}; and the observation that a rank's ordering has to travel
-on the wire or in a registry, answered by the "order" member ({{constraints}}).
+which became the opaque scope form, and the vectors that exercise it
+({{scopes}}, {{vectors}}).
 
 Venkata Karunakar Uppalapati: the rule that a verifier rejects a chain carrying
 an algorithm outside its local policy even where the signature verifies, now
@@ -951,19 +968,19 @@ trust-anchor provenance gap recorded in {{provenance}}.
 A permissively licensed reference implementation (the "attenu-guard" library)
 and a set of offline-verification test vectors (chains that MUST verify and
 adversarial chains that MUST be rejected, each with the outcome name of
-{{outcomes}} it is expected to produce) accompany this draft. They are intended
+{{outcomes}} it is expected to produce) are published with this draft. They are intended
 for interoperability testing across independent implementations.
 
 The twenty vector files published with the -01 are unchanged by this revision
 and remain available under their -01 names: independent implementations have
 vendored them, and a byte-stable set is worth more than a corrected one. They
 do not conform to this revision: their tokens carry no "cnf" and no
-"client_id", and their "aud" is null. A second, separately named vector set
-accompanies this revision. It carries "cnf", "client_id", and a well-formed
+"client_id", and their "aud" is null. The vector set published with this revision is a
+second, separately named set. It carries "cnf", "client_id", and a well-formed
 "aud" on every token, and adds vectors for: a chain in which a child's "sub"
 differs from the root's (principal_altered); a child presented with a
-re-issued parent rather than the instance it commits to (par_hash_mismatch),
-contributed by Jijie Wei; a wildcard scope over an opaque child scope and an
+re-issued parent rather than the instance it commits to (par_hash_mismatch);
+a wildcard scope over an opaque child scope and an
 opaque scope over a wildcard child, both not_narrower, and an opaque scope
 covering a byte-identical child, which verifies, contributed by Kieran Sweeney;
 a detail carrying two constraints with the same key and type (malformed); a
@@ -1004,6 +1021,11 @@ claim layout.
   a child's ordering must be identical to its parent's.
 - A detail may not carry two constraints with the same key and type; a
   verifier rejects a token that does.
+- Three closure rules are stated as MUSTs: a token carries exactly one
+  "agent_delegation" detail; that detail carries no members other than
+  "type", "scopes", and "constraints"; and a constraint object carries no
+  members other than "key", its type member, and the members its type
+  defines. A token that breaks any of them is malformed.
 - The covering relation is bound to the authorization detail type; a verifier
   must evaluate every detail or reject the token, and an unimplemented type is
   a rejection; a resource server is pointed to RFC 9728 to declare the types it
@@ -1034,8 +1056,8 @@ claim layout.
   consideration.
 - draft-klrc-aiagent-auth, now replaced, is re-pointed to draft-ietf-wimse-aims
   in the introduction and the acknowledgments; draft-jackson-wimse-evaluation,
-  draft-ietf-wimse-identifier, RFC 6749, RFC 7942, RFC 9728, and the
-  bounded-counter paper are added as references.
+  draft-ietf-wimse-identifier, RFC 6749, RFC 7942, and RFC 9728 are added as
+  references.
 - An Implementation Status section is added.
 - The test-vector appendix records that the -01 set stays byte-stable and does
   not conform to this revision, and describes the second set that does.
