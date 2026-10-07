@@ -269,7 +269,9 @@ and reports which revision's rules it applied.
 
 For this profile, Authority is expressed by an authorization detail object
 {{RFC9396}} whose "type" is "agent_delegation". A Delegation Token MUST carry
-exactly one authorization detail object of that type. The object contains a
+exactly one authorization detail object, and its type MUST be
+"agent_delegation"; a token carrying a second detail, or a detail of any other
+type, is malformed ({{detail-types}}). The object contains a
 REQUIRED "scopes" member: an array of strings, where each string names one
 permitted operation. An empty array conveys no permitted operation. Numeric and
 enumerated bounds ("ceilings") that {{RFC9396}} does not standardize are carried
@@ -453,14 +455,11 @@ cannot evaluate, and the token MUST be rejected as malformed; a verifier that
 skips a detail it does not understand has reported success on a token it did
 not read. The verifier classifies detail types when it parses a token, before
 step 1 of {{verify}}, so that DT_0 is subject to the rule as every other token
-is. A type other than "agent_delegation" that appears in two details of one
-token is malformed unless that type's definition says otherwise. For a chain
-carrying details of more than one type, subsumption is evaluated per type: for
-each type present in DT_i, DT_{i-1} MUST carry a detail of that type and that
-type's covering relation MUST hold between them; and a child MUST NOT omit a
-detail type its parent carries, since the omitted detail may have expressed a
-restriction, so a verifier MUST treat such a chain as not subsumed. A
-resource server SHOULD declare the types it implements in the
+is. Under this revision the only type a token may carry is "agent_delegation",
+and it may carry exactly one detail ({{authority}}); a later revision may
+define chains whose tokens carry details of several types, and the per-type
+binding of the covering relation stated above is what such a definition would
+build on. A resource server SHOULD declare the types it implements in the
 "authorization_details_types_supported" member of its protected resource
 metadata ({{RFC9728}}, Section 2), so that an issuer can learn which chains it will accept.
 {{I-D.jackson-wimse-evaluation}} states the same process-every-entry-or-refuse
@@ -528,9 +527,9 @@ following, denying on the first failure:
    DT_0.del_max_depth. Principal: DT_0.sub is a non-empty string, and for every
    i, DT_i.sub is identical to DT_0.sub. Otherwise deny.
 4. For each i > 0, verify DT_i.Authority <= DT_{i-1}.Authority under rules 1,
-   2, 3, and 5 of {{subsumption}}. A detail of a type the verifier does not
-   implement was rejected as malformed when the token was parsed
-   ({{detail-types}}). Any violation: deny.
+   2, 3, and 5 of {{subsumption}}. A token carrying a second detail, or a
+   detail of a type other than "agent_delegation", was rejected as malformed
+   when it was parsed ({{detail-types}}). Any violation: deny.
 5. Check time: for every i, nbf (if present) <= now <= exp, and exp is monotonic
    non-increasing along the chain (rule 4 of {{subsumption}}). Otherwise deny.
 6. Verify holder binding: the presenter proves possession of the key in DT_n.cnf
@@ -611,7 +610,7 @@ not carried in any token and have no effect on the wire.
 
 | Name | Step | Meaning |
 |---|---|---|
-| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, an integer's magnitude exceeds 2^53-1, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, or a detail type is not implemented |
+| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, an integer's magnitude exceeds 2^53-1, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, a token carries more than one detail, or a detail type is not "agent_delegation" |
 | non_canonical | parse | a decoded header or payload is not the JCS serialization of what it parses to |
 | duplicate_member | parse | a JSON object repeats a member name |
 | non_finite | parse | a number is NaN or an infinity, which JSON and JCS do not represent |
@@ -894,7 +893,8 @@ signer's, and neither holds a list); the opaque scope form; the two cumulative
 constraint types (the Python library's call-count ceiling emits a cumulative
 bound under "max", which this revision forbids); the "order" member of "rank";
 the one-per-(key, type) rule (both reject a second constraint on a key whatever
-its type); the per-type detail rule; and the audience check. The Python library
+its type); and the audience check. Both libraries already refuse a token
+carrying more than one detail or a detail of another type. The Python library
 ships the test vectors of {{vectors}} and regenerates them on every test run;
 the TypeScript library runs them in its test suite.
 
@@ -1033,7 +1033,9 @@ claim layout.
   defines. A token that breaks any of them is malformed.
 - The covering relation is bound to the authorization detail type; a verifier
   must evaluate every detail or reject the token, and an unimplemented type is
-  a rejection; a resource server is pointed to RFC 9728 to declare the types it
+  a rejection; under this revision a token carries exactly one detail, of type
+  "agent_delegation", and chains carrying several types are left to a later
+  revision; a resource server is pointed to RFC 9728 to declare the types it
   supports.
 - The IANA request for an "authorization_details" type value is withdrawn,
   since RFC 9396 keeps no such registry; whether the type value becomes a URI
@@ -1046,9 +1048,6 @@ claim layout.
 - Step 8 denies an action under a cumulative constraint when no component
   holds the running total it is measured over.
 - An integer whose magnitude exceeds 2^53-1 is malformed.
-- A type other than "agent_delegation" appearing in two details of one token
-  is malformed, and a child that omits a detail type its parent carries is not
-  subsumed.
 - The revision states that it defines no transition mode for chains shaped by
   the previous revision.
 - Step 7 states that a cached status answer is trusted for its time to live,
