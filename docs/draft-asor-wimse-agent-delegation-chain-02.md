@@ -183,7 +183,9 @@ Canonicalization Scheme (JCS) {{RFC8785}}: producers MUST serialize both with
 JCS before base64url encoding, and verifiers MUST reject either decoded byte
 string unless it is exactly the JCS serialization of the parsed object.
 Verifiers MUST also reject duplicate object member names, non-finite numbers,
-and lone UTF-16 surrogates.
+and lone UTF-16 surrogates. Because JCS numbers are IEEE 754 binary64 values,
+an integer whose magnitude exceeds 2^53-1 is not represented exactly; producers
+MUST NOT emit one, and verifiers MUST reject a token carrying one as malformed.
 
 The {{RFC9068}} claims carry the following meaning in a Delegation Token:
 
@@ -556,7 +558,9 @@ following, denying on the first failure:
    DT_n.Authority on every count.
 
 The algorithm is deterministic, side-effect free, and requires no network call
-except the (cacheable, offline-checkable) status list of step 7. The order of
+except the (cacheable, offline-checkable) status list of step 7. The one
+exception is the cumulative-constraint check of step 8, which belongs to the
+component holding the running total and lies outside that guarantee. The order of
 steps 1 to 5 is the order in which a chain presented without an action can be
 checked ({{without-request}}); steps 6 and 8 need the request, and step 7 needs
 the status list.
@@ -607,7 +611,7 @@ not carried in any token and have no effect on the wire.
 
 | Name | Step | Meaning |
 |---|---|---|
-| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, an integer is outside the range a binary64 number represents exactly, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, or a detail type is not implemented |
+| malformed | parse | a token is not three base64url parts, a claim this document requires is absent or of the wrong shape, an integer's magnitude exceeds 2^53-1, a scope is invalid, a constraint is malformed or repeated, a detail carries an unknown member, or a detail type is not implemented |
 | non_canonical | parse | a decoded header or payload is not the JCS serialization of what it parses to |
 | duplicate_member | parse | a JSON object repeats a member name |
 | non_finite | parse | a number is NaN or an infinity, which JSON and JCS do not represent |
@@ -763,9 +767,10 @@ deployment that enforces aggregate budgets uses one of them:
   checks and debits atomically at authorization time. A ledger that is read at
   authorization and debited afterwards, or debited by more than one writer
   without coordination, does not close the hole; the check and the debit are
-  one operation or the budget is not enforced. The online Delegation Server of
-  {{I-D.sweeney-wimse-credential-delegation}} is one way to provide shared
-  accounting.
+  one operation or the budget is not enforced. An online Delegation Server
+  through which every action is exercised, as in
+  {{I-D.sweeney-wimse-credential-delegation}}, is one place such accounting
+  can be held.
 - Coordinated allocation with local enforcement: a single-writer allocator
   reserves disjoint allocations for the children (for example 60 units to the
   child acting at gateway A and 40 to the child acting at gateway B, leaving
@@ -1038,6 +1043,14 @@ claim layout.
   the rule under which such a document is cited.
 - The chain linkage section states that "par_hash" commits to a parent token
   instance, and what that means for re-issued parents and their children.
+- Step 8 denies an action under a cumulative constraint when no component
+  holds the running total it is measured over.
+- An integer whose magnitude exceeds 2^53-1 is malformed.
+- A type other than "agent_delegation" appearing in two details of one token
+  is malformed, and a child that omits a detail type its parent carries is not
+  subsumed.
+- The revision states that it defines no transition mode for chains shaped by
+  the previous revision.
 - Step 7 states that a cached status answer is trusted for its time to live,
   that an unobtainable or unrefreshable status is unknown and denies, and that
   a token issued without a status reference is a choice made at issuance.
