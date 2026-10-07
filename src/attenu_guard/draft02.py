@@ -33,6 +33,16 @@ metered call counts as "the count including this call" under `calls`, and the gu
 field itself (`Guard._auto_meter`), so a -02 `max_lifetime` on `max_calls` reads `calls` and is
 held by the guard. Every other cumulative total is supplied by the component that holds it, or
 the constraint denies.
+
+Known limitation (fail-closed): under the "02" profile a legacy fixed-key ceiling and the
+generic ceiling of the same -02 type on the same key (`RowLimit(5)` and `Max("max_rows", 5)`,
+`EgressRank` and `Rank("egress", ...)`, `CallLimit` and `MaxLifetime("max_calls", ...)`) share
+the (key, type) pair but are different classes, so neither subsumes nor narrows the other:
+`is_narrower_than` is False and a delegation across them is refused as `not_narrower` even
+where the values narrow. That is a false deny, never a false allow. It arises only when the
+two forms are mixed in one process, for example a guard built from legacy ceilings delegating
+to a request built from `Authority.from_wire(..., profile="02")`; build both sides from the
+same form. The forms are not normalised into one in this release.
 """
 from __future__ import annotations
 

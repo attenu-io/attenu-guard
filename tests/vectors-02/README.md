@@ -129,7 +129,11 @@ as a total and as another constraint's per-action field) cannot collide. Two lib
 -02 profile, which the draft does not impose because it reserves no key names: a per-action
 `max` on a `max_calls` key is refused as malformed (a cap on a count caps nothing; a count
 bound is `max_lifetime` or `max_subtree`), and the guard's own call meter is the only source
-of a `max_calls` total in-process.
+of a `max_calls` total in-process. A third, a limitation rather than a rule: a legacy
+fixed-key ceiling (`RowLimit`) and the generic ceiling of the same -02 type on the same key
+(`Max("max_rows")`) are different classes that share a (key, type) pair, so a delegation across
+them is refused as `not_narrower` even where the values narrow; nothing in this vector set
+mixes the two forms.
 
 ## Regenerating
 
