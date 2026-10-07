@@ -36,8 +36,9 @@ so scoring needs `pip install attenu-guard` and nothing else.
 HS256 single-signer public-test-key profile the `signer` block declares, plus the parse-time
 rules of Sections 3, 4 and 4.4. Step 6 (holder binding) and step 7 (status list) are not
 scored: every token carries a `cnf` claim whose `jkt` is a deterministic stand-in (the
-base64url SHA-256 of the agent id), present and shaped as the -02 requires, with no key
-behind it. Step 8 is scored for its audience half only; no vector carries an action.
+base64url SHA-256 of the agent id), present and shaped as the -02 requires (a `cnf` carries
+`jkt`, `jwk` or `x5t#S256`), with no key behind it. Step 8 is scored for its audience half
+only; no vector carries an action.
 
 ## File format
 
@@ -87,6 +88,7 @@ Section 3, claims (all `malformed` unless named): `reject_principal_altered.json
 (`principal_altered`), `reject_root_without_principal.json`, `reject_missing_client_id.json`,
 `reject_aud_null.json`, `reject_aud_empty_array.json`, `reject_audience_mismatch.json`
 (`audience_mismatch`, scored at a different audience), `reject_missing_cnf.json`,
+`reject_cnf_without_confirmation.json` (an object with no `jkt`, `jwk` or `x5t#S256`),
 `reject_unsafe_integer.json` (2^53).
 
 Section 6 step 1: `reject_alg_not_accepted.json` (`signature_invalid`, scored under
@@ -94,11 +96,15 @@ Section 6 step 1: `reject_alg_not_accepted.json` (`signature_invalid`, scored un
 
 Section 4.1, scope grammar: `reject_wildcard_over_opaque.json` and
 `reject_opaque_over_wildcard.json` (`not_narrower`, Kieran Sweeney), `reject_opaque_case_folded.json`
-(`not_narrower`), `reject_mixed_case_wildcard.json` (`malformed`).
+(`not_narrower`), `reject_mixed_case_wildcard.json` and `reject_newline_scope.json` (`malformed`;
+the second catches a grammar check that lets a trailing line feed through).
 
 Sections 4.2 and 4.3, constraints: `reject_max_lifetime_widened.json`,
 `reject_max_subtree_widened.json`, `reject_cross_type_lifetime_for_max.json`,
-`reject_rank_order_mismatch.json` (all `not_narrower`); `reject_rank_without_order.json`,
+`reject_rank_order_mismatch.json`, `reject_child_raises_del_max_depth.json` (rule 5, per hop)
+(all `not_narrower`); `reject_child_exp_exceeds_parent.json` (`expired`: rule 4 is step 5,
+never a step-4 outcome, so a verifier comparing derived lifetimes at step 4 is wrong);
+`reject_rank_without_order.json`,
 `reject_rank_outside_order.json`, `reject_duplicate_key_type.json`,
 `reject_constraint_extra_member.json` (all `malformed`).
 
@@ -107,7 +113,16 @@ Sections 4 and 4.4, the detail: `reject_detail_extra_member.json`, `reject_secon
 classifies detail types only after the signature check still reports `malformed`).
 
 Section 5, the commitment: `reject_reissued_parent.json` (`par_hash_mismatch`): a child
-presented with a re-issued parent rather than the instance it commits to.
+presented with a re-issued parent rather than the instance it commits to;
+`reject_altered_sub_and_par_hash.json` (`par_hash_mismatch`): step 2 is named before the
+step-3 principal check when both fail.
+
+Step 8 and running totals: no vector carries an action, so the audience-must-be-supplied rule
+and the cumulative-constraint denial are exercised by `tests/test_wire_02.py` and
+`tests/test_draft02_review_fixes.py` rather than by this set. The running total a cumulative
+constraint is measured over never comes from the request context; the reference verifier
+takes it through a separate `totals` parameter (`VerifiedChain.permits(scope, ctx, audience=...,
+totals=...)`) and drops any `*_total` key the context carries.
 
 ## Regenerating
 

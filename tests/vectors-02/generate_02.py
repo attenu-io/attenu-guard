@@ -297,6 +297,15 @@ def gen_reject_missing_cnf() -> dict:
         tokens, expect_reject_reason=R.MALFORMED)
 
 
+def gen_reject_cnf_without_confirmation() -> dict:
+    _r, _c, leaf = _base_chain()
+    tokens = _tamper(_mint(leaf), 2, lambda p: p.__setitem__("cnf", {"note": "no key here"}))
+    return _vector(
+        "The leaf's cnf is an object carrying no confirmation member (no jkt, jwk or x5t#S256). "
+        "A cnf that binds the token to no key binds it to nothing. MUST be rejected: malformed.",
+        tokens, expect_reject_reason=R.MALFORMED)
+
+
 def gen_reject_unsafe_integer() -> dict:
     root = Guard.issue("parser-probe", A({"probe.read"}, [], ttl=60), max_depth=1)
     token = wire.serialize(root, _signer(), principal=PRINCIPAL, aud=AUDIENCE, draft="02", cnf=_cnf)
@@ -362,6 +371,15 @@ def gen_reject_opaque_case_folded() -> dict:
         _two_hop(["User.Read"], ["user.read"]), expect_reject_reason=R.NOT_NARROWER)
 
 
+def gen_reject_newline_scope() -> dict:
+    return _vector(
+        "'crm.read' followed by a line feed, under a root granting 'crm.*'. A verifier whose "
+        "grammar check lets a trailing newline through ($ in many regex engines) classifies it as "
+        "a literal under crm.* and accepts; the ABNF admits no such byte. MUST be rejected: "
+        "malformed.",
+        _two_hop(["crm.*"], ["crm.read\n"]), expect_reject_reason=R.MALFORMED)
+
+
 def gen_reject_mixed_case_wildcard() -> dict:
     return _vector(
         "'User.*' matches none of the three forms: not literal or wildcard (uppercase), not "
@@ -409,6 +427,27 @@ def gen_reject_cross_type_lifetime_for_max() -> dict:
         "No inference is made across types: a lifetime bound, however small, does not satisfy "
         "the parent's per-action 'max', which is now absent in the child (rule 3). MUST be "
         "rejected: not_narrower.",
+        tokens, expect_reject_reason=R.NOT_NARROWER)
+
+
+def gen_reject_child_exp_exceeds_parent() -> dict:
+    _r, _c, leaf = _base_chain()
+    tokens = _tamper(_mint(leaf), 2, lambda p: p.__setitem__("exp", 910))
+    return _vector(
+        "The leaf's exp (910) exceeds its parent's (900) with the same iat, so its lifetime is "
+        "also longer than its parent's. Under the -02 a later child expiry is rule 4, evaluated "
+        "at step 5, never a subsumption failure at step 4. MUST be rejected: expired. (A verifier "
+        "that compares derived lifetimes at step 4 reports not_narrower and is wrong.)",
+        tokens, expect_reject_reason=R.EXPIRED)
+
+
+def gen_reject_child_raises_del_max_depth() -> dict:
+    _r, _c, leaf = _base_chain()
+    tokens = _tamper(_mint(leaf), 2, lambda p: p.__setitem__("del_max_depth", 60))
+    return _vector(
+        "The leaf carries del_max_depth 60 under a root bound of 6. Rule 5 of Section 4.3 "
+        "(C.del_max_depth <= P.del_max_depth) is checked per hop at step 4 where a child carries "
+        "the claim. MUST be rejected: not_narrower.",
         tokens, expect_reject_reason=R.NOT_NARROWER)
 
 
@@ -505,6 +544,21 @@ def gen_reject_unknown_detail_type() -> dict:
 # Section 5: the commitment is to a parent instance
 # =========================================================================
 
+def gen_reject_altered_sub_and_par_hash() -> dict:
+    _r, _c, leaf = _base_chain()
+    tokens = _mint(leaf)
+    h_b64, p_b64, _ = tokens[2].split(".")
+    payload = json.loads(wire.b64url_decode(p_b64))
+    payload["sub"] = "acct:mallory@example.com"
+    payload["par_hash"] = "AAAA"
+    tokens[2] = _resign(h_b64, payload, _signer())
+    return _vector(
+        "The leaf carries both an altered sub and a broken par_hash. Step 2 runs before the "
+        "principal check in step 3, so the commitment failure is named. MUST be rejected: "
+        "par_hash_mismatch, not principal_altered.",
+        tokens, expect_reject_reason=R.PAR_HASH_MISMATCH)
+
+
 def gen_reject_reissued_parent() -> dict:
     _r, _c, leaf = _base_chain()
     tokens = _mint(leaf)
@@ -537,15 +591,19 @@ GENERATORS = {
     "reject_aud_empty_array.json": gen_reject_aud_empty_array,
     "reject_audience_mismatch.json": gen_reject_audience_mismatch,
     "reject_missing_cnf.json": gen_reject_missing_cnf,
+    "reject_cnf_without_confirmation.json": gen_reject_cnf_without_confirmation,
     "reject_unsafe_integer.json": gen_reject_unsafe_integer,
     "reject_alg_not_accepted.json": gen_reject_alg_not_accepted,
     "reject_wildcard_over_opaque.json": gen_reject_wildcard_over_opaque,
     "reject_opaque_over_wildcard.json": gen_reject_opaque_over_wildcard,
     "reject_opaque_case_folded.json": gen_reject_opaque_case_folded,
     "reject_mixed_case_wildcard.json": gen_reject_mixed_case_wildcard,
+    "reject_newline_scope.json": gen_reject_newline_scope,
     "reject_max_lifetime_widened.json": gen_reject_max_lifetime_widened,
     "reject_max_subtree_widened.json": gen_reject_max_subtree_widened,
     "reject_cross_type_lifetime_for_max.json": gen_reject_cross_type_lifetime_for_max,
+    "reject_child_exp_exceeds_parent.json": gen_reject_child_exp_exceeds_parent,
+    "reject_child_raises_del_max_depth.json": gen_reject_child_raises_del_max_depth,
     "reject_rank_order_mismatch.json": gen_reject_rank_order_mismatch,
     "reject_rank_without_order.json": gen_reject_rank_without_order,
     "reject_rank_outside_order.json": gen_reject_rank_outside_order,
@@ -554,6 +612,7 @@ GENERATORS = {
     "reject_detail_extra_member.json": gen_reject_detail_extra_member,
     "reject_second_detail.json": gen_reject_second_detail,
     "reject_unknown_detail_type.json": gen_reject_unknown_detail_type,
+    "reject_altered_sub_and_par_hash.json": gen_reject_altered_sub_and_par_hash,
     "reject_reissued_parent.json": gen_reject_reissued_parent,
 }
 
