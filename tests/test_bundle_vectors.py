@@ -1622,7 +1622,8 @@ class TestHostileBundleContent(unittest.TestCase):
         # The members inside an entry or an envelope that a reader reads: the root's authority and
         # a spawn's granted (scopes, constraints, ttl, a scope, a constraint and its members), an
         # allow's context and adapter, an outcome's receipt, a kill's revoked and pending_at_kill,
-        # and every member of an envelope. A ttl that was not a number raised through 0.19.1.
+        # and every member of an envelope. A ttl that was a string, an array or an object raised
+        # through 0.19.1.
         def put(bundle, path, value):
             target = bundle
             for key in path[:-1]:
@@ -1730,10 +1731,10 @@ _AUTHORITY_CASES = (
 
 
 class TestAuthorityReadWhole(unittest.TestCase):
-    """A root's `authority.ttl` or a spawn's `granted.ttl` that was not null and not a number
-    raised `TypeError` out of `verify_bundle` (and `attenu-guard verify`) in every release from
-    0.4.0 through 0.19.1. attenu-guard-ts read it as unbounded, so a root `ttl: "x"` verified
-    there. A member of either object that is not the
+    """A root's `authority.ttl` or a spawn's `granted.ttl` that was a string, an array or an
+    object raised `TypeError` out of `verify_bundle` (and `attenu-guard verify`) in every release
+    from 0.4.0 through 0.19.1; a boolean was read as 1 or 0. attenu-guard-ts read it as
+    unbounded, so a root `ttl: "x"` verified there. A member of either object that is not the
     type the wire format gives it is now an unreadable authority, positioned on that entry, in
     both implementations: `ttl` a number or null, `scopes` and `constraints` arrays, a scope a
     string, and the object itself an object."""
@@ -1764,8 +1765,9 @@ class TestAuthorityReadWhole(unittest.TestCase):
 
     def test_a_ttl_that_is_not_finite_is_an_unreadable_authority(self):
         # Python's json reads NaN and Infinity, and RFC 8785 writes neither, so the chain cannot
-        # reproduce over one either; the authority is unreadable on its own account.
-        for value in (float("nan"), float("inf")):
+        # reproduce over one either; the authority is unreadable on its own account. An integer
+        # past the double range is an int here and Infinity to JSON.parse: the same message.
+        for value in (float("nan"), float("inf"), 10**400):
             bundle = copy.deepcopy(self.case["bundle"])
             bundle["entries"][1]["granted"]["ttl"] = value
             failures = evidence.verify_bundle(bundle, self.signer)["failures"]

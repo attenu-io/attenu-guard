@@ -300,7 +300,11 @@ def _authority_wire_error(value, member: str) -> str | None:
     if ttl is not None:
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
             return f"ttl is {_json_kind(ttl)}, not a number"
-        if not math.isfinite(ttl):
+        try:
+            finite = math.isfinite(ttl)
+        except OverflowError:        # an integer past the double range, which JSON.parse reads as Infinity
+            finite = False
+        if not finite:
             return "ttl is not a finite number"
     return None
 
