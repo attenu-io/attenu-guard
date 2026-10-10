@@ -1207,6 +1207,92 @@ class TestDelegationStructureCli(unittest.TestCase):
 
 
 # =========================================================================
+# An entry that is not an object, or entries that are not an array, is a verdict
+# =========================================================================
+class TestUnreadableEntriesCli(unittest.TestCase):
+    """Each raised out of `verify_bundle` and ended `attenu-guard verify` in a traceback. Every
+    expected output here is asserted byte for byte by attenu-guard-ts's test/cli.test.ts."""
+
+    ENTRY_LINES = [
+        "  seq=0 event=root node=vectors:n0",
+        "  seq=1 event=spawn node=vectors:n1",
+        "  seq=2 event=allow node=vectors:n0 scope=mail.send",
+        "  seq=3 event=outcome node=vectors:n0",
+        "  seq=4 event=allow node=vectors:n1 scope=crm.read",
+        "  seq=5 event=deny node=vectors:n1 scope=crm.export",
+        "  seq=6 event=outcome node=vectors:n1",
+        "  seq=7 event=done node=vectors:n1",
+        "  seq=8 event=done node=vectors:n0",
+    ]
+
+    def setUp(self):
+        import tempfile
+        from attenu_guard import vectors
+        self._td = tempfile.TemporaryDirectory()
+        self.td = Path(self._td.name)
+        case = next(c for c in vectors.load_bundle_vectors()["cases"]
+                    if c["name"] == "valid_bundle_v2")
+        self.bundle = copy.deepcopy(case["bundle"])
+        del self.bundle["anchor"]
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _write(self, name: str, text: str) -> str:
+        path = self.td / name
+        path.write_text(text)
+        return str(path)
+
+    def test_an_entry_that_is_not_an_object_is_a_verdict(self):
+        self.bundle["entries"][7] = None
+        rc, out = run("verify", self._write("bundle.json", json.dumps(self.bundle)), "--entries")
+        self.assertEqual(rc, 2)
+        lines = [f"{line} state=process-asserted" for line in self.ENTRY_LINES]
+        lines[7] = "  seq=null state=process-asserted failed=invalid_ledger_entry,integrity"
+        self.assertEqual(out, "\n".join([
+            "integrity=False monotonicity=True containment=True anchor=not checked nodes=2 "
+            "actions_checked=2",
+            "  - invalid_ledger_entry: entries[7] is null, not an object",
+            "  - integrity: seq gap at 7 (got None)",
+            "FAILED",
+            "entries:",
+            *lines]) + "\n")
+
+    def test_entries_that_are_not_an_array_are_a_verdict(self):
+        self.bundle["entries"] = "x"
+        rc, out = run("verify", self._write("bundle.json", json.dumps(self.bundle)), "--entries")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "\n".join([
+            "integrity=False monotonicity=False containment=False anchor=not checked nodes=0 "
+            "actions_checked=0",
+            "  - invalid_bundle: entries is a string, not an array",
+            "FAILED",
+            "entries:"]) + "\n")
+
+    def test_a_ledger_line_that_is_not_an_object_is_a_verdict(self):
+        rows = [json.dumps(e) for e in self.bundle["entries"]]
+        rows[1] = "null"
+        path = self._write("ledger.jsonl", "".join(r + "\n" for r in rows))
+        rc, out = run("verify", path, "--entries")
+        self.assertEqual(rc, 2)
+        lines = list(self.ENTRY_LINES)
+        lines[1] = "  seq=null failed=integrity"
+        self.assertEqual(out, "\n".join(["TAMPERED — seq gap at 1 (got None)", "entries:",
+                                         *lines]) + "\n")
+
+    def test_no_traceback_over_a_real_subprocess(self):
+        self.bundle["entries"][7] = "x"
+        path = self._write("bundle.json", json.dumps(self.bundle))
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"))
+        proc = subprocess.run([sys.executable, "-m", "attenu_guard.cli", "verify", path],
+                              env=env, capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertIn("  - invalid_ledger_entry: entries[7] is a string, not an object\n",
+                      proc.stdout)
+
+
+# =========================================================================
 # The summary line says how many allows passed through un-gated, when any did
 # =========================================================================
 class TestUngatedCount(unittest.TestCase):

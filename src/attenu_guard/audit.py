@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,10 +237,16 @@ class AuditLog:
 
     @staticmethod
     def verify(entries: list[dict]) -> tuple[bool, str | None]:
-        """Recompute the chain. Returns (ok, first_bad_reason)."""
+        """Recompute the chain. Returns (ok, first_bad_reason).
+
+        An entry that is not a JSON object (a line of a ledger file reading `null`, a string, a
+        number or an array) carries no member, so it is read as an entry with none: a seq gap
+        at its position. It raised `AttributeError` here, out of `attenu-guard verify`."""
         prev = GENESIS
         expected_seq = 0
         for e in entries:
+            if not isinstance(e, Mapping):
+                e = {}
             seq = e.get("seq")
             # An integral number and never a bool (`_integral`): `True == 1` in Python, so a
             # re-hashed chain carrying `"seq": true` at index 1 used to verify with no failure.

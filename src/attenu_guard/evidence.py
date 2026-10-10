@@ -37,12 +37,12 @@ from attenu_guard._display import escaped as _escaped, shown as _shown, shown_te
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
-from attenu_guard.ceilings import describe as _describe_ceiling
+from attenu_guard.ceilings import _json_kind, describe as _describe_ceiling
 from attenu_guard.reasons import Capture, BodyState, Policy
 from attenu_guard.params import ParamsHashReason
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
-           "SUPPORTED_BUNDLE_VERSIONS",
+           "LEDGER_EVENTS", "LEDGER_EVENTS_V1", "SUPPORTED_BUNDLE_VERSIONS",
            # Observer envelopes (envelope v1)
            "sign_envelope", "verify_envelopes", "envelope_subject", "envelope_signing_input",
            "ENVELOPE_VERSION", "ENVELOPE_TYP", "ENVELOPE_RESULTS", "ENVELOPE_ALG",
@@ -81,6 +81,15 @@ LEDGER_FIELDS = frozenset({
     "policy",
 })
 # `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
+
+# The COMPLETE set of ledger event names, closed: `schema/agent-audit.schema.json`'s `event` enum.
+# Every check in `verify_bundle` reads an entry by its event, so an entry whose event none of them
+# reads was skipped by all of them: a `done` renamed `frobnicate` verified, and an `allow` renamed
+# left containment without a word. `verify_bundle` reports such an entry as `unknown_ledger_event`.
+LEDGER_EVENTS = frozenset({"root", "spawn", "spawn_denied", "allow", "deny", "kill", "done",
+                           "outcome"})
+# `outcome` is v2-only (0.9.0, execution binding): a schema_version=1 chain has the other seven.
+LEDGER_EVENTS_V1 = LEDGER_EVENTS - {"outcome"}
 
 
 class EvidenceLeakError(RuntimeError):
@@ -1617,9 +1626,12 @@ def _integrity_break(entries: list[dict]):
     exactly (same seq/prev_hash/hash order, and the same rule that a seq is an integral number
     and never a bool, `_integral`: `True == 1` in Python, and a re-hashed chain with
     `"seq": true` at index 1 verified clean). None when nothing entry-local is wrong — a consistently re-hashed ledger fails
-    against the signed anchor, not here, and that failure is chain-level."""
+    against the signed anchor, not here, and that failure is chain-level. An entry that is not a
+    JSON object carries no member, so the chain breaks at it, as `AuditLog.verify` reads it."""
     prev = _GENESIS
     for i, e in enumerate(entries):
+        if not isinstance(e, Mapping):
+            return i
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
             broken = (_integral(e.get("seq")) != i
@@ -1631,6 +1643,27 @@ def _integrity_break(entries: list[dict]):
             return i
         prev = e["hash"]
     return None
+
+
+def _invalid_bundle_report(bundle, detail: str, verified_against: str) -> dict:
+    """The report on a bundle this verifier cannot read at all: a bundle that is not a JSON
+    object, or an `entries` that is not an array. One `invalid_bundle` failure, about no single
+    entry; every check false, and every status `not checked`, since none ran. The report has
+    every member a full verification's has, so a reader of it needs no second shape."""
+    log = _FailureLog()
+    log.add("invalid_bundle", detail)
+    return {"ok": False,
+            "checks": {"integrity": False, "monotonicity": False, "containment": False,
+                       "anchor": "not checked", "version": False, "chain_id": False,
+                       "root": False, "expected_anchor": "not checked",
+                       "envelopes": "not checked", "ledger_fields": False},
+            "failures": log.messages, "failure_details": log.details, "failure_entries": [None],
+            "nodes": 0, "actions_checked": 0, "ungated": 0,
+            "chain_id": bundle.get("chain_id") if isinstance(bundle, Mapping) else None,
+            "execution_binding": {"status": "not applicable"},
+            "envelopes": {"status": "not checked", "count": 0, "witness_signed": [], "states": {},
+                          "results": {}, "witnesses": {}, "lines": {}, "failures": []},
+            "verified_against": verified_against}
 
 
 def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = None,
@@ -1674,7 +1707,29 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     each failure is about, or None for a failure about no single entry: exact where a seq is
     not, since a forged entry's seq can be missing, null, a bool or a duplicate.
     """
-    entries = bundle.get("entries") or []
+    verified_against = ("expected_anchor" if (expected_anchor is not None or expected_head is not None)
+                        else "bundle_anchor")
+    # A bundle is a JSON object and its `entries` an array. Anything else raised out of this
+    # function (`AttributeError`, or `TypeError`), whose 0.13.0 note says it never raises. Such a
+    # bundle is reported alone, as `invalid_bundle`. An absent or null `entries` is an empty
+    # ledger.
+    if not isinstance(bundle, Mapping):
+        return _invalid_bundle_report(
+            bundle, f"invalid_bundle: the bundle is {_json_kind(bundle)}, not an object",
+            verified_against)
+    raw_entries = bundle.get("entries")
+    if raw_entries is None:
+        raw_entries = []
+    if not isinstance(raw_entries, (list, tuple)):
+        return _invalid_bundle_report(
+            bundle, f"invalid_bundle: entries is {_json_kind(raw_entries)}, not an array",
+            verified_against)
+    # An entry that is not a JSON object is reported once, as `invalid_ledger_entry` in (0b2),
+    # and read everywhere else as an entry with no members: the checks that read an entry's
+    # fields skip it, and the hash chain breaks at it. Each stand-in is a new object, so
+    # `failure_entries` finds its index by identity, as it finds every other entry's.
+    entries = [e if isinstance(e, Mapping) else {} for e in raw_entries]
+    unread = {id(e) for e, raw in zip(entries, raw_entries) if e is not raw}
     anchor = bundle.get("anchor") or {}
     checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked",
               "version": False, "chain_id": False, "root": False, "expected_anchor": "not checked",
@@ -1712,7 +1767,8 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
         log.add("root_version_mismatch",
                 f"root_version_mismatch: root v={_int_or(root_entry.get('v'))!r} != bundle v={_int_or(raw_v)!r}",
                 seq=root_entry.get("seq"), node=root_entry.get("node"), entry=root_entry)
-    mixed_entries = [e for e in entries if not _same_number(e.get("v"), raw_v)]
+    mixed_entries = [e for e in entries
+                     if id(e) not in unread and not _same_number(e.get("v"), raw_v)]
     mixed = sorted({_int_or(e.get("v")) for e in mixed_entries}, key=_version_order)
     if mixed:
         version_ok = False
@@ -1738,8 +1794,33 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     #
     # Reported as a failure rather than raised: `verify_bundle` returns a report, and an unknown
     # field is a property of the bundle, not an error in the call.
+    #
+    # The same pass reads every entry's shape and event, and reports each defect an entry has.
+    # An entry that is not a JSON object is `invalid_ledger_entry`, chain-level since it has no
+    # seq or node, its index in the message.
+    # An event that is absent, not a string, or not one its chain's version defines (`outcome`
+    # is v2-only) is `unknown_ledger_event`: every check below reads an entry by its event, so
+    # such an entry was read by none of them.
     unknown_ok = True
-    for e in entries:
+    events = LEDGER_EVENTS_V1 if bundle_v == 1 else LEDGER_EVENTS
+    for index, e in enumerate(entries):
+        if id(e) in unread:
+            unknown_ok = False
+            log.add("invalid_ledger_entry",
+                    f"invalid_ledger_entry: entries[{index}] is {_json_kind(raw_entries[index])}, "
+                    f"not an object",
+                    entry=e)
+            continue
+        ev = e.get("event")
+        if not isinstance(ev, str) or ev not in events:
+            unknown_ok = False
+            why = (", which is not a string" if not isinstance(ev, str)
+                   else ", a v2-only event on a schema_version=1 chain" if ev in LEDGER_EVENTS
+                   else "")
+            log.add("unknown_ledger_event",
+                    f"unknown_ledger_event: entry carries an event this verifier does not "
+                    f"evaluate and will not ignore: {_shown(ev)}{why}",
+                    seq=e.get("seq"), node=e.get("node"), entry=e)
         extra = sorted(f for f in e if f not in LEDGER_FIELDS)
         if extra:
             unknown_ok = False
@@ -1765,7 +1846,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # (0c) independently retained expected anchor/head: verified against the BUNDLE's actual
     # computed head, never against its own (possibly forged) enclosed anchor.
     if expected_anchor is not None or expected_head is not None:
-        actual_seq, actual_head = (len(entries) - 1, entries[-1]["hash"]) if entries else (-1, _GENESIS)
+        actual_seq, actual_head = (len(entries) - 1, entries[-1].get("hash")) if entries else (-1, _GENESIS)
         ok = True
         if expected_head is not None:
             exp_seq, exp_hash = expected_head
@@ -1788,7 +1869,8 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # must all name the SAME chain. Without this a correctly-signed, internally-consistent bundle
     # for a DIFFERENT chain could be handed to a verifier who believes it is checking this one.
     bundle_chain_id = bundle.get("chain_id")
-    foreign = next((e for e in entries if e.get("chain_id") != bundle_chain_id), None)
+    foreign = next((e for e in entries
+                    if id(e) not in unread and e.get("chain_id") != bundle_chain_id), None)
     entries_ok = foreign is None
     if not entries_ok:
         log.add("chain_id_mismatch",
@@ -1959,5 +2041,4 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             "failure_entries": log.entry_indices(entries),
             "nodes": len(auth), "actions_checked": actions, "ungated": ungated, "chain_id": bundle.get("chain_id"),
             "execution_binding": execution_binding, "envelopes": envelope_summary,
-            "verified_against": "expected_anchor" if (expected_anchor is not None or expected_head is not None)
-                                else "bundle_anchor"}
+            "verified_against": verified_against}

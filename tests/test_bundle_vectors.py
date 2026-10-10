@@ -470,6 +470,7 @@ class TestFailureDetailsTwin(unittest.TestCase):
         outcome_i = _index_of(self.base, "outcome")
         deny_i = _index_of(self.base, "deny")
         spawn_i = _index_of(self.base, "spawn")
+        done_i = _index_of(self.base, "done")
         child_allow_i = _index_of(self.base, "allow", 1)
         child_node = self.base["entries"][spawn_i]["node"]
 
@@ -549,6 +550,9 @@ class TestFailureDetailsTwin(unittest.TestCase):
              self._broken(set_entry(outcome_i, "invoked_params_hash", "ab" * 32), rehash=True,
                           reanchor=True), {}, {"params_mismatch"}),
             ("v2_field_on_v1", v1_leak, {}, {"v2_field_on_v1"}),
+            ("unknown_ledger_event",
+             self._broken(set_entry(done_i, "event", "frobnicate"), rehash=True, reanchor=True), {},
+             {"unknown_ledger_event"}),
         ]
 
     # ---- the assertions ------------------------------------------------
@@ -974,6 +978,299 @@ class TestMonotonicityDimensions(unittest.TestCase):
         # widens both names the ceiling. One message per unsound delegation, as before.
         self._assert_widens(self._granted(max_rows=250, ttl=7200),
                             "ceiling max_rows<=250 looser than parent max_rows<=100")
+
+
+# =========================================================================
+# Every entry is a JSON object, and its event one its chain's version defines
+# =========================================================================
+_SCHEMA = _ROOT / "schema" / "agent-audit.schema.json"
+
+_UNKNOWN_EVENT = ("unknown_ledger_event: entry carries an event this verifier does not evaluate "
+                  "and will not ignore: ")
+
+
+def _v1_forbidden_fields(schema) -> set:
+    """The fields the schema forbids on a schema_version=1 entry, read from its own condition."""
+    for rule in schema["allOf"]:
+        cond = rule.get("if", {}).get("properties", {})
+        if cond == {"v": {"const": 1}}:
+            return {field for alt in rule["then"]["not"]["anyOf"] for field in alt["required"]}
+    raise AssertionError("the schema has no schema_version=1 condition")
+
+
+def _v2_only_events(schema) -> set:
+    """The events the schema makes impossible on a schema_version=1 entry: an event whose own
+    condition requires a field version 1 forbids."""
+    forbidden = _v1_forbidden_fields(schema)
+    out = set()
+    for rule in schema["allOf"]:
+        cond = rule.get("if", {}).get("properties", {})
+        if set(cond) == {"event"} and forbidden & set(rule["then"].get("required", [])):
+            out.add(cond["event"]["const"])
+    return out
+
+
+class TestEntryShapeAndEventNames(unittest.TestCase):
+    """`schema/agent-audit.schema.json` closes the ledger `event` set, and the verifier did not
+    enforce it: `valid_bundle_v2` with a `done` renamed `frobnicate` or `""`, re-chained and
+    re-anchored, verified ok; an `allow` renamed was read by no check, containment included;
+    and a bare `outcome` on a schema_version=1 chain verified, though the schema makes
+    `outcome` v2-only. An entry that is not a JSON object, or an `entries` that is not an
+    array, raised out of `verify_bundle` instead of reporting. Both entry-level names are
+    XuebinMa's (A2A #1575).
+
+    Every expected string here is asserted byte for byte by attenu-guard-ts's
+    test/bundle-vectors.test.ts, for the same mutation of the same bundle."""
+
+    def setUp(self):
+        self.case = next(c for c in vectors.load_bundle_vectors()["cases"]
+                         if c["name"] == "valid_bundle_v2")
+        self.signer = _signer_for(self.case)
+
+    def _bundle(self):
+        return copy.deepcopy(self.case["bundle"])
+
+    def _rechained(self, edit):
+        """valid_bundle_v2 with `edit(entries)` applied, re-chained and re-anchored, so
+        integrity is not what fails."""
+        bundle = self._bundle()
+        edit(bundle["entries"])
+        _rehash(bundle)
+        _reanchor(bundle, self.signer)
+        return bundle
+
+    def _verify(self, bundle, **kwargs):
+        return evidence.verify_bundle(bundle, self.signer, **kwargs)
+
+    def _assert_twins(self, report):
+        self.assertEqual(len(report["failures"]), len(report["failure_details"]))
+        self.assertEqual(len(report["failures"]), len(report["failure_entries"]))
+        for message, detail in zip(report["failures"], report["failure_details"]):
+            self.assertEqual(detail["detail"], message)
+            self.assertEqual(detail["reason"], message.split(":", 1)[0])
+
+    # ---- the sets, against the schema ------------------------------------
+    def test_ledger_events_are_the_schema_enum_per_version(self):
+        schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
+        event = schema["properties"]["event"]
+        self.assertEqual(event["type"], "string")
+        self.assertEqual(len(event["enum"]), len(set(event["enum"])))
+        self.assertEqual(evidence.LEDGER_EVENTS, frozenset(event["enum"]))
+        self.assertEqual(sorted(evidence.LEDGER_EVENTS),
+                         ["allow", "deny", "done", "kill", "outcome", "root", "spawn",
+                          "spawn_denied"])
+        # Version 1 has every name but the ones the schema makes impossible there.
+        self.assertEqual(_v2_only_events(schema), {"outcome"})
+        self.assertIn("outcome=(v2 only)", event["description"])
+        self.assertEqual(evidence.LEDGER_EVENTS_V1,
+                         frozenset(event["enum"]) - _v2_only_events(schema))
+        self.assertIn("event", schema["required"])
+        for name in ("LEDGER_EVENTS", "LEDGER_EVENTS_V1"):
+            self.assertIsInstance(getattr(evidence, name), frozenset)
+            self.assertIn(name, evidence.__all__)
+
+    def test_the_schema_names_exactly_the_ledger_fields(self):
+        schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
+        self.assertEqual(set(schema["properties"]), set(evidence.LEDGER_FIELDS))
+        self.assertEqual(_v1_forbidden_fields(schema), set(evidence._V2_ONLY_FIELDS))
+        self.assertEqual(schema["$id"], "https://attenu.io/schemas/agent-audit/v1.json")
+
+    # ---- an event this verifier does not evaluate ------------------------
+    def test_an_event_outside_the_eight_fails_at_its_entry(self):
+        # Printed by the display rule, as unknown_ledger_fields prints a field name.
+        for value, shown in (("frobnicate", "frobnicate"), ("", '""'), ("Done", "Done"),
+                             ("done ", '"done\\u0020"'), ("spawn-denied", "spawn-denied"),
+                             ("5", "5"), ("None", "None")):
+            with self.subTest(event=value):
+                report = self._verify(
+                    self._rechained(lambda entries: entries[7].update(event=value)))
+                message = _UNKNOWN_EVENT + shown
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"]["ledger_fields"])
+                self.assertTrue(report["checks"]["integrity"])
+                self.assertEqual(report["failures"], [message])
+                self.assertEqual(report["failure_details"], [
+                    {"reason": "unknown_ledger_event", "seq": 7, "node": "vectors:n1",
+                     "call_id": None, "detail": message}])
+                self.assertEqual(report["failure_entries"], [7])
+
+    def test_an_event_that_is_not_a_string_fails_at_its_entry(self):
+        # Said to be no string, so the number 5 and null read differently from the strings "5"
+        # and "None" above. An absent event reads as None, as an absent seq does.
+        for label, edit, shown in (
+                ("absent", lambda e: e.pop("event"), "None"),
+                ("null", lambda e: e.update(event=None), "None"),
+                ("number", lambda e: e.update(event=5), "5"),
+                ("boolean", lambda e: e.update(event=True), "True"),
+                ("array", lambda e: e.update(event=["done"]), "['done']"),
+                ("object", lambda e: e.update(event={"name": "done"}), '{"name":"done"}')):
+            with self.subTest(event=label):
+                report = self._verify(self._rechained(lambda entries: edit(entries[7])))
+                message = f"{_UNKNOWN_EVENT}{shown}, which is not a string"
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"]["ledger_fields"])
+                self.assertEqual(report["failures"], [message])
+                self.assertEqual(report["failure_details"], [
+                    {"reason": "unknown_ledger_event", "seq": 7, "node": "vectors:n1",
+                     "call_id": None, "detail": message}])
+                self.assertEqual(report["failure_entries"], [7])
+
+    def test_an_allow_renamed_is_reported_not_skipped(self):
+        # Before, the only failure was the outcome it orphaned: the renamed entry itself was
+        # read by no check, containment included.
+        report = self._verify(
+            self._rechained(lambda entries: entries[2].update(event="frobnicate")))
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failures"], [
+            _UNKNOWN_EVENT + "frobnicate",
+            "outcome_without_allow: call_id eb099aeb221783e1442261f15df4fb35 at seq 3 has no "
+            "allow in this chain"])
+        self.assertEqual(report["failure_entries"], [2, 3])
+        self._assert_twins(report)
+
+    def test_a_bare_outcome_on_a_schema_version_1_chain_fails_at_its_entry(self):
+        # `outcome` is v2-only. A bare one carries no v2-only field, so v2_field_on_v1 does not
+        # see it either, and this bundle verified.
+        bundle = _v1_bundle(self.signer)
+        last = bundle["entries"][-1]
+        bundle["entries"].append({"v": 1, "c14n": last["c14n"], "seq": last["seq"] + 1,
+                                  "ts": last["ts"], "event": "outcome",
+                                  "chain_id": last["chain_id"], "node": last["node"]})
+        _rehash(bundle)
+        _reanchor(bundle, self.signer)
+        report = evidence.verify_bundle(bundle, self.signer)
+        message = _UNKNOWN_EVENT + "outcome, a v2-only event on a schema_version=1 chain"
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failures"], [message])
+        self.assertEqual(report["failure_details"], [
+            {"reason": "unknown_ledger_event", "seq": 2, "node": "t:n0", "call_id": None,
+             "detail": message}])
+        self.assertEqual(report["failure_entries"], [2])
+        # The other seven are version 1's own.
+        self.assertTrue(evidence.verify_bundle(_v1_bundle(self.signer), self.signer)["ok"])
+
+    def test_each_defect_on_one_entry_is_reported(self):
+        def both(entries):
+            entries[7]["event"] = "frobnicate"
+            entries[7]["critical"] = True
+        report = self._verify(self._rechained(both))
+        self.assertEqual(report["failures"], [
+            _UNKNOWN_EVENT + "frobnicate",
+            "unknown_ledger_fields: entry carries fields this verifier does not evaluate and "
+            "will not ignore: critical"])
+        self.assertEqual(report["failure_entries"], [7, 7])
+        self._assert_twins(report)
+
+    def test_every_event_the_schema_names_still_verifies(self):
+        # The control: the eight names are read, and nothing above fires on a clean bundle.
+        report = self._verify(self._bundle())
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertTrue(report["checks"]["ledger_fields"])
+
+    # ---- an entry that is not a JSON object -----------------------------
+    def test_an_entry_that_is_not_an_object_is_reported_never_raised(self):
+        # Chain-level, since it has no seq or node; its index is in the message, and
+        # `failure_entries` names it. Nothing else reads it, so it is reported once; the hash
+        # chain breaks there, which is the one consequence. Not re-chained: such an entry has
+        # no hash to re-chain.
+        for value, kind in (("x", "a string"), (None, "null"), ([], "an array"),
+                            (["root"], "an array"), (5, "a number"), (1.5, "a number"),
+                            (True, "a boolean")):
+            with self.subTest(entry=value):
+                bundle = self._bundle()
+                bundle["entries"][7] = value
+                report = self._verify(bundle)
+                self.assertFalse(report["ok"])
+                self.assertFalse(report["checks"]["ledger_fields"])
+                self.assertFalse(report["checks"]["integrity"])
+                self.assertTrue(report["checks"]["version"])
+                self.assertTrue(report["checks"]["chain_id"])
+                self.assertEqual(report["failures"], [
+                    f"invalid_ledger_entry: entries[7] is {kind}, not an object",
+                    "integrity: seq gap at 7 (got None)",
+                    "integrity(anchor): seq gap at 7 (got None)"])
+                self.assertEqual(
+                    [(d["reason"], d["seq"], d["node"], d["call_id"])
+                     for d in report["failure_details"]],
+                    [("invalid_ledger_entry", None, None, None),
+                     ("integrity", None, None, None),
+                     ("integrity(anchor)", None, None, None)])
+                self.assertEqual(report["failure_entries"], [7, 7, None])
+                self._assert_twins(report)
+
+    def test_two_entries_that_are_not_objects_are_each_positioned(self):
+        # By index, never by the value: two nulls are two entries.
+        bundle = self._bundle()
+        bundle["entries"][3] = None
+        bundle["entries"][7] = None
+        report = self._verify(bundle)
+        self.assertEqual(report["failures"], [
+            "invalid_ledger_entry: entries[3] is null, not an object",
+            "invalid_ledger_entry: entries[7] is null, not an object",
+            "integrity: seq gap at 3 (got None)",
+            "integrity(anchor): seq gap at 3 (got None)"])
+        self.assertEqual(report["failure_entries"], [3, 7, 3, None])
+
+    def test_an_expected_head_past_an_entry_that_is_not_an_object_is_reported(self):
+        bundle = self._bundle()
+        head = bundle["entries"][8]["hash"]
+        bundle["entries"][8] = None
+        report = self._verify(bundle, expected_head=(8, head))
+        self.assertIn("expected_head_mismatch: bundle head is (seq=8, hash=None) but the "
+                      f"independently retained expected head is (seq=8, hash={head})",
+                      report["failures"])
+        self.assertFalse(report["ok"])
+
+    # ---- a bundle, or its entries, that is not what the format says -----
+    def test_entries_that_is_not_an_array_is_reported_never_raised(self):
+        for value, kind in (("x", "a string"), ("", "a string"), ({}, "an object"),
+                            ({"0": {}}, "an object"), (5, "a number"), (0, "a number"),
+                            (False, "a boolean")):
+            with self.subTest(entries=value):
+                bundle = self._bundle()
+                bundle["entries"] = value
+                report = self._verify(bundle)
+                message = f"invalid_bundle: entries is {kind}, not an array"
+                self.assertEqual(report["failures"], [message])
+                self.assertEqual(report["failure_details"], [
+                    {"reason": "invalid_bundle", "seq": None, "node": None, "call_id": None,
+                     "detail": message}])
+                self.assertEqual(report["failure_entries"], [None])
+                self.assertFalse(report["ok"])
+                self.assertEqual(report["checks"], {
+                    "integrity": False, "monotonicity": False, "containment": False,
+                    "anchor": "not checked", "version": False, "ledger_fields": False,
+                    "chain_id": False, "root": False, "expected_anchor": "not checked",
+                    "envelopes": "not checked"})
+                self.assertEqual((report["nodes"], report["actions_checked"], report["ungated"]),
+                                 (0, 0, 0))
+                self.assertEqual(report["chain_id"], "vectors")
+                self.assertEqual(report["execution_binding"], {"status": "not applicable"})
+                self.assertEqual(report["envelopes"]["status"], "not checked")
+                self.assertEqual(report["verified_against"], "bundle_anchor")
+
+    def test_absent_or_null_entries_are_still_an_empty_ledger(self):
+        for label, edit in (("absent", lambda b: b.pop("entries")),
+                            ("null", lambda b: b.update(entries=None)),
+                            ("empty", lambda b: b.update(entries=[]))):
+            with self.subTest(entries=label):
+                bundle = self._bundle()
+                edit(bundle)
+                report = evidence.verify_bundle(bundle)
+                self.assertEqual(report["failures"],
+                                 ["missing_root: bundle has 0 root event(s), expected exactly 1"])
+
+    def test_a_bundle_that_is_not_an_object_is_reported_never_raised(self):
+        for value, kind in (([], "an array"), ("x", "a string"), (None, "null"),
+                            (5, "a number"), (True, "a boolean")):
+            with self.subTest(bundle=value):
+                report = self._verify(value)
+                message = f"invalid_bundle: the bundle is {kind}, not an object"
+                self.assertEqual(report["failures"], [message])
+                self.assertEqual(report["failure_entries"], [None])
+                self.assertFalse(report["ok"])
+                self.assertIsNone(report["chain_id"])
+                self._assert_twins(report)
 
 
 if __name__ == "__main__":
