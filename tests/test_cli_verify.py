@@ -1280,6 +1280,26 @@ class TestUnreadableEntriesCli(unittest.TestCase):
         self.assertEqual(out, "\n".join(["TAMPERED — seq gap at 1 (got None)", "entries:",
                                          *lines]) + "\n")
 
+    def test_an_anchor_that_is_not_an_object_is_a_verdict_under_a_key(self):
+        # The kid was read off the anchor before anything was verified, and raised.
+        self.bundle["anchor"] = "x"
+        rc, out = run("verify", self._write("bundle.json", json.dumps(self.bundle)),
+                      "--hs256-key", "00")
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "\n".join([
+            "integrity=False monotonicity=False containment=False anchor=not checked nodes=0 "
+            "actions_checked=0",
+            "  - invalid_bundle: anchor is a string, not an object",
+            "FAILED"]) + "\n")
+
+    def test_no_witness_key_hint_for_envelopes_that_are_not_an_array(self):
+        for value in (5, {"v": 1}, "x"):
+            with self.subTest(envelopes=value):
+                self.bundle["envelopes"] = value
+                rc, out = run("verify", self._write("bundle.json", json.dumps(self.bundle)))
+                self.assertEqual(rc, 2)
+                self.assertNotIn("hint:", out)
+
     def test_no_traceback_over_a_real_subprocess(self):
         self.bundle["entries"][7] = "x"
         path = self._write("bundle.json", json.dumps(self.bundle))

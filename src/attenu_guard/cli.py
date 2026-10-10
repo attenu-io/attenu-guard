@@ -235,12 +235,17 @@ def _verify(args: list):
     if bundle is not None:
         from attenu_guard import evidence
         signer = None
+        # The kid is read off the anchor only when the anchor is an object. Reading it off one
+        # that is not raised here, before anything was verified; the verifier reports such an
+        # anchor (`invalid_bundle`).
+        anchor = bundle.get("anchor")
+        anchor_kid = anchor.get("kid") if isinstance(anchor, dict) else None
         if key_hex:
             from attenu_guard.wire import HS256TestSigner
-            signer = HS256TestSigner(bytes.fromhex(key_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+            signer = HS256TestSigner(bytes.fromhex(key_hex), kid=kid or anchor_kid or "k1")
         elif pub_hex:
             from attenu_guard.wire import Ed25519Verifier
-            signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+            signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or anchor_kid or "k1")
         witness_keys = None
         if witness_path:
             try:
@@ -264,7 +269,8 @@ def _verify(args: list):
         # A bundle carrying envelopes and no trust set fails every one of them, correctly and
         # unhelpfully: the keys are the caller's to supply and nothing in the bundle can stand
         # in for them. The failure stands; the line says how to make the run meaningful.
-        if bundle.get("envelopes") and witness_keys is None:
+        envelopes = bundle.get("envelopes")
+        if isinstance(envelopes, list) and envelopes and witness_keys is None:
             print("hint: pass --witness-keys FILE to supply the trusted witness keys")
         print("OK" if rep["ok"] else "FAILED")
         if per_entry:

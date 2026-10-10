@@ -194,7 +194,12 @@ class AuditLog:
 
     @staticmethod
     def verify_anchor(entries: list[dict], anchor: dict, signer) -> tuple[bool, str | None]:
-        """The chain reproduces AND its head matches a SIGNED anchor. Catches a consistent full rewrite."""
+        """The chain reproduces AND its head matches a SIGNED anchor. Catches a consistent full rewrite.
+
+        An anchor that is not a JSON object carries no member, so it is read as one with none
+        (`anchor missing field v`); it raised `TypeError` here."""
+        if not isinstance(anchor, Mapping):
+            anchor = {}
         try:
             for key in ("v", "chain_id", "seq", "head", "ts"):
                 anchor[key]
@@ -203,9 +208,10 @@ class AuditLog:
         body = {k: v for k, v in anchor.items() if k not in ("kid", "sig", "verified")}
         try:
             signing_input = canonical.dumps(body)
-        except canonical.UnsafeIntegerError:
-            # An integer past 2**53 has no RFC 8785 form, so no signer produced an anchor carrying
-            # one (`anchor()` refuses to): what arrived is not a signed anchor, and the verdict is
+        except canonical.CanonicalizationError:
+            # An integer past 2**53 has no RFC 8785 form, and neither has NaN, an infinity or a
+            # lone surrogate, which Python's json reads: no signer produced an anchor carrying one
+            # (`anchor()` refuses to), so what arrived is not a signed anchor, and the verdict is
             # that its signature does not verify. Raising here crashed the verifier on input from
             # the bundle. Signing still raises, in `anchor()` and `evidence.export_bundle`.
             return False, "anchor signature invalid"
@@ -241,7 +247,12 @@ class AuditLog:
 
         An entry that is not a JSON object (a line of a ledger file reading `null`, a string, a
         number or an array) carries no member, so it is read as an entry with none: a seq gap
-        at its position. It raised `AttributeError` here, out of `attenu-guard verify`."""
+        at its position. It raised `AttributeError` here, out of `attenu-guard verify`.
+        `entries` that are not an array are not a chain: `(False, "entries is a string, not an
+        array")`, where a string's characters were read as entries and null raised."""
+        if not isinstance(entries, (list, tuple)):
+            from .ceilings import _json_kind
+            return False, f"entries is {_json_kind(entries)}, not an array"
         prev = GENESIS
         expected_seq = 0
         for e in entries:
@@ -262,8 +273,9 @@ class AuditLog:
                 return False, f"prev_hash mismatch at seq {expected_seq}"
             try:
                 computed = _hash(prev, payload)
-            except canonical.UnsafeIntegerError:
-                # An integer past 2**53 has no RFC 8785 form, so this entry cannot be the one its
+            except canonical.CanonicalizationError:
+                # An integer past 2**53 has no RFC 8785 form, and neither has NaN, an infinity or
+                # a lone surrogate, which Python's json reads, so this entry cannot be the one its
                 # hash was computed over (`append` refuses to write one): the chain does not
                 # reproduce here, which is the existing finding, at this entry. Raising crashed
                 # the verifier on input from the bundle; writing still raises.
