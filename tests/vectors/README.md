@@ -223,7 +223,8 @@ neither set was written down. Both are stated here, and they are exact.
 
 There is **one** allow-list of top-level entry fields, applied to every entry
 regardless of its `event`. It is `attenu_guard.evidence.LEDGER_FIELDS`, 39
-names, listed here sorted:
+names, the properties `schema/agent-audit.schema.json` lists, and the schema
+allows no other (`additionalProperties: false`). Sorted:
 
 ```
 adapter  agent  authority  authorized_params_hash  body_state  c14n  call_id
@@ -255,6 +256,33 @@ agent  authority  c14n  chain_id  context  detail  disposition  event  granted
 hash  mode  node  parent  policy  prev_hash  reason  reasons  requested  revoked
 scope  seq  strikes  target  task  tool  ts  v
 ```
+
+**Event names.** The `event` set is closed too. It is the schema's `event`
+enum, `attenu_guard.evidence.LEDGER_EVENTS`, eight names:
+
+```
+allow  deny  done  kill  outcome  root  spawn  spawn_denied
+```
+
+`outcome` is v2-only, so a `schema_version=1` chain has the other seven
+(`attenu_guard.evidence.LEDGER_EVENTS_V1`). An entry whose `event` is absent,
+is not a string, or is not in its chain's set fails `unknown_ledger_event`,
+positioned on that entry. Every check reads an entry by its event, so without
+this rule such an entry was read by none of them.
+
+**An entry that is not a JSON object** (a string, a number, a boolean, null or
+an array) fails `invalid_ledger_entry`. It has no `seq` and no `node` of its
+own, so the failure is chain-level, `{"seq": null, "node": null}`, and the
+message names the entry by its index in `entries` instead:
+`invalid_ledger_entry: entries[7] is a string, not an object`. Nothing else
+reads such an entry, and the hash chain breaks at it: `integrity` at that
+index, and `integrity(anchor)` on an anchored bundle verified with its key.
+Whatever entry it stands in for is missing, which other checks may report. A
+bundle that is not an object, an `entries` or `envelopes` that is not an array,
+or an `anchor` that is not an object fails `invalid_bundle`, chain-level, once
+per such member, and nothing else is checked; an absent or null `entries` or
+`anchor` is absent; a null `envelopes` reads as an empty array. The names
+`unknown_ledger_event` and `invalid_ledger_entry` are XuebinMa's (A2A #1575).
 
 **The root is not exempt from `mixed_entry_versions`.** When the root entry's
 `v` differs from the bundle's, the verifier emits both `root_version_mismatch`,
@@ -349,6 +377,9 @@ envelope v1's set, and a v2 declares its own.
 | `root_version_mismatch` | the root entry's `v` differs from the bundle's | the root entry |
 | `mixed_entry_versions` | some entry declares a `v` other than the bundle's; the root is not exempt (see Entry fields) | the first such entry |
 | `unknown_ledger_fields` | an entry carries a top-level field outside `LEDGER_FIELDS` (the 39 names under Entry fields), so the verifier would be reporting success on an entry it did not fully read | that entry |
+| `unknown_ledger_event` | an entry's `event` is absent, is not a string, or is not one its chain's version defines (the eight names under Entry fields; seven on a `schema_version=1` chain, where `outcome` is v2-only), so no check would read that entry | that entry |
+| `invalid_ledger_entry` | an entry is not a JSON object (a string, a number, a boolean, null or an array); the message names its index, `entries[N]` | chain level, no `{seq, node}` |
+| `invalid_bundle` | the bundle is not a JSON object, its `entries` or `envelopes` is not an array, or its `anchor` is not an object; one failure per such member, and nothing else is checked | chain level |
 | `expected_head_mismatch` | the bundle head differs from an independently retained head the verifier was given | chain level |
 | `expected_anchor_mismatch` | the bundle's `(seq, head, chain_id, v)` differs from an independently retained anchor | chain level |
 | `unreadable_authority` | a `root` entry's `authority` cannot be read back as an authority, or its `node` is not a string | that root entry |

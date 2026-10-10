@@ -29,6 +29,7 @@ is the whole input, which is the point.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Mapping
 
@@ -37,12 +38,12 @@ from attenu_guard._display import escaped as _escaped, shown as _shown, shown_te
 from attenu_guard.audit import SCHEMA_VERSION, AuditLog, GENESIS as _GENESIS, _hash as _rehash
 from attenu_guard.audit import _int_or, _integral
 from attenu_guard.authority import Authority
-from attenu_guard.ceilings import describe as _describe_ceiling
+from attenu_guard.ceilings import _json_kind, describe as _describe_ceiling
 from attenu_guard.reasons import Capture, BodyState, Policy
 from attenu_guard.params import ParamsHashReason
 
 __all__ = ["export_bundle", "verify_bundle", "delegation_graph", "denials", "redaction_report", "EvidenceLeakError", "LEDGER_FIELDS",
-           "SUPPORTED_BUNDLE_VERSIONS",
+           "LEDGER_EVENTS", "LEDGER_EVENTS_V1", "SUPPORTED_BUNDLE_VERSIONS",
            # Observer envelopes (envelope v1)
            "sign_envelope", "verify_envelopes", "envelope_subject", "envelope_signing_input",
            "ENVELOPE_VERSION", "ENVELOPE_TYP", "ENVELOPE_RESULTS", "ENVELOPE_ALG",
@@ -81,6 +82,15 @@ LEDGER_FIELDS = frozenset({
     "policy",
 })
 # `task` is free text (a delegated prompt) and `context` is a dict; both are redacted for transport (see below).
+
+# The COMPLETE set of ledger event names, closed: `schema/agent-audit.schema.json`'s `event` enum.
+# Every check in `verify_bundle` reads an entry by its event, so an entry whose event none of them
+# reads was skipped by all of them: a `done` renamed `frobnicate` verified, and an `allow` renamed
+# left containment without a word. `verify_bundle` reports such an entry as `unknown_ledger_event`.
+LEDGER_EVENTS = frozenset({"root", "spawn", "spawn_denied", "allow", "deny", "kill", "done",
+                           "outcome"})
+# `outcome` is v2-only (0.9.0, execution binding): a schema_version=1 chain has the other seven.
+LEDGER_EVENTS_V1 = LEDGER_EVENTS - {"outcome"}
 
 
 class EvidenceLeakError(RuntimeError):
@@ -150,14 +160,31 @@ def _redact_task(t):
 def redaction_report(entries: list[dict], *, context_allowlist=None) -> dict:
     """Every top-level field must be in LEDGER_FIELDS; if `context_allowlist` is given, every context key must be in it.
     Returns {ok, violations:[{event_index, field|context_key, ...}]}. `task` free-text is allowed structurally but is
-    redacted by export_bundle(redact_task=True) for transport (its raw value is the caller's, not the shim's, to keep)."""
+    redacted by export_bundle(redact_task=True) for transport (its raw value is the caller's, not the shim's, to keep).
+
+    What it cannot read is a violation, never a raise, and never read by projection (a string's
+    characters as fields): `entries` that are not an array, `{"event_index": None, "event": None,
+    "entries": <kind>}`; an entry that is not a JSON object, `{..., "entry": <kind>}`; with an
+    allow-list, a context that is not an object, `{..., "context": <kind>}`, where a context
+    Python counts as false (null, "", 0, [], {}) is no context, as `verify_bundle` reads it."""
     violations = []
+    if not isinstance(entries, (list, tuple)):
+        return {"ok": False, "violations": [{"event_index": None, "event": None,
+                                             "entries": _json_kind(entries)}]}
     for i, e in enumerate(entries):
+        if not isinstance(e, Mapping):
+            violations.append({"event_index": i, "event": None, "entry": _json_kind(e)})
+            continue
         for f in e:
             if f not in LEDGER_FIELDS:
                 violations.append({"event_index": i, "event": e.get("event"), "field": f})
         if context_allowlist is not None:
-            for k in (e.get("context") or {}):
+            context = e.get("context") or {}
+            if not isinstance(context, Mapping):
+                violations.append({"event_index": i, "event": e.get("event"),
+                                   "context": _json_kind(context)})
+                continue
+            for k in context:
                 if k not in context_allowlist:
                     violations.append({"event_index": i, "event": e.get("event"), "context_key": k})
     return {"ok": not violations, "violations": violations}
@@ -244,6 +271,44 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     return bundle
 
 
+def _authority_wire_error(value, member: str) -> str | None:
+    """Why `value`, a root's `authority` or a spawn's `granted`, cannot be read as an authority by
+    the type of one of its members, or None. The object itself is an object; `scopes` and
+    `constraints`, when present, arrays, and a scope a string; `ttl`, when present and not null, a
+    finite number that is not a boolean. `Authority.from_wire` reports the rest, as before: a
+    member it does not read, a scope outside the grammar, a constraint of the wrong shape.
+
+    `from_wire` passed `ttl` through unread, and the monotonicity check raised `TypeError`
+    comparing a string with a number; the TypeScript implementation read a ttl that was not a
+    number as unbounded. A `scopes` string was read character by character, and a null `scopes`
+    or `constraints` raised in one implementation and read as empty in the other. Same messages
+    in both."""
+    if not isinstance(value, Mapping):
+        return f"{member} is {_json_kind(value)}, not an object"
+    if set(value) - Authority._WIRE_MEMBERS:
+        return None                           # from_wire names the members it does not read
+    if "scopes" in value:
+        scopes = value["scopes"]
+        if not isinstance(scopes, (list, tuple)):
+            return f"scopes is {_json_kind(scopes)}, not an array"
+        for scope in scopes:
+            if not isinstance(scope, str):
+                return f"a scope is {_json_kind(scope)}, not a string"
+    if "constraints" in value and not isinstance(value["constraints"], (list, tuple)):
+        return f"constraints is {_json_kind(value['constraints'])}, not an array"
+    ttl = value.get("ttl")
+    if ttl is not None:
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+            return f"ttl is {_json_kind(ttl)}, not a number"
+        try:
+            finite = math.isfinite(ttl)
+        except OverflowError:        # an integer past the double range, which JSON.parse reads as Infinity
+            finite = False
+        if not finite:
+            return "ttl is not a finite number"
+    return None
+
+
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dict]:
     """(node -> Authority, node -> parent, failures, node -> defining entry) reconstructed from
     root/spawn events in ledger order, no engine state.
@@ -281,11 +346,19 @@ def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dic
             continue                          # defined twice: verify_bundle reports it
         defined_by[node] = e
         if ev == "root":
-            try: auth[node] = Authority.from_wire(e["authority"])
+            try:
+                wrong = _authority_wire_error(e.get("authority"), "authority")
+                if wrong is not None:
+                    raise ValueError(wrong)
+                auth[node] = Authority.from_wire(e["authority"])
             except Exception as exc: fail.add("unreadable_authority", f"root {_shown(node)}: unreadable authority ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
         else:
             parent[node] = e.get("parent")
-            try: auth[node] = Authority.from_wire(e["granted"])
+            try:
+                wrong = _authority_wire_error(e.get("granted"), "granted")
+                if wrong is not None:
+                    raise ValueError(wrong)
+                auth[node] = Authority.from_wire(e["granted"])
             except Exception as exc: fail.add("unreadable_granted", f"spawn {_shown(node)}: unreadable granted ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
     return auth, parent, fail, defined_by
 
@@ -377,8 +450,12 @@ def _monotonicity_detail(child: Authority, parent: Authority) -> str:
 
 def delegation_graph(bundle: dict) -> dict:
     """A view of the chain from the bundle: each node with its agent, task, authority, parent, and per-node action
-    counts (allow/deny) — what a reviewer or a UI renders. Derived from the ledger alone."""
-    entries = bundle.get("entries") or []
+    counts (allow/deny) — what a reviewer or a UI renders. Derived from the ledger alone.
+
+    A view, not a verdict: it shows what it can read and raises on nothing. A bundle, or
+    `entries`, it cannot read is an empty graph, and an entry that is not a JSON object names no
+    node; `verify_bundle` is what reports either."""
+    entries = _readable_entries(bundle)
     auth, parent, _fail, _defined_by = _node_authorities(entries)
     meta: dict[str, dict] = {}
     for e in entries:
@@ -395,6 +472,8 @@ def delegation_graph(bundle: dict) -> dict:
         elif ev == "deny" and n in meta:
             meta[n]["denies"] += 1
             d = e.get("disposition") or e.get("reason") or "unstated"     # a deny without a disposition is named by its reason (revoked, ceiling_exceeded…)
+            if not isinstance(d, str):
+                d = _shown(d)                 # a key is a string; a list here raised TypeError
             meta[n]["denials_by_disposition"][d] = meta[n]["denials_by_disposition"].get(d, 0) + 1
         elif ev == "done" and n in meta: meta[n]["complete"] = True
         elif ev == "kill":
@@ -402,8 +481,11 @@ def delegation_graph(bundle: dict) -> dict:
             _note_revoked(e, revoked)
             for r in revoked:
                 if r in meta: meta[r]["revoked"] = True
-    return {"chain_id": bundle.get("chain_id"), "nodes": meta,
-            "edges": [{"parent": p, "child": c} for c, p in parent.items() if p]}
+    # A parent that is not a string names no node, so it is no edge.
+    return {"chain_id": bundle.get("chain_id") if isinstance(bundle, Mapping) else None,
+            "nodes": meta,
+            "edges": [{"parent": p, "child": c} for c, p in parent.items()
+                      if isinstance(p, str) and p]}
 
 
 def denials(bundle: dict) -> list[dict]:
@@ -416,10 +498,15 @@ def denials(bundle: dict) -> list[dict]:
     mint the child (revoked/expired parent, depth/fanout overflow) — recorded once, by `Guard.delegate()`,
     on the PARENT node that asked; its `requested` names the sub-agent that was refused, and it has no
     tool or scope because no action was ever authorized. An operator's queue that folded only `deny` would
-    show a refused tool call and miss a refused hand-off, which is the larger event of the two."""
-    entries = bundle.get("entries") or []
-    agent_of = {e.get("node"): e.get("agent") for e in entries if e.get("event") in ("root", "spawn")}
-    rows: dict[tuple, dict] = {}
+    show a refused tool call and miss a refused hand-off, which is the larger event of the two.
+
+    A view, not a verdict, like `delegation_graph`: a bundle, or `entries`, it cannot read has no
+    rows, an entry that is not a JSON object is no refusal, and it raises on nothing."""
+    entries = _readable_entries(bundle)
+    # A node id is a string; a list or an object here raised TypeError as a dict key.
+    agent_of = {e["node"]: e.get("agent") for e in entries
+                if e.get("event") in ("root", "spawn") and isinstance(e.get("node"), str)}
+    rows: dict[str, dict] = {}
     for e in entries:
         ev = e.get("event")
         if ev not in ("deny", "spawn_denied"):
@@ -428,16 +515,21 @@ def denials(bundle: dict) -> list[dict]:
         # what was refused), so it is folded onto the node that asked.
         node = e.get("parent") if ev == "spawn_denied" else e.get("node")
         requested = e.get("agent") if ev == "spawn_denied" else None
-        key = (node, e.get("tool"), e.get("scope"), e.get("disposition"), requested)
+        # Grouped by the escaped JSON text of the five values, which any of them has: a tuple of
+        # them raised TypeError on a list, and took `true` for 1.
+        key = _escaped([node, e.get("tool"), e.get("scope"), e.get("disposition"), requested])
         r = rows.get(key)
         if r is None:
-            rows[key] = {"node": node, "agent": agent_of.get(node), "tool": e.get("tool"),
+            rows[key] = {"node": node, "agent": agent_of.get(node) if isinstance(node, str) else None,
+                         "tool": e.get("tool"),
                          "scope": e.get("scope"), "disposition": e.get("disposition"), "reason": e.get("reason"),
                          "event": ev, "requested": requested,
                          "count": 1, "first_seq": e.get("seq"), "last_seq": e.get("seq")}
         else:
             r["count"] += 1; r["last_seq"] = e.get("seq")
-    return sorted(rows.values(), key=lambda r: r["first_seq"])
+    # In the order each row first occurs. Sorting by `first_seq` said the same on a well-formed
+    # ledger, and raised on a seq that was not an integer.
+    return list(rows.values())
 
 
 # =========================================================================
@@ -548,7 +640,10 @@ def envelope_signing_input(envelope: Mapping) -> bytes:
     """The bytes a witness signs: `JCS(envelope minus its "sig" member)`.
 
     The same RFC 8785 canonicalization the ledger has signed with since 0.7.0 — one
-    implementation, not a second one for envelopes."""
+    implementation, not a second one for envelopes. Raises `ValueError` on an envelope that is
+    not a JSON object, which has no members to sign (it raised `AttributeError`)."""
+    if not isinstance(envelope, Mapping):
+        raise ValueError(f"an envelope is {_json_kind(envelope)}, not an object")
     return canonical.dumps({k: v for k, v in envelope.items() if k != "sig"})
 
 
@@ -613,8 +708,14 @@ def _version_order(value):
 
 def _state_key(entry: dict, index: int):
     """Where `states` and `results` file an entry: its seq when it has one, as the integer when
-    it is integral, and its index when it has none."""
-    return _int_or(entry["seq"]) if "seq" in entry else index
+    it is integral, and its index when it has none. A seq that is a list or an object, which no
+    dict can key by (it raised `TypeError`), is filed by its escaped JSON text, and so is a
+    boolean, which a dict took for 1 or 0 (`True == 1`), so that two entries shared one state.
+    The TypeScript implementation files every seq by the same JSON text."""
+    if "seq" not in entry:
+        return index
+    seq = _int_or(entry["seq"])
+    return _escaped(seq) if isinstance(seq, (bool, list, tuple, Mapping)) else seq
 
 
 def envelope_subject(entries: list[dict], seq: int) -> dict:
@@ -622,14 +723,18 @@ def envelope_subject(entries: list[dict], seq: int) -> dict:
 
     `seq` finds its entry the way a verifier finds it (`_subject_index`), so the subject is the
     one the verifier will check it against. Raises `ValueError` when `seq` names no entry, or
-    names one whose `event` v1 defines no subject for."""
+    names one whose `event` v1 defines no subject for, and when `entries` is not an array. An
+    entry that is not a JSON object is read as one with no members, as the verifier reads it."""
+    if not isinstance(entries, (list, tuple)):
+        raise ValueError(f"entries is {_json_kind(entries)}, not an array")
+    entries = [e if isinstance(e, Mapping) else {} for e in entries]
     at = _subject_index(entries).get(_integral(seq)) if _is_seq(seq) else None
     if at is None:
         raise ValueError(f"no entry at seq {seq!r}")
     seq = _integral(seq)
     entry = entries[at]
     event = entry.get("event")
-    if event not in ENVELOPE_SUBJECT_MEMBERS:
+    if not isinstance(event, str) or event not in ENVELOPE_SUBJECT_MEMBERS:
         raise ValueError(f"envelope v{ENVELOPE_VERSION} defines no subject for event {event!r}")
     subject = {"chain_id": entry.get("chain_id"), "node": entry.get("node"), "seq": seq,
                "entry_hash": _recomputed_hashes(entries)[at], "event": event}
@@ -1152,8 +1257,22 @@ def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, no
     the witness signed is in it. A `witness-signed`
     state means that signature covers the entry's hash and chain position plus what the
     witness-key holder observed (result, time, method); it does not attest that the action was
-    permitted."""
-    entries = bundle.get("entries") or []
+    permitted.
+
+    A bundle it cannot read, or whose `entries` or `envelopes` it cannot (`_unreadable_bundle`;
+    the anchor is not read here), is reported, `ok` false and status `not checked`, with one
+    `invalid_bundle` failure per member, as `verify_bundle` reports it. An entry that is not a
+    JSON object is read as one with no members, filed by its index."""
+    unreadable = _unreadable_bundle(bundle, ("entries", "envelopes"))
+    if unreadable:
+        log = _FailureLog()
+        for detail in unreadable:
+            log.add("invalid_bundle", detail)
+        return {"ok": False, "status": "not checked", "count": 0, "witness_signed": [],
+                "states": {}, "results": {}, "witnesses": {}, "lines": {},
+                "failures": log.messages, "failure_details": log.details,
+                "failure_entries": [None] * len(unreadable)}
+    entries = _readable_entries(bundle)
     trusted, expired = _trusted_witnesses(witness_keys, now)
     summary, fail = _envelopes(entries, bundle.get("envelopes") or [], trusted,
                                envelope_bytes, expired)
@@ -1203,7 +1322,7 @@ def _valid_params_hash_reason(e: dict, hash_field: str) -> str | None:
     if _present_but_null(e, "params_hash_reason"):
         return "params_hash_reason is explicitly null (must be a valid reason or absent)"
     reason = e.get("params_hash_reason")
-    if reason is not None and reason not in ParamsHashReason.ALL:
+    if reason is not None and (not isinstance(reason, str) or reason not in ParamsHashReason.ALL):
         return f"params_hash_reason {reason!r} not a known value"
     if reason is not None and e.get(hash_field) is not None:
         return f"params_hash_reason present alongside {hash_field} (illegal conditional field)"
@@ -1212,6 +1331,27 @@ def _valid_params_hash_reason(e: dict, hash_field: str) -> str | None:
 
 _ALLOW_ONLY_FIELDS = frozenset({"capture", "adapter", "authorized_params_hash", "params_hash_reason",
                                 "policy"})
+
+
+def _is_number(value) -> bool:
+    """A JSON number: an int or a float, never a bool. Two seqs are ordered only when both are
+    one; a string beside an integer raised `TypeError`, and `true` was read as 1."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _call_id_key(cid):
+    """What `duplicate_call_id` compares a call_id by: a string, a number or a boolean as the
+    value it is, a boolean never equal to a number (`True == 1` in Python), and nothing for
+    null, an absent one, a list or an object, which no set can hold (it raised `TypeError`).
+    Such an entry fails its own record check, `call_id missing or malformed`. The TypeScript
+    implementation compares the same values the same way."""
+    if isinstance(cid, bool):
+        return ("bool", cid)
+    if _is_number(cid):
+        return ("number", cid)
+    if isinstance(cid, str):
+        return ("string", cid)
+    return None
 
 
 def _validate_allow(e: dict) -> str | None:
@@ -1230,7 +1370,7 @@ def _validate_allow(e: dict) -> str | None:
     # invalid, not "no claim made" (Codex review item 4).
     if capture is None:
         return "capture is required on every v2 allow"
-    if capture not in Capture.ALL:
+    if not isinstance(capture, str) or capture not in Capture.ALL:
         return f"capture {capture!r} not a known value"
     if adapter is None:
         return "adapter is required alongside capture on every v2 allow"
@@ -1266,7 +1406,7 @@ def _validate_outcome(e: dict) -> str | None:
     if _present_but_null(e, "body_state"):
         return "body_state is explicitly null"
     body_state = e.get("body_state")
-    if body_state not in BodyState.ALL:
+    if not isinstance(body_state, str) or body_state not in BodyState.ALL:
         return f"body_state {body_state!r} not a known value"
     if _present_but_null(e, "error_code"):
         return "error_code is explicitly null (must be a non-empty string or absent)"
@@ -1468,8 +1608,9 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
 
         if ev in ("allow", "deny"):
             cid = e.get("call_id")
-            if cid is not None:
-                prior = seen_call_ids.get(cid)
+            seen_key = _call_id_key(cid)
+            if seen_key is not None:
+                prior = seen_call_ids.get(seen_key)
                 if prior is not None:
                     # Positioned on the SECOND sighting: the entry that re-used a call_id is the
                     # offending record, the first one having been legitimate when it was written.
@@ -1478,13 +1619,14 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
                                  f"already used at seq {_shown(_int_or(prior[2]))} ({prior[0]})",
                                  seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
                 else:
-                    seen_call_ids[cid] = (ev, e.get("node"), e.get("seq"))
+                    seen_call_ids[seen_key] = (ev, e.get("node"), e.get("seq"))
             validator = _validate_allow if ev == "allow" else _validate_deny
             err = validator(e)
             if err:
                 failures.add(f"invalid_{ev}", f"invalid_{ev}: {err} (seq {_shown(_int_or(e.get('seq')))})",
                              seq=e.get("seq"), node=e.get("node"), call_id=cid, entry=e)
-                if ev == "allow" and cid is not None:
+                # Only ever asked about a valid call_id, which is a string; a list here raised.
+                if ev == "allow" and isinstance(cid, str):
                     invalid_allow_ids.add(cid)
                 continue
             if ev == "allow" and cid is not None:
@@ -1528,8 +1670,8 @@ def _execution_binding(entries: list[dict], bundle_v) -> tuple[dict, _FailureLog
                          f"cross_ref: call_id {_shown(cid)} allow on node {allow_e.get('node')!r} "
                          f"but outcome on node {oc.get('node')!r}",
                          seq=oc.get("seq"), node=oc.get("node"), call_id=cid, entry=oc)
-        order_ok = (oc.get("seq") is not None and allow_e.get("seq") is not None
-                   and oc["seq"] > allow_e["seq"])
+        order_ok = (_is_number(oc.get("seq")) and _is_number(allow_e.get("seq"))
+                    and oc["seq"] > allow_e["seq"])
         if not order_ok:
             failures.add("outcome_before_allow",
                          f"outcome_before_allow: call_id {_shown(cid)} outcome seq {_shown(_int_or(oc.get('seq')))} "
@@ -1617,9 +1759,12 @@ def _integrity_break(entries: list[dict]):
     exactly (same seq/prev_hash/hash order, and the same rule that a seq is an integral number
     and never a bool, `_integral`: `True == 1` in Python, and a re-hashed chain with
     `"seq": true` at index 1 verified clean). None when nothing entry-local is wrong — a consistently re-hashed ledger fails
-    against the signed anchor, not here, and that failure is chain-level."""
+    against the signed anchor, not here, and that failure is chain-level. An entry that is not a
+    JSON object carries no member, so the chain breaks at it, as `AuditLog.verify` reads it."""
     prev = _GENESIS
     for i, e in enumerate(entries):
+        if not isinstance(e, Mapping):
+            return i
         payload = {k: v for k, v in e.items() if k != "hash"}
         try:
             broken = (_integral(e.get("seq")) != i
@@ -1631,6 +1776,63 @@ def _integrity_break(entries: list[dict]):
             return i
         prev = e["hash"]
     return None
+
+
+#: What each bundle member this module reads has to be, when it is present and not null.
+_BUNDLE_MEMBERS = {"entries": ("an array", lambda v: isinstance(v, (list, tuple))),
+                   "anchor": ("an object", lambda v: isinstance(v, Mapping)),
+                   "envelopes": ("an array", lambda v: isinstance(v, (list, tuple)))}
+
+
+def _unreadable_bundle(bundle, members=("entries", "anchor", "envelopes")) -> list:
+    """The `invalid_bundle` messages for a bundle this module cannot read: one when the bundle is
+    not a JSON object, or one for each member in `members` that is present, not null, and not
+    the type the format gives it. An empty list when there is nothing of the kind. Reading such
+    a member anyway reads it by projection (a string's characters as entries) or raises."""
+    if not isinstance(bundle, Mapping):
+        return [f"invalid_bundle: the bundle is {_json_kind(bundle)}, not an object"]
+    out = []
+    for member in members:
+        want, ok = _BUNDLE_MEMBERS[member]
+        value = bundle.get(member)
+        if value is not None and not ok(value):
+            out.append(f"invalid_bundle: {member} is {_json_kind(value)}, not {want}")
+    return out
+
+
+def _readable_entries(bundle) -> list:
+    """A bundle's entries as the readers that never fail read them: none when the bundle or its
+    `entries` cannot be read (`_unreadable_bundle`), and an entry that is not a JSON object read
+    as one with no members, which names no node, no event and no seq."""
+    if not isinstance(bundle, Mapping):
+        return []
+    entries = bundle.get("entries")
+    if not isinstance(entries, (list, tuple)):
+        return []
+    return [e if isinstance(e, Mapping) else {} for e in entries]
+
+
+def _invalid_bundle_report(bundle, details: list, verified_against: str) -> dict:
+    """The report on a bundle this verifier cannot read at all (`_unreadable_bundle`): one
+    `invalid_bundle` failure per member it cannot read, each about no single entry; every check
+    false, and every status `not checked`, since none ran. The report has every member a full
+    verification's has, so a reader of it needs no second shape."""
+    log = _FailureLog()
+    for detail in details:
+        log.add("invalid_bundle", detail)
+    return {"ok": False,
+            "checks": {"integrity": False, "monotonicity": False, "containment": False,
+                       "anchor": "not checked", "version": False, "chain_id": False,
+                       "root": False, "expected_anchor": "not checked",
+                       "envelopes": "not checked", "ledger_fields": False},
+            "failures": log.messages, "failure_details": log.details,
+            "failure_entries": [None] * len(details),
+            "nodes": 0, "actions_checked": 0, "ungated": 0,
+            "chain_id": bundle.get("chain_id") if isinstance(bundle, Mapping) else None,
+            "execution_binding": {"status": "not applicable"},
+            "envelopes": {"status": "not checked", "count": 0, "witness_signed": [], "states": {},
+                          "results": {}, "witnesses": {}, "lines": {}, "failures": []},
+            "verified_against": verified_against}
 
 
 def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = None,
@@ -1674,7 +1876,24 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     each failure is about, or None for a failure about no single entry: exact where a seq is
     not, since a forged entry's seq can be missing, null, a bool or a duplicate.
     """
-    entries = bundle.get("entries") or []
+    verified_against = ("expected_anchor" if (expected_anchor is not None or expected_head is not None)
+                        else "bundle_anchor")
+    # A bundle is a JSON object, its `entries` and `envelopes` arrays and its `anchor` an
+    # object. Anything else raised out of this function (`AttributeError`, or `TypeError`),
+    # whose 0.13.0 note says it never raises. Such a bundle is reported alone, as
+    # `invalid_bundle`, once per member it cannot read. An absent or null member is absent.
+    unreadable = _unreadable_bundle(bundle)
+    if unreadable:
+        return _invalid_bundle_report(bundle, unreadable, verified_against)
+    raw_entries = bundle.get("entries")
+    if raw_entries is None:
+        raw_entries = []
+    # An entry that is not a JSON object is reported once, as `invalid_ledger_entry` in (0b2),
+    # and read everywhere else as an entry with no members: the checks that read an entry's
+    # fields skip it, and the hash chain breaks at it. Each stand-in is a new object, so
+    # `failure_entries` finds its index by identity, as it finds every other entry's.
+    entries = [e if isinstance(e, Mapping) else {} for e in raw_entries]
+    unread = {id(e) for e, raw in zip(entries, raw_entries) if e is not raw}
     anchor = bundle.get("anchor") or {}
     checks = {"integrity": False, "monotonicity": False, "containment": False, "anchor": "not checked",
               "version": False, "chain_id": False, "root": False, "expected_anchor": "not checked",
@@ -1712,8 +1931,19 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
         log.add("root_version_mismatch",
                 f"root_version_mismatch: root v={_int_or(root_entry.get('v'))!r} != bundle v={_int_or(raw_v)!r}",
                 seq=root_entry.get("seq"), node=root_entry.get("node"), entry=root_entry)
-    mixed_entries = [e for e in entries if not _same_number(e.get("v"), raw_v)]
-    mixed = sorted({_int_or(e.get("v")) for e in mixed_entries}, key=_version_order)
+    mixed_entries = [e for e in entries
+                     if id(e) not in unread and not _same_number(e.get("v"), raw_v)]
+    # Each version once, as a set holds it, except a list or an object, which a set cannot
+    # hold (it raised `TypeError` here): each of those is listed as written.
+    mixed, seen_versions = [], set()
+    for e in mixed_entries:
+        version = _int_or(e.get("v"))
+        if isinstance(version, (list, tuple, Mapping)):
+            mixed.append(version)
+        elif version not in seen_versions:
+            seen_versions.add(version)
+            mixed.append(version)
+    mixed.sort(key=_version_order)
     if mixed:
         version_ok = False
         # One aggregate message over every offending entry (unchanged); the twin is positioned on
@@ -1738,8 +1968,33 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     #
     # Reported as a failure rather than raised: `verify_bundle` returns a report, and an unknown
     # field is a property of the bundle, not an error in the call.
+    #
+    # The same pass reads every entry's shape and event, and reports each defect an entry has.
+    # An entry that is not a JSON object is `invalid_ledger_entry`, chain-level since it has no
+    # seq or node, its index in the message.
+    # An event that is absent, not a string, or not one its chain's version defines (`outcome`
+    # is v2-only) is `unknown_ledger_event`: every check below reads an entry by its event, so
+    # such an entry was read by none of them.
     unknown_ok = True
-    for e in entries:
+    events = LEDGER_EVENTS_V1 if bundle_v == 1 else LEDGER_EVENTS
+    for index, e in enumerate(entries):
+        if id(e) in unread:
+            unknown_ok = False
+            log.add("invalid_ledger_entry",
+                    f"invalid_ledger_entry: entries[{index}] is {_json_kind(raw_entries[index])}, "
+                    f"not an object",
+                    entry=e)
+            continue
+        ev = e.get("event")
+        if not isinstance(ev, str) or ev not in events:
+            unknown_ok = False
+            why = (", which is not a string" if not isinstance(ev, str)
+                   else ", a v2-only event on a schema_version=1 chain" if ev in LEDGER_EVENTS
+                   else "")
+            log.add("unknown_ledger_event",
+                    f"unknown_ledger_event: entry carries an event this verifier does not "
+                    f"evaluate and will not ignore: {_shown(ev)}{why}",
+                    seq=e.get("seq"), node=e.get("node"), entry=e)
         extra = sorted(f for f in e if f not in LEDGER_FIELDS)
         if extra:
             unknown_ok = False
@@ -1765,7 +2020,7 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # (0c) independently retained expected anchor/head: verified against the BUNDLE's actual
     # computed head, never against its own (possibly forged) enclosed anchor.
     if expected_anchor is not None or expected_head is not None:
-        actual_seq, actual_head = (len(entries) - 1, entries[-1]["hash"]) if entries else (-1, _GENESIS)
+        actual_seq, actual_head = (len(entries) - 1, entries[-1].get("hash")) if entries else (-1, _GENESIS)
         ok = True
         if expected_head is not None:
             exp_seq, exp_hash = expected_head
@@ -1788,7 +2043,8 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
     # must all name the SAME chain. Without this a correctly-signed, internally-consistent bundle
     # for a DIFFERENT chain could be handed to a verifier who believes it is checking this one.
     bundle_chain_id = bundle.get("chain_id")
-    foreign = next((e for e in entries if e.get("chain_id") != bundle_chain_id), None)
+    foreign = next((e for e in entries
+                    if id(e) not in unread and e.get("chain_id") != bundle_chain_id), None)
     entries_ok = foreign is None
     if not entries_ok:
         log.add("chain_id_mismatch",
@@ -1959,5 +2215,4 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
             "failure_entries": log.entry_indices(entries),
             "nodes": len(auth), "actions_checked": actions, "ungated": ungated, "chain_id": bundle.get("chain_id"),
             "execution_binding": execution_binding, "envelopes": envelope_summary,
-            "verified_against": "expected_anchor" if (expected_anchor is not None or expected_head is not None)
-                                else "bundle_anchor"}
+            "verified_against": verified_against}
