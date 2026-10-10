@@ -1280,6 +1280,24 @@ class TestUnreadableEntriesCli(unittest.TestCase):
         self.assertEqual(out, "\n".join(["TAMPERED — seq gap at 1 (got None)", "entries:",
                                          *lines]) + "\n")
 
+    def test_a_ttl_that_is_not_a_number_is_a_verdict(self):
+        # It raised TypeError out of the monotonicity check, and the CLI ended in a traceback.
+        from attenu_guard.audit import GENESIS, _hash
+        self.bundle["entries"][0]["authority"]["ttl"] = "x"
+        prev = GENESIS
+        for e in self.bundle["entries"]:
+            e["prev_hash"] = prev
+            e["hash"] = _hash(prev, {k: v for k, v in e.items() if k != "hash"})
+            prev = e["hash"]
+        rc, out = run("verify", self._write("bundle.json", json.dumps(self.bundle)))
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "\n".join([
+            "integrity=True monotonicity=False containment=False anchor=not checked nodes=1 "
+            "actions_checked=2",
+            "  - root vectors:n0: unreadable authority (ttl is a string, not a number)",
+            "  - containment: allow on unknown node vectors:n0",
+            "FAILED"]) + "\n")
+
     def test_an_anchor_that_is_not_an_object_is_a_verdict_under_a_key(self):
         # The kid was read off the anchor before anything was verified, and raised.
         self.bundle["anchor"] = "x"

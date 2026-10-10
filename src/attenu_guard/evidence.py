@@ -29,6 +29,7 @@ is the whole input, which is the point.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Mapping
 
@@ -270,6 +271,40 @@ def export_bundle(audit_log: AuditLog, signer, ts: int = 0, *, context_allowlist
     return bundle
 
 
+def _authority_wire_error(value, member: str) -> str | None:
+    """Why `value`, a root's `authority` or a spawn's `granted`, cannot be read as an authority by
+    the type of one of its members, or None. The object itself is an object; `scopes` and
+    `constraints`, when present, arrays, and a scope a string; `ttl`, when present and not null, a
+    finite number that is not a boolean. `Authority.from_wire` reports the rest, as before: a
+    member it does not read, a scope outside the grammar, a constraint of the wrong shape.
+
+    `from_wire` passed `ttl` through unread, and the monotonicity check raised `TypeError`
+    comparing a string with a number; the TypeScript implementation read a ttl that was not a
+    number as unbounded. A `scopes` string was read character by character, and a null `scopes`
+    or `constraints` raised in one implementation and read as empty in the other. Same messages
+    in both."""
+    if not isinstance(value, Mapping):
+        return f"{member} is {_json_kind(value)}, not an object"
+    if set(value) - Authority._WIRE_MEMBERS:
+        return None                           # from_wire names the members it does not read
+    if "scopes" in value:
+        scopes = value["scopes"]
+        if not isinstance(scopes, (list, tuple)):
+            return f"scopes is {_json_kind(scopes)}, not an array"
+        for scope in scopes:
+            if not isinstance(scope, str):
+                return f"a scope is {_json_kind(scope)}, not a string"
+    if "constraints" in value and not isinstance(value["constraints"], (list, tuple)):
+        return f"constraints is {_json_kind(value['constraints'])}, not an array"
+    ttl = value.get("ttl")
+    if ttl is not None:
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+            return f"ttl is {_json_kind(ttl)}, not a number"
+        if not math.isfinite(ttl):
+            return "ttl is not a finite number"
+    return None
+
+
 def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dict]:
     """(node -> Authority, node -> parent, failures, node -> defining entry) reconstructed from
     root/spawn events in ledger order, no engine state.
@@ -307,11 +342,19 @@ def _node_authorities(entries: list[dict]) -> tuple[dict, dict, _FailureLog, dic
             continue                          # defined twice: verify_bundle reports it
         defined_by[node] = e
         if ev == "root":
-            try: auth[node] = Authority.from_wire(e["authority"])
+            try:
+                wrong = _authority_wire_error(e.get("authority"), "authority")
+                if wrong is not None:
+                    raise ValueError(wrong)
+                auth[node] = Authority.from_wire(e["authority"])
             except Exception as exc: fail.add("unreadable_authority", f"root {_shown(node)}: unreadable authority ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
         else:
             parent[node] = e.get("parent")
-            try: auth[node] = Authority.from_wire(e["granted"])
+            try:
+                wrong = _authority_wire_error(e.get("granted"), "granted")
+                if wrong is not None:
+                    raise ValueError(wrong)
+                auth[node] = Authority.from_wire(e["granted"])
             except Exception as exc: fail.add("unreadable_granted", f"spawn {_shown(node)}: unreadable granted ({exc})", seq=e.get("seq"), node=node, entry=e)  # noqa: BLE001
     return auth, parent, fail, defined_by
 

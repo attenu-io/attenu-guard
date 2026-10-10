@@ -1581,7 +1581,7 @@ class TestHostileBundleContent(unittest.TestCase):
             self.assertFalse(ok)
 
     # ---- the class, swept --------------------------------------------------------
-    def test_no_public_reader_raises_on_a_value_of_any_kind_anywhere(self):
+    def test_no_public_reader_raises_on_a_value_of_any_kind_in_any_top_level_field(self):
         readers = {
             "verify_bundle": lambda b: evidence.verify_bundle(b),
             "verify_bundle(key)": lambda b: evidence.verify_bundle(b, self.signer),
@@ -1617,6 +1617,175 @@ class TestHostileBundleContent(unittest.TestCase):
                     read(bundle)
                 except Exception as exc:  # noqa: BLE001 - the assertion is that nothing raises
                     self.fail(f"{name} raised {type(exc).__name__}: {exc} on {bundle!r:.200}")
+
+    def test_no_public_reader_raises_on_a_value_of_any_kind_in_a_nested_member(self):
+        # The members inside an entry or an envelope that a reader reads: the root's authority and
+        # a spawn's granted (scopes, constraints, ttl, a scope, a constraint and its members), an
+        # allow's context and adapter, an outcome's receipt, a kill's revoked and pending_at_kill,
+        # and every member of an envelope. A ttl that was not a number raised through 0.19.1.
+        def put(bundle, path, value):
+            target = bundle
+            for key in path[:-1]:
+                if isinstance(target, dict) and not isinstance(target.get(key), (dict, list)):
+                    target[key] = {"type": "t", "ref": "r", "digest": "0" * 64} if key == "receipt" else {}
+                target = target[key]
+            target[path[-1]] = copy.deepcopy(value)
+
+        envelope_case = next(c for c in vectors.load_envelope_vectors()["cases"]
+                             if c["name"] == "valid_spawn_envelope")
+        root = Guard.issue("root", Authority({"crm.read"}, [], ttl=600), chain_id="k",
+                           schema_version=2)
+        child = root.delegate("c", Authority({"crm.read"}, [], ttl=60), task="t")
+        root.revoke(child.node_id)
+        kill = evidence.export_bundle(root.audit_log(), self.signer)
+        kill_at = next(i for i, e in enumerate(kill["entries"]) if e["event"] == "kill")
+        paths = []
+        for at, member in ((0, "authority"), (1, "granted")):
+            for tail in (["scopes"], ["constraints"], ["ttl"], ["scopes", 0], ["constraints", 0],
+                         ["constraints", 0, "key"], ["constraints", 0, "max"],
+                         ["constraints", 0, "zz"]):
+                paths.append((self.case["bundle"], None, ["entries", at, member, *tail], True))
+        for tail in (["context", "rows"], ["context", "spend"], ["context", "egress"],
+                     ["adapter", "module"], ["adapter", "version"], ["adapter", "hook_path"]):
+            paths.append((self.case["bundle"], None, ["entries", 2, *tail], True))
+        for tail in (["receipt"], ["receipt", "type"], ["receipt", "ref"], ["receipt", "digest"]):
+            paths.append((self.case["bundle"], None, ["entries", 3, *tail], True))
+        for tail in (["revoked"], ["revoked", 0], ["pending_at_kill"]):
+            paths.append((kill, None, ["entries", kill_at, *tail], True))
+        for tail in (["v"], ["typ"], ["subject"], ["observed"], ["witness"], ["sig"],
+                     ["subject", "chain_id"], ["subject", "node"], ["subject", "seq"],
+                     ["subject", "entry_hash"], ["subject", "event"], ["observed", "result"],
+                     ["observed", "at"], ["observed", "method"], ["witness", "kid"],
+                     ["witness", "alg"]):
+            paths.append((envelope_case["bundle"], envelope_case["witness_keys"],
+                          ["envelopes", 0, *tail], False))
+        readers = {
+            "verify_bundle": lambda b, wk: evidence.verify_bundle(b),
+            "verify_bundle(key)": lambda b, wk: evidence.verify_bundle(b, self.signer, witness_keys=wk),
+            "delegation_graph": lambda b, wk: evidence.delegation_graph(b),
+            "denials": lambda b, wk: evidence.denials(b),
+            "verify_envelopes": lambda b, wk: evidence.verify_envelopes(b, witness_keys=wk),
+            "redaction_report": lambda b, wk: evidence.redaction_report(b["entries"],
+                                                                         context_allowlist={"rows"}),
+        }
+        for base, witness_keys, path, rechain in paths:
+            for value in _KINDS:
+                bundle = copy.deepcopy(base)
+                put(bundle, path, value)
+                if rechain:
+                    _rehash(bundle)
+                    _reanchor(bundle, self.signer)
+                for name, read in readers.items():
+                    try:
+                        read(bundle, witness_keys)
+                    except Exception as exc:  # noqa: BLE001 - the assertion is that nothing raises
+                        self.fail(f"{name} raised {type(exc).__name__}: {exc} at {path} = {value!r}")
+
+
+# =========================================================================
+# The root's authority and a spawn's granted are read whole, member by member
+# =========================================================================
+#: (case, edit, failures): (failure, seq, node, failure_entries index), in report order.
+#: Re-chained and re-anchored. attenu-guard-ts's test/bundle-vectors.test.ts asserts the same rows.
+_N0_UNKNOWN = ("containment: allow on unknown node vectors:n0", 2, "vectors:n0", 2)
+_N1_UNKNOWN = ("containment: allow on unknown node vectors:n1", 4, "vectors:n1", 4)
+_AUTHORITY_CASES = (
+    ("root ttl 'x'", lambda es: es[0]["authority"].update(ttl="x"),
+     [("root vectors:n0: unreadable authority (ttl is a string, not a number)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("root ttl []", lambda es: es[0]["authority"].update(ttl=[]),
+     [("root vectors:n0: unreadable authority (ttl is an array, not a number)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("spawn ttl true", lambda es: es[1]["granted"].update(ttl=True),
+     [("spawn vectors:n1: unreadable granted (ttl is a boolean, not a number)", 1, "vectors:n1", 1),
+      _N1_UNKNOWN]),
+    ("spawn ttl {}", lambda es: es[1]["granted"].update(ttl={}),
+     [("spawn vectors:n1: unreadable granted (ttl is an object, not a number)", 1, "vectors:n1", 1),
+      _N1_UNKNOWN]),
+    ("root authority null", lambda es: es[0].update(authority=None),
+     [("root vectors:n0: unreadable authority (authority is null, not an object)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("root authority absent", lambda es: es[0].pop("authority"),
+     [("root vectors:n0: unreadable authority (authority is null, not an object)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("spawn granted 'x'", lambda es: es[1].update(granted="x"),
+     [("spawn vectors:n1: unreadable granted (granted is a string, not an object)", 1, "vectors:n1", 1),
+      _N1_UNKNOWN]),
+    ("root scopes 'crm.*'", lambda es: es[0]["authority"].update(scopes="crm.*"),
+     [("root vectors:n0: unreadable authority (scopes is a string, not an array)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("spawn scopes null", lambda es: es[1]["granted"].update(scopes=None),
+     [("spawn vectors:n1: unreadable granted (scopes is null, not an array)", 1, "vectors:n1", 1),
+      _N1_UNKNOWN]),
+    ("root scope 5", lambda es: es[0]["authority"]["scopes"].__setitem__(0, 5),
+     [("root vectors:n0: unreadable authority (a scope is a number, not a string)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("root constraints null", lambda es: es[0]["authority"].update(constraints=None),
+     [("root vectors:n0: unreadable authority (constraints is null, not an array)", 0, "vectors:n0", 0),
+      _N0_UNKNOWN]),
+    ("spawn constraints {}", lambda es: es[1]["granted"].update(constraints={}),
+     [("spawn vectors:n1: unreadable granted (constraints is an object, not an array)", 1, "vectors:n1", 1),
+      _N1_UNKNOWN]),
+)
+
+
+class TestAuthorityReadWhole(unittest.TestCase):
+    """A root's `authority.ttl` or a spawn's `granted.ttl` that was not null and not a number
+    raised `TypeError` out of `verify_bundle` (and `attenu-guard verify`) in every release from
+    0.4.0 through 0.19.1. attenu-guard-ts read it as unbounded, so a root `ttl: "x"` verified
+    there. A member of either object that is not the
+    type the wire format gives it is now an unreadable authority, positioned on that entry, in
+    both implementations: `ttl` a number or null, `scopes` and `constraints` arrays, a scope a
+    string, and the object itself an object."""
+
+    def setUp(self):
+        self.case = next(c for c in vectors.load_bundle_vectors()["cases"]
+                         if c["name"] == "valid_bundle_v2")
+        self.signer = _signer_for(self.case)
+
+    def _rechained(self, edit):
+        bundle = copy.deepcopy(self.case["bundle"])
+        edit(bundle["entries"])
+        _rehash(bundle)
+        _reanchor(bundle, self.signer)
+        return bundle
+
+    def test_a_member_of_the_wrong_type_is_an_unreadable_authority(self):
+        for label, edit, expected in _AUTHORITY_CASES:
+            with self.subTest(case=label):
+                for signer in (self.signer, None):
+                    report = evidence.verify_bundle(self._rechained(edit), signer)
+                    self.assertFalse(report["ok"])
+                    self.assertFalse(report["checks"]["monotonicity"])
+                    self.assertEqual(
+                        [(m, d["seq"], d["node"], at) for m, d, at in
+                         zip(report["failures"], report["failure_details"], report["failure_entries"])],
+                        expected)
+
+    def test_a_ttl_that_is_not_finite_is_an_unreadable_authority(self):
+        # Python's json reads NaN and Infinity, and RFC 8785 writes neither, so the chain cannot
+        # reproduce over one either; the authority is unreadable on its own account.
+        for value in (float("nan"), float("inf")):
+            bundle = copy.deepcopy(self.case["bundle"])
+            bundle["entries"][1]["granted"]["ttl"] = value
+            failures = evidence.verify_bundle(bundle, self.signer)["failures"]
+            self.assertIn("spawn vectors:n1: unreadable granted (ttl is not a finite number)", failures)
+
+    def test_a_readable_authority_still_verifies(self):
+        # The controls: a null ttl is unbounded, a number of either kind is a bound, an absent
+        # member is the empty default.
+        for label, edit in (("root ttl null", lambda es: es[0]["authority"].update(ttl=None)),
+                            ("root ttl 10**12", lambda es: es[0]["authority"].update(ttl=10**12)),
+                            ("spawn ttl 1.5", lambda es: es[1]["granted"].update(ttl=1.5)),
+                            ("root constraints absent", lambda es: es[0]["authority"].pop("constraints"))):
+            with self.subTest(case=label):
+                report = evidence.verify_bundle(self._rechained(edit), self.signer)
+                self.assertTrue(report["ok"], report["failures"])
+
+    def test_the_views_read_an_unreadable_authority_as_none(self):
+        bundle = self._rechained(lambda es: es[0]["authority"].update(ttl="x"))
+        self.assertEqual(evidence.delegation_graph(bundle)["nodes"]["vectors:n0"]["scopes"], [])
+        self.assertEqual(len(evidence.denials(bundle)), 1)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

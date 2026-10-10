@@ -276,11 +276,12 @@ own, so the failure is chain-level, `{"seq": null, "node": null}`, and the
 message names the entry by its index in `entries` instead:
 `invalid_ledger_entry: entries[7] is a string, not an object`. Nothing else
 reads such an entry, and the hash chain breaks at it: `integrity` at that
-index, and `integrity(anchor)` on an anchored bundle. Whatever entry it stands
-in for is missing, which other checks may report. A bundle that is not an
-object, an `entries` or `envelopes` that is not an array, or an `anchor` that
-is not an object fails `invalid_bundle`, chain-level, once per such member, and
-nothing else is checked; an absent or null member is absent. The names
+index, and `integrity(anchor)` on an anchored bundle verified with its key.
+Whatever entry it stands in for is missing, which other checks may report. A
+bundle that is not an object, an `entries` or `envelopes` that is not an array,
+or an `anchor` that is not an object fails `invalid_bundle`, chain-level, once
+per such member, and nothing else is checked; an absent or null `entries` or
+`anchor` is absent; a null `envelopes` reads as an empty array. The names
 `unknown_ledger_event` and `invalid_ledger_entry` are XuebinMa's (A2A #1575).
 
 **The root is not exempt from `mixed_entry_versions`.** When the root entry's
