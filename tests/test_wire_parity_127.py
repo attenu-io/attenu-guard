@@ -218,14 +218,15 @@ class UnrepresentableContextIsARecordedDeny(unittest.TestCase):
     ledger, and `Guard.check` raised `UnsafeIntegerError` with nothing recorded. Adapters fill the
     context from tool arguments, so a model-sent `amount: 1e21` became an unrecorded refusal. It is
     now a recorded deny: `no_authority` on the constraint `context`, disposition `unresolved`, the
-    context left out of the row, the meters as they were, and `AuthorityDenied` raised."""
+    context left out of the row, the meters as they were, and the deny returned as every deny is;
+    `enforce` raises it as `AuthorityDenied`."""
 
     def _guard(self, *ceilings):
         return Guard.issue("payer", Authority({"pay.send"}, tuple(ceilings), 60), chain_id="t")
 
-    def _assert_recorded_deny(self, g, before, exc, scope="pay.send"):
-        r = exc.decision.reasons[0]
-        self.assertFalse(exc.decision)
+    def _assert_recorded_deny(self, g, before, decision, scope="pay.send"):
+        r = decision.reasons[0]
+        self.assertFalse(decision)
         self.assertEqual((r.code, r.constraint, r.requested), (ReasonCode.NO_AUTHORITY, "context", scope))
         self.assertTrue(r.message.startswith("context not representable: integer "), r.message)
         entries = g._audit.entries
@@ -240,9 +241,7 @@ class UnrepresentableContextIsARecordedDeny(unittest.TestCase):
     def test_spend_past_the_range_is_a_recorded_deny(self):
         g = self._guard(SpendCap(100.0))
         before = len(g._audit.entries)
-        with self.assertRaises(AuthorityDenied) as cm:
-            g.check("pay.send", spend=1e21)
-        r = self._assert_recorded_deny(g, before, cm.exception)
+        r = self._assert_recorded_deny(g, before, g.check("pay.send", spend=1e21))
         self.assertEqual(r.message, "context not representable: integer 1e+21 exceeds the safe range "
                                     "±9007199254740991 for a binary64 signing surface "
                                     "(RFC 8785 numbers are IEEE 754 doubles)")
@@ -250,9 +249,7 @@ class UnrepresentableContextIsARecordedDeny(unittest.TestCase):
     def test_an_allowed_call_with_a_nanosecond_timestamp_leaves_the_meter_as_it_was(self):
         g = self._guard(CallLimit(2))
         before = len(g._audit.entries)
-        with self.assertRaises(AuthorityDenied) as cm:
-            g.check("pay.send", context={"ts_ns": 1.76e18})
-        self._assert_recorded_deny(g, before, cm.exception)
+        self._assert_recorded_deny(g, before, g.check("pay.send", context={"ts_ns": 1.76e18}))
         self.assertTrue(g.check("pay.send"))
         self.assertTrue(g.check("pay.send"))
         self.assertFalse(g.check("pay.send"))
@@ -262,7 +259,7 @@ class UnrepresentableContextIsARecordedDeny(unittest.TestCase):
         before = len(g._audit.entries)
         with self.assertRaises(AuthorityDenied) as cm:
             g.enforce("pay.send", spend=1e21)
-        self._assert_recorded_deny(g, before, cm.exception)
+        self._assert_recorded_deny(g, before, cm.exception.decision)
 
     def test_would_allow_reports_the_deny_and_writes_nothing(self):
         g = self._guard(CallLimit(2))

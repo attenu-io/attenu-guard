@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from attenu_guard import Authority, AuthorityDenied, Guard, RowLimit, CommittedAuditError
+from attenu_guard import Authority, Guard, RowLimit, CommittedAuditError
 from attenu_guard import evidence, canonical, params as params_mod
 from attenu_guard.guard import DuplicateOutcomeError
 from attenu_guard.reasons import Capture, BodyState, ReasonCode, CompletionResult
@@ -251,9 +251,9 @@ class TestAtomicityAndRollback(unittest.TestCase):
         # context the ledger cannot hold, is recorded as a deny with the context left out.
         g = Guard.issue("a", Authority({"crm.read"}, [RowLimit(100)], ttl=60), schema_version=2)
         before = g._chain.calls_so_far(g.node_id, "*")
-        with self.assertRaises(AuthorityDenied) as cm:
-            g.check("crm.read", context={"rows": 1, "note": "\ud800"})
-        self.assertEqual(cm.exception.decision.reasons[0].constraint, "context")
+        d = g.check("crm.read", context={"rows": 1, "note": "\ud800"})
+        self.assertFalse(d)
+        self.assertEqual(d.reasons[0].constraint, "context")
         self.assertEqual(g._chain.calls_so_far(g.node_id, "*"), before)
         entries = g.audit_log().entries
         self.assertEqual(len(entries), 2)

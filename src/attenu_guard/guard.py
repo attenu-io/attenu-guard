@@ -122,9 +122,7 @@ def _package_version() -> str:
 
 
 class AuthorityDenied(Exception):
-    """Raised by `enforce()`, and by `check()` for the one deny it raises rather than returns: a
-    context the ledger cannot hold (a float of 2**53 or more), which is recorded first. Carries
-    the full `Decision` so a caller
+    """Raised by `enforce()` when the decision is a deny. Carries the full `Decision` so a caller
     can branch on `.decision.reasons[i].code` instead of parsing a message
     string; `str(exc)` still gives a human-readable one-liner via
     `Decision.explain()`.
@@ -645,7 +643,7 @@ class Guard:
             #    Decision — unlike CSPRNG exhaustion, a malformed context/authorized_params value
             #    is the caller's error, and this library's convention elsewhere is to raise on
             #    malformed input, not silently deny). The one exception is a context the ledger
-            #    cannot hold: that is recorded as a deny and raised as AuthorityDenied (below).
+            #    cannot hold: that is recorded as a deny and returned like any deny (below).
             try:
                 self._log_decision(decision, scope, tool, ctx, disposition, extra_fields=extra)
             except CommittedAuditError as exc:
@@ -665,10 +663,10 @@ class Guard:
                 # a nanosecond timestamp) is a recorded deny, not a bare raise: adapters fill the
                 # context from tool arguments, so a model-sent value must not become a refusal
                 # nobody can see. The row leaves the context out, the meters are as they were,
-                # and the deny raises as `enforce()` does (attenu-ops #127, review M1).
-                denied = self.record_denial(unrepresentable, scope=scope, tool=tool,
-                                            disposition=Disposition.UNRESOLVED)
-                raise AuthorityDenied(denied) from exc
+                # and the deny is returned as every deny is; `enforce()` raises it
+                # (attenu-ops #127, review M1).
+                return self.record_denial(unrepresentable, scope=scope, tool=tool,
+                                          disposition=Disposition.UNRESOLVED)
 
             decision = self._attach_call_id(decision, call_id)
             # 5. register pending (allows only, and only for a capture that promises a terminal
@@ -712,7 +710,7 @@ class Guard:
         totals = dict(totals or {})
         self._auto_meter(scope, ctx, totals)                          # read the meters, never consume them
         unrepresentable = self._unrepresentable_context(ctx, scope)
-        if unrepresentable is not None:                               # what check() would record and raise
+        if unrepresentable is not None:                               # what check() would record and return
             return Decision.deny(unrepresentable, node=self._node.node_id)
         return self._evaluate(scope, ctx, metered, totals)
 
