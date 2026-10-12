@@ -47,6 +47,18 @@ jobs:
         run: python tests/test_sinks_identity.py
       - name: Wire format + offline verification
         run: python tests/test_wire.py
+      - name: Token and ledger parity with the TypeScript port (attenu-ops #127)
+        run: python tests/test_wire_parity_127.py
+      - name: Unknown detail types and unread bundle fields are refused, not ignored
+        run: |
+          python tests/test_unknown_detail_types.py
+          python tests/test_bundle_unread_fields.py
+      - name: Draft -02 profile (wire, authority, principal invariance, the security-review fixes)
+        run: |
+          python tests/test_wire_02.py
+          python tests/test_draft02_authority.py
+          python tests/test_principal_invariance.py
+          python tests/test_draft02_review_fixes.py
       - name: cross-process revocation (the documented limit, and the seam that closes it)
         run: python tests/test_cross_process_revocation.py
       - name: verify CLI + sample bundles (ledger, bundle, with/without key)
@@ -67,13 +79,18 @@ jobs:
         run: python tests/vectors/generate_envelopes.py
       - name: Observer envelope vectors + the per-entry state contract
         run: python tests/test_envelope_vectors.py
+      - name: Draft -02 interop vectors self-check
+        run: python tests/vectors-02/generate_02.py
+      - name: Draft -02 vector set (scores, determinism, both copies, the -01 files untouched)
+        run: python tests/test_vectors_02.py
       - name: The committed vectors match what the generator produces, in both copies
         # generate.py writes tests/vectors/ and the packaged src/attenu_guard/vectors/
-        # from one serialisation. If either committed copy was edited by hand, or the
+        # from one serialisation, and generate_02.py does the same for tests/vectors-02/ and
+        # src/attenu_guard/vectors/draft02/. If either committed copy was edited by hand, or the
         # two have drifted, the regeneration above rewrites them and this fails.
         run: |
           set -eu
-          git diff --exit-code -- tests/vectors src/attenu_guard/vectors || {
+          git diff --exit-code -- tests/vectors tests/vectors-02 src/attenu_guard/vectors || {
             echo "::error::the committed interop vectors drifted — regenerate and review"
             exit 1
           }
@@ -98,7 +115,7 @@ jobs:
       - name: Install with all extras and run the hypothesis suite
         run: |
           pip install -e '.[test,all]'
-          pytest -q tests/test_invariants.py tests/test_core_v02.py
+          pytest -q tests/test_invariants.py tests/test_core_v02.py tests/test_version.py
       - name: Ed25519 wire path (cryptography present)
         run: python tests/test_wire.py
       - name: Ed25519 backends agree, and the envelope corpus is identical under both

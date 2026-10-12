@@ -118,7 +118,7 @@ every CI run, not just a static fixture that can go stale.
   a glob. `"expect_reject_reason": "malformed"`.
 - `valid_jcs_integral_float.json` — pins `100.0` to the JCS bytes `100`.
 - `valid_jcs_exponent_form.json` — pins ECMAScript/JCS decimal form at `1e-6`
-  and `1e16`.
+  and `1e15`.
 - `valid_jcs_non_ascii.json` — pins raw UTF-8 for a non-ASCII subject.
 - `valid_jcs_utf16_key_order.json` — pins UTF-16 code-unit member ordering.
 - `valid_jcs_big_integer.json` — pins the binary64 form of the largest safe

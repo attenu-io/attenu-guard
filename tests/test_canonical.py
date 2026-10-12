@@ -29,7 +29,7 @@ class TestCanonicalBytes(unittest.TestCase):
         cases = (
             (100.0, b"100"),
             (1e-6, b"0.000001"),
-            (1e16, b"10000000000000000"),
+            (1e15, b"1000000000000000"),
             ("r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}",
              "\"r\N{LATIN SMALL LETTER E WITH ACUTE}sum\N{LATIN SMALL LETTER E WITH ACUTE}\"".encode()),
             ({"\ue000": 2, "\U00010000": 1},
@@ -38,6 +38,11 @@ class TestCanonicalBytes(unittest.TestCase):
         for value, expected in cases:
             with self.subTest(value=value):
                 self.assertEqual(canonical.dumps(value), expected)
+        # 1e16 pinned this class through 0.19: an integral float past 2**53 - 1 rendered as its
+        # digits. It is the same wire value as the int refused below, and is refused with it now
+        # (attenu-ops #127), as the TypeScript implementation always refused it.
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            canonical.dumps(1e16)
 
     def test_negative_zero_and_required_string_escapes(self):
         self.assertEqual(canonical.dumps(-0.0), b"0")

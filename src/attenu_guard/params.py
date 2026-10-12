@@ -11,13 +11,11 @@ Commitment: `SHA-256(raw_salt || UTF8(JCS(params)))`, lowercase hex — `raw_sal
 `canonical.dumps` verbatim (RFC 8785), so the numeric domain and encoding rules are identical to
 every other signing surface in this library.
 
-One extra restriction beyond what `canonical.dumps` itself enforces: `canonical.py`'s general
-signing surface (audit hashes, wire tokens) already rejects an out-of-range Python `int`, but
-tolerates an out-of-range INTEGRAL `float` (e.g. `1e20`) — deliberately; see
-`tests/test_canonical.py`'s pinned JCS divergence-class vectors, which this module does not
-touch. `params_c14n_v1` cannot tolerate that asymmetry: a cross-runtime consumer (JSON/JS has no
-int/float distinction) cannot tell the two host types apart once serialized, so this profile
-closes the gap itself, in front of `canonical.dumps`, without changing the shared canonicalizer.
+The numeric domain: an out-of-range Python `int` and an out-of-range INTEGRAL `float` (e.g.
+`1e20`) are both outside it. A cross-runtime consumer (JSON/JS has no int/float distinction)
+cannot tell the two host types apart once serialized. Through 0.19 `canonical.dumps` tolerated
+the float, and this profile closed the gap itself, in front of it; since 0.20 `canonical.dumps`
+refuses it too (attenu-ops #127), and the check here still answers first, with its own reason.
 
 Outside the domain (either reason): no hash, and the caller writes `params_hash_reason:
 "unsupported"` on the record whose hash is absent — never raises. A caller that never attempts a

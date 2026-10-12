@@ -485,11 +485,13 @@ class TestParamsCommitment(unittest.TestCase):
         h2, reason2 = params_mod.commit({"n": canonical.MAX_SAFE_INTEGER + 1}, salt)
         self.assertIsNone(h2); self.assertEqual(reason2, params_mod.ParamsHashReason.UNSUPPORTED)
 
-    def test_integral_float_beyond_the_bound_is_unsupported_even_though_canonical_dumps_tolerates_it(self):
+    def test_integral_float_beyond_the_bound_is_unsupported(self):
         salt = bytes(16)
-        # canonical.dumps itself still accepts this (a pinned JCS-divergence-class test relies on
-        # it — see tests/test_canonical.py); params_c14n_v1 closes the gap itself, in front.
-        self.assertEqual(canonical.dumps(1e16), b"10000000000000000")
+        # canonical.dumps tolerated this through 0.19 and params_c14n_v1 closed the gap in front of
+        # it; since 0.20 canonical.dumps refuses it too (attenu-ops #127). The params check still
+        # answers first, with its own reason.
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            canonical.dumps(1e16)
         h, reason = params_mod.commit({"n": 1e16}, salt)
         self.assertIsNone(h)
         self.assertEqual(reason, params_mod.ParamsHashReason.UNSUPPORTED)
