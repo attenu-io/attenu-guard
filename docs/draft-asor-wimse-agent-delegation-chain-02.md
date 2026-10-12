@@ -887,22 +887,21 @@ document is published as an RFC.
 Two reference implementations are maintained by the author under the Apache
 License 2.0: "attenu-guard", in Python, which mints Delegation Tokens and runs
 the verification algorithm of {{verify}}, and "attenu-guard-ts", in TypeScript,
-which runs the verification algorithm and mints nothing. Both released
-libraries implement steps 1 to 5 of the algorithm as the previous revision of
-this document stated them, under a single-signer trust model, and neither
-implements step 6 (holder binding) or step 7 (status list), which both document
-as not performed. At the time of posting, the Python library implements this
-revision on a development branch as an opt-in profile beside the previous
-one: the claim rules of {{token-format}} at parse, the accepted-algorithm list
-of step 1, principal invariance, the three-form scope grammar, the two
-cumulative constraint types with their totals supplied through a channel
-separate from the request, the "order" member of "rank", one constraint per
-(key, type), the closed detail and constraint objects, and the audience check
-of step 8; it checks the presence and shape of "cnf" and still performs
-neither step 6 nor step 7. A port of the same profile to the TypeScript
-library is in progress. The vector set of {{vectors}} for this revision has
-thirty-five files and is generated and scored by the Python branch; the
-previous revision's twenty files ship in both libraries unchanged.
+which runs the verification algorithm and mints nothing. At the time of
+posting, both released libraries (attenu-guard 0.20.0 and attenu-guard-ts
+0.14.0) implement this revision as an opt-in profile beside the previous one,
+which remains their default: the claim rules of {{token-format}} at parse, the
+accepted-algorithm list of step 1, principal invariance, the three-form scope
+grammar, the two cumulative constraint types with their totals supplied through
+a channel separate from the request, the "order" member of "rank", one
+constraint per (key, type), the closed detail and constraint objects, and the
+audience check of step 8, under a single-signer trust model. Both check the
+presence and shape of "cnf" and perform neither step 6 (holder binding) nor
+step 7 (status list), which both document as not performed. The vector set of
+{{vectors}} for this revision has thirty-five files; the Python library
+generates and scores it on every test run, and the TypeScript library vendors
+it byte for byte and scores it in its test suite. The previous revision's
+twenty files ship in both libraries unchanged.
 
 Two implementations independent of the author's code have run the twenty test
 vectors of the previous revision and published their results, as reported by
