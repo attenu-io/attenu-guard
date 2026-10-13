@@ -80,8 +80,14 @@ def _witness_keys(path: str):
     """The trust set for a bundle's observer envelopes, read from `--witness-keys FILE`.
 
     The file is the `witness_keys` array the interop vectors carry — `[{"kid", "alg",
-    "public_key_hex"}]`, each row optionally with `not_after` — or one whole vector case, in
-    which case its `witness_keys` member is used. Without a trust set every envelope in a bundle
+    "public_key_hex"}]`, each row optionally with `not_after` — or a trust-set document
+    `{"witness_keys": [rows], "not_after": ...}` whose `not_after` bounds the whole set
+    (docs/TRUST-SET-FRESHNESS.md), or one whole vector case, in which case its `witness_keys`
+    member is used. An object with `bundle` and `witness_keys` members is a vector case; any other
+    object with `witness_keys` is a document, read whole, so a misspelled member is refused rather
+    than skipped. An object with both `bundle` and `not_after` is neither, and is refused: read as
+    a vector case it would drop the set's expiry. Without a trust
+    set every envelope in a bundle
     fails `envelope_unknown_witness`, which is correct (an unknown key is not a trusted one) and
     useless as a default, so this is how a bundle carrying envelopes is verified from the
     command line.
@@ -96,11 +102,16 @@ def _witness_keys(path: str):
         parsed = json.loads(Path(path).read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):   # JSON is UTF-8 text, so both mean "not JSON"
         raise ValueError("the file is not valid JSON") from None
-    if isinstance(parsed, dict) and "witness_keys" in parsed:
-        parsed = parsed["witness_keys"]
-    if not isinstance(parsed, list):
+    if isinstance(parsed, dict) and "bundle" in parsed:
+        if "not_after" in parsed:
+            # Read as a vector case, the set's not_after would be dropped: an expired set verified.
+            raise ValueError("a vector case carries no not_after; a trust-set document carries "
+                             "no bundle")
+        if "witness_keys" in parsed:
+            parsed = parsed["witness_keys"]             # a vector case
+    if not isinstance(parsed, list) and not (isinstance(parsed, dict) and "witness_keys" in parsed):
         raise ValueError("expected a JSON array of {kid, alg, public_key_hex} rows, "
-                         "or a vector case carrying one as witness_keys")
+                         "or an object carrying one as witness_keys")
     evidence._trusted_witnesses(parsed)
     return parsed
 
@@ -205,7 +216,8 @@ def _verify(args: list):
     and reported as "not checked" otherwise. `--witness-keys FILE` supplies the trusted witness keys for a
     bundle carrying observer envelopes; without it every envelope fails `envelope_unknown_witness`, and the
     output says which flag to pass. A row in that file may carry `not_after` (RFC 3339 UTC); from that time on
-    the key is not trusted. The summary line ends `ungated=N` when N allows passed through un-gated (marked
+    the key is not trusted. The file may also be a document `{"witness_keys": [...], "not_after": ...}`, whose
+    `not_after` bounds every row. Both are compared with this machine's UTC clock: no `now` is passed. The summary line ends `ungated=N` when N allows passed through un-gated (marked
     `policy: "unlisted"`), which containment does not measure; with none, the field is left out. A trust file that is not one (not JSON, not an array of rows, or a row the verifier
     refuses) is one line naming the file and, for a bad row, the kid. A ledger with zero events is reported
     EMPTY, not OK. `--entries` prints, after all of that, `entries:` and one line per entry (`_entry_lines`);

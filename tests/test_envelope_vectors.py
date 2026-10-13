@@ -1011,6 +1011,123 @@ class TestTrustRowExpiry(unittest.TestCase):
                          f"witness key {self.kid!r}: its row names a different kid, {self.other!r}")
 
 
+class TestTrustSetFreshness(unittest.TestCase):
+    """A trust set may be a document, `{"witness_keys": [rows], "not_after": ...}`, whose
+    `not_after` bounds the whole set (attenu-io/attenu-guard#35, docs/TRUST-SET-FRESHNESS.md).
+    At or after it no row is trusted and every envelope fails the existing
+    `envelope_unknown_witness`, saying the trust set expired. The document is read whole."""
+
+    SET_NOT_AFTER = "2026-11-01T00:00:00Z"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.case = copy.deepcopy(generate_envelopes.gen_cases()[0])   # valid_spawn_envelope
+        cls.kid = generate_envelopes.WITNESS_KID
+        cls.other = generate_envelopes.WITNESS_KID_B
+
+    def _doc(self, row_fields=None, **members):
+        rows = [dict(k) for k in self.case["witness_keys"]]
+        rows[0].update(row_fields or {})
+        self.assertEqual(rows[0]["kid"], self.kid)
+        return {"witness_keys": rows, **members}
+
+    def _report(self, doc, now):
+        return evidence.verify_envelopes(self.case["bundle"], witness_keys=doc, now=now)
+
+    def test_a_document_without_not_after_reads_as_its_rows(self):
+        for now in (None, "1970-01-01T00:00:00Z", "9999-12-31T23:59:59Z"):
+            with self.subTest(now=now):
+                self.assertTrue(self._report(self._doc(), now=now)["ok"])
+
+    def test_inside_the_set_validity_every_row_is_trusted(self):
+        report = self._report(self._doc(not_after=self.SET_NOT_AFTER), now="2026-10-31T23:59:59Z")
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["witnesses"], {generate_envelopes.SPAWN_SEQ: self.kid})
+
+    def test_at_or_after_the_set_not_after_no_row_is_trusted_and_the_message_says_so(self):
+        for now in (self.SET_NOT_AFTER, "2026-11-01T00:00:01Z"):     # at, and after
+            with self.subTest(now=now):
+                report = self._report(self._doc(not_after=self.SET_NOT_AFTER), now=now)
+                self.assertFalse(report["ok"])
+                self.assertEqual(
+                    [(d["reason"], d["seq"]) for d in report["failure_details"]],
+                    [("envelope_unknown_witness", generate_envelopes.SPAWN_SEQ)])
+                self.assertEqual(
+                    report["failures"],
+                    [f"envelope_unknown_witness: witness kid={self.kid!r} alg='EdDSA' is not in "
+                     f"the trusted witness keys ([]): the trust set expired at "
+                     f"not_after={self.SET_NOT_AFTER!r}"])
+                self.assertEqual(report["witnesses"], {})
+
+    def test_a_row_without_not_after_is_bounded_by_the_set(self):
+        # The second gap #35 names: a row without `not_after` never expired.
+        doc = self._doc(not_after=self.SET_NOT_AFTER)
+        self.assertNotIn("not_after", doc["witness_keys"][0])
+        self.assertFalse(self._report(doc, now="2030-01-01T00:00:00Z")["ok"])
+
+    def test_the_earlier_of_row_and_set_decides_and_names_itself(self):
+        row_first = self._doc({"not_after": "2026-10-05T00:00:00Z"}, not_after=self.SET_NOT_AFTER)
+        report = self._report(row_first, now="2026-10-06T00:00:00Z")
+        self.assertIn("the key expired at not_after='2026-10-05T00:00:00Z'", report["failures"][0])
+        report = self._report(row_first, now="2026-12-01T00:00:00Z")      # both passed: the row's
+        self.assertIn("the key expired at not_after='2026-10-05T00:00:00Z'", report["failures"][0])
+        set_first = self._doc({"not_after": "2027-01-01T00:00:00Z"}, not_after=self.SET_NOT_AFTER)
+        report = self._report(set_first, now="2026-12-01T00:00:00Z")
+        self.assertIn("the trust set expired at not_after='2026-11-01T00:00:00Z'",
+                      report["failures"][0])
+
+    def test_verify_bundle_takes_the_document_and_reports_in_its_own_list(self):
+        signer = HS256TestSigner(bytes.fromhex(self.case["signer"]["secret_hex"]),
+                                 kid=self.case["signer"]["kid"])
+        doc = self._doc(not_after=self.SET_NOT_AFTER)
+        before = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=doc,
+                                        now="2026-10-31T00:00:00Z")
+        after = evidence.verify_bundle(self.case["bundle"], signer, witness_keys=doc,
+                                       now="2026-11-02T00:00:00Z")
+        self.assertTrue(before["ok"], before["failures"])
+        self.assertFalse(after["ok"])
+        self.assertEqual(after["checks"]["envelopes"], "FAILED")
+        self.assertEqual([d["reason"] for d in after["failure_details"]],
+                         ["envelope_unknown_witness"])
+
+    def test_the_default_now_is_the_current_utc_time(self):
+        self.assertFalse(self._report(self._doc(not_after="2000-01-01T00:00:00Z"), None)["ok"])
+        self.assertTrue(self._report(self._doc(not_after="9999-12-31T23:59:59Z"), None)["ok"])
+
+    def test_the_document_is_read_whole(self):
+        for member in ("notAfter", "not_before", "comment", "bundle"):
+            with self.subTest(member=member):
+                with self.assertRaises(ValueError) as raised:
+                    self._report(self._doc(**{member: "x"}), now=None)
+                self.assertEqual(str(raised.exception),
+                                 "trust set: the document carries members this build does not "
+                                 f"evaluate and will not ignore: {member!r}")
+
+    def test_a_malformed_set_not_after_raises(self):
+        for bad in ("2026-11-01", "2026-11-01T00:00:00+00:00", "", None, 1793491200, True,
+                    ["2026-11-01T00:00:00Z"]):
+            with self.subTest(not_after=repr(bad)):
+                with self.assertRaises(ValueError) as raised:
+                    self._report(self._doc(not_after=bad), now=None)
+                self.assertEqual(str(raised.exception),
+                                 "trust set: not_after must be an RFC 3339 UTC date-time such as "
+                                 f"'2026-10-05T00:00:00Z', got {bad!r}")
+
+    def test_rows_that_are_not_an_array_are_refused(self):
+        for rows in ({}, "rows", None, 5):
+            with self.subTest(rows=repr(rows)):
+                with self.assertRaises(ValueError) as raised:
+                    self._report({"witness_keys": rows}, now=None)
+                self.assertEqual(str(raised.exception),
+                                 "trust set: witness_keys must be an array of rows")
+
+    def test_an_expired_set_never_excuses_a_bad_row(self):
+        for fields in ({"public_key_hex": "zz" * 32}, {"alg": "none"}, {"notAfter": "x"}):
+            with self.subTest(fields=fields):
+                with self.assertRaises(ValueError):
+                    self._report(self._doc(fields, not_after="2000-01-01T00:00:00Z"), now=None)
+
+
 class TestWitnessesMap(unittest.TestCase):
     """`report["envelopes"]["witnesses"]`: the index in `bundle["entries"]` of every
     witness-signed entry -> the kid of the envelope that verified for it. By index, the entry the

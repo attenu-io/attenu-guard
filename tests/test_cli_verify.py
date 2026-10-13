@@ -372,6 +372,34 @@ class TestVerifyEntries(unittest.TestCase):
         self.assertNotIn("envelope_", out)
         self.assertIn("containment=False", out)
 
+    def test_a_trust_set_document_bounds_every_row_at_the_current_time(self):
+        # attenu-io/attenu-guard#35: `{"witness_keys": [...], "not_after": ...}`. The CLI passes
+        # no `now`, so the set's not_after is compared with this machine's UTC clock.
+        bundle = self._write("bundle.json", _forged_allow_bundle())
+        stale = self._write("stale.json", {"witness_keys": _witness_keys(),
+                                           "not_after": "2000-01-01T00:00:00Z"})
+        rc, out = run("verify", bundle, "--witness-keys", stale, "--entries")
+        self.assertEqual(rc, 2)
+        self.assertIn(f"envelope_unknown_witness: witness kid='{WITNESS_KID}' alg='EdDSA' is not "
+                      "in the trusted witness keys ([]): the trust set expired at "
+                      "not_after='2000-01-01T00:00:00Z'", out)
+        self.assertNotIn("state=witness-signed", out)
+        fresh = self._write("fresh.json", {"witness_keys": _witness_keys(),
+                                           "not_after": "9999-12-31T23:59:59Z"})
+        rc, out = run("verify", bundle, "--witness-keys", fresh)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("envelope_", out)
+        self.assertIn("containment=False", out)
+
+    def test_an_object_with_a_bundle_member_is_still_a_vector_case(self):
+        bundle = self._write("bundle.json", _forged_allow_bundle())
+        case = self._write("case.json", {"name": "x", "bundle": {}, "witness_keys": _witness_keys(),
+                                         "expect": "reject"})
+        rc, out = run("verify", bundle, "--witness-keys", case)
+        self.assertEqual(rc, 2)
+        self.assertNotIn("envelope_", out)
+        self.assertNotIn("cannot use", out)
+
 
 # =========================================================================
 # The default output: a bundle value cannot end a line or start a forged one
@@ -753,6 +781,23 @@ class TestMalformedTrustFile(unittest.TestCase):
             # One kid, one row: the later row used to win, whichever way that pointed.
             (_witness_keys() + _witness_keys(not_after="2000-01-01T00:00:00Z"),
              f"witness key '{WITNESS_KID}': more than one row names this kid"),
+            # A trust-set document (#35) is read whole too: an object without a `bundle` member
+            # is a document, so a misspelled `notAfter` is refused, never skipped.
+            ({"witness_keys": _witness_keys(), "notAfter": "2000-01-01T00:00:00Z"},
+             "trust set: the document carries members this build does not evaluate and will not "
+             "ignore: 'notAfter'"),
+            ({"witness_keys": _witness_keys(), "not_after": "2000-01-01"},
+             "trust set: not_after must be an RFC 3339 UTC date-time such as "
+             "'2026-10-05T00:00:00Z', got '2000-01-01'"),
+            ({"witness_keys": {"kid": WITNESS_KID}},
+             "trust set: witness_keys must be an array of rows"),
+            # An object with both `bundle` and `not_after` is refused: read as a vector case, its
+            # expiry was dropped and an expired set verified OK (review M1, c09 and c10).
+            ({"witness_keys": _witness_keys(), "not_after": "2000-01-01T00:00:00Z", "bundle": None},
+             "a vector case carries no not_after; a trust-set document carries no bundle"),
+            ({"name": "x", "bundle": {}, "witness_keys": _witness_keys(), "expect": "reject",
+              "not_after": "2000-01-01T00:00:00Z"},
+             "a vector case carries no not_after; a trust-set document carries no bundle"),
         ]
         for rows, reason in cases:
             with self.subTest(reason=reason):
@@ -764,7 +809,7 @@ class TestMalformedTrustFile(unittest.TestCase):
         for content, reason in (
                 ("{not json", "the file is not valid JSON"),
                 ({"kid": WITNESS_KID}, "expected a JSON array of {kid, alg, public_key_hex} rows, "
-                                       "or a vector case carrying one as witness_keys")):
+                                       "or an object carrying one as witness_keys")):
             with self.subTest(reason=reason):
                 path = self._keys(content)
                 rc, out = run("verify", str(self.bundle), "--witness-keys", path)

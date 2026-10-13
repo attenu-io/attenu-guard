@@ -446,7 +446,7 @@ observer-envelope section below is their full treatment.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` or `event` that is not an integer or a string, an `event` v1 has no subject for, an `entry_hash` disagreeing with the hash recomputed for that `seq`, or a locator disagreeing with the entry `seq` found | the covered entry, or nowhere when `seq` names no entry |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named | the covered entry |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all | the covered entry |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row has a `not_after` at or before the verification time is not in `witness_keys` | the covered entry |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row, or whose trust-set document, has a `not_after` at or before the verification time is not in `witness_keys` | the covered entry |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string | the covered entry |
 
 `tests/test_bundle_vectors.py` asserts that this vocabulary and the reasons `evidence.py` can
@@ -970,8 +970,10 @@ time is left out of the trust set, so its envelopes fail
 `envelope_unknown_witness`; a `not_after` that is not an RFC 3339 UTC date-time
 is a malformed row. A row is read whole: a member other than `kid`, `alg`,
 `public_key_hex` and `not_after`, or a second row naming a kid already named, is
-a malformed row too. No row in this file carries `not_after`, so every case
-scores the same at any time. `expect_states` covers **every** entry in the
+a malformed row too. A verifier may also take the trust set as a document,
+`{"witness_keys": [rows], "not_after": ...}`, whose `not_after` bounds every row
+(`docs/TRUST-SET-FRESHNESS.md`); the cases here carry the bare array. No row in
+this file carries `not_after`, so every case scores the same at any time. `expect_states` covers **every** entry in the
 chain, so an accepting case asserts a state and not merely the absence of a
 failure.
 
@@ -1049,7 +1051,7 @@ is reported on its own.
 | `envelope_subject_mismatch` | a subject missing a member its `event` requires, a `seq` that is not an integer or an `event` that is not a string, an `event` v1 has no subject for, an `entry_hash` that disagrees with the hash recomputed for that `seq`, or a locator that disagrees with the entry `seq` found |
 | `envelope_duplicate_subject` | a second envelope over an entry an earlier envelope in the same array already named |
 | `envelope_non_canonical` | the bytes as received are not JCS of what they parse to, or the envelope holds a value JCS cannot represent at all |
-| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row has a `not_after` at or before the verification time is not in `witness_keys` |
+| `envelope_unknown_witness` | `witness.kid` names a key that is not in `witness_keys`, is not a string, or an `alg` other than EdDSA; a key whose `witness_keys` row, or whose trust-set document, has a `not_after` at or before the verification time is not in `witness_keys` |
 | `envelope_bad_signature` | the signature does not verify under the key `witness.kid` names, or `sig` is not a hex string |
 
 ### Scoring, and the two rules on where a failure may land
