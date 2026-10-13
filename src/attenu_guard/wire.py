@@ -747,7 +747,7 @@ def _check_token_02(header: Mapping, payload: Mapping, i: int) -> Authority:
         raise bad(f"cnf must be an object carrying one of {list(_CNF_MEMBERS)}, binding the token "
                   "to its holder's key (draft -02 Sections 3 and 7)")
     for claim, value in payload.items():
-        if type(value) is int:
+        if type(value) in (int, float):
             try:
                 draft02.check_integer_safe(value)
             except ValueError as e:

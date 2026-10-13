@@ -8,8 +8,9 @@ for this release.
    non-array `scopes` as `malformed`, with the same message, on the -01 path; the -02 path refused
    it already, in both.
 
-2. A number whose value is an integer past 2**53 - 1 (`1e+308`, `1e+21`, `9007199254740992.0`) was
-   refused here only when its JSON text was an integer literal. JSON has one number type, and the
+2. A number whose value is an integer past 2**53 - 1 was refused here only when its JSON text was
+   an integer literal: `1e+21` and `1e+308` verified (`9007199254740992.0` was already
+   `non_canonical`, and is `malformed` now). JSON has one number type, and the
    JCS form of an integer that large is the exponent form (`10**21` serialises as `1e+21`), so the
    lexical test let the very value it exists to refuse through. The rule is now the value: any
    number whose value is an integer of magnitude above 2**53 - 1 is refused, by
@@ -32,7 +33,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from attenu_guard import Authority, canonical, wire  # noqa: E402
+from attenu_guard import Authority, AuthorityDenied, CallLimit, Guard, SpendCap, canonical, wire  # noqa: E402
+from attenu_guard import draft02  # noqa: E402
+from attenu_guard.reasons import Disposition, ReasonCode  # noqa: E402
 from attenu_guard.audit import GENESIS, AuditLog, _hash  # noqa: E402
 from attenu_guard.wire import WireError, WireReasonCode  # noqa: E402
 
@@ -122,6 +125,17 @@ class ScopesMustBeAnArray(unittest.TestCase):
                        _resigned(V02, 0, _set_scopes({"crm.read": 1}), truncate=True)):
             self.assertEqual(self._reason(V02, tokens).reason, WireReasonCode.MALFORMED)
 
+    def test_non_string_members_are_malformed_with_one_message(self):
+        """Review m4: a non-string member raised `unhashable type: 'list'` here (a TypeError) and
+        `invalid scope ['crm.read']` in TypeScript. Both now say the same thing."""
+        for value in ([["crm.read"]], [1], [None], [{"x": 1}], ["crm.read", 1]):
+            with self.assertRaises(ValueError, msg=repr(value)) as cm:
+                Authority.from_wire({"scopes": value, "constraints": [], "ttl": 60})
+            self.assertEqual(str(cm.exception), "scopes must be an array of strings")
+            e = self._reason(V01, _resigned(V01, 0, _set_scopes(value), truncate=True))
+            self.assertEqual(e.reason, WireReasonCode.MALFORMED)
+            self.assertIn("invalid authorization_details: scopes must be an array of strings", str(e))
+
     def test_from_wire_refuses_a_non_array(self):
         for value in ({"crm.read": 1}, "crm", None, 5, True):
             with self.assertRaises(ValueError, msg=repr(value)):
@@ -184,11 +198,93 @@ class IntegersPastTheSafeRangeByValue(unittest.TestCase):
         entry = dict(payload, hash="0" * 64)
         self.assertEqual(AuditLog.verify([entry]), (False, "hash mismatch at seq 0"))
 
+    def test_the_02_integer_check_is_by_value(self):
+        """Review m3: `draft02.check_integer_safe` tested the Python type."""
+        for value in (1e21, 9007199254740992.0, -1e308, 10**21, 2**53):
+            with self.assertRaises(ValueError, msg=repr(value)):
+                draft02.check_integer_safe(value)
+        for value in (2**53 - 1, 9007199254740991.0, 1.5, 0, float("inf"), "1e+21", True):
+            draft02.check_integer_safe(value)
+
     def test_append_refuses_to_write_one(self):
         log = AuditLog()
         with self.assertRaises(canonical.UnsafeIntegerError):
             log.append("note", 0, value=1e300)
         self.assertEqual(log.entries, [])
+
+
+class UnrepresentableContextIsARecordedDeny(unittest.TestCase):
+    """Review M1. With the value rule, a context float of 2**53 or more cannot be written to the
+    ledger, and `Guard.check` raised `UnsafeIntegerError` with nothing recorded. Adapters fill the
+    context from tool arguments, so a model-sent `amount: 1e21` became an unrecorded refusal. It is
+    now a recorded deny: `no_authority` on the constraint `context`, disposition `unresolved`, the
+    context left out of the row, the meters as they were, and `AuthorityDenied` raised."""
+
+    def _guard(self, *ceilings):
+        return Guard.issue("payer", Authority({"pay.send"}, tuple(ceilings), 60), chain_id="t")
+
+    def _assert_recorded_deny(self, g, before, exc, scope="pay.send"):
+        r = exc.decision.reasons[0]
+        self.assertFalse(exc.decision)
+        self.assertEqual((r.code, r.constraint, r.requested), (ReasonCode.NO_AUTHORITY, "context", scope))
+        self.assertTrue(r.message.startswith("context not representable: integer "), r.message)
+        entries = g._audit.entries
+        self.assertEqual(len(entries), before + 1)
+        row = entries[-1]
+        self.assertEqual((row["event"], row["reason"], row["disposition"], row["scope"]),
+                         ("deny", ReasonCode.NO_AUTHORITY, Disposition.UNRESOLVED, scope))
+        self.assertEqual(row["context"], {})
+        self.assertEqual(AuditLog.verify(entries), (True, None))
+        return r
+
+    def test_spend_past_the_range_is_a_recorded_deny(self):
+        g = self._guard(SpendCap(100.0))
+        before = len(g._audit.entries)
+        with self.assertRaises(AuthorityDenied) as cm:
+            g.check("pay.send", spend=1e21)
+        r = self._assert_recorded_deny(g, before, cm.exception)
+        self.assertEqual(r.message, "context not representable: integer 1e+21 exceeds the safe range "
+                                    "±9007199254740991 for a binary64 signing surface "
+                                    "(RFC 8785 numbers are IEEE 754 doubles)")
+
+    def test_an_allowed_call_with_a_nanosecond_timestamp_leaves_the_meter_as_it_was(self):
+        g = self._guard(CallLimit(2))
+        before = len(g._audit.entries)
+        with self.assertRaises(AuthorityDenied) as cm:
+            g.check("pay.send", context={"ts_ns": 1.76e18})
+        self._assert_recorded_deny(g, before, cm.exception)
+        self.assertTrue(g.check("pay.send"))
+        self.assertTrue(g.check("pay.send"))
+        self.assertFalse(g.check("pay.send"))
+
+    def test_enforce_raises_the_same_deny(self):
+        g = self._guard(SpendCap(100.0))
+        before = len(g._audit.entries)
+        with self.assertRaises(AuthorityDenied) as cm:
+            g.enforce("pay.send", spend=1e21)
+        self._assert_recorded_deny(g, before, cm.exception)
+
+    def test_would_allow_reports_the_deny_and_writes_nothing(self):
+        g = self._guard(CallLimit(2))
+        before = len(g._audit.entries)
+        d = g.would_allow("pay.send", context={"ts_ns": 1.76e18})
+        self.assertFalse(d)
+        r = d.reasons[0]
+        self.assertEqual((r.code, r.constraint, r.requested), (ReasonCode.NO_AUTHORITY, "context", "pay.send"))
+        self.assertTrue(r.message.startswith("context not representable: integer 1760000000000000000 exceeds"), r.message)
+        self.assertEqual(len(g._audit.entries), before)
+        self.assertTrue(g.would_allow("pay.send", context={"ts_ns": 1.76e15}))
+
+    def test_a_representable_context_is_untouched(self):
+        g = self._guard(SpendCap(100.0))
+        self.assertFalse(g.check("pay.send", spend=1e15))      # an ordinary ceiling deny, returned
+        self.assertEqual(g._audit.entries[-1]["context"], {"spend": 1e15})
+        self.assertTrue(g.check("pay.send", spend=5.0))
+
+    def test_a_failure_outside_the_context_still_raises(self):
+        g = self._guard()
+        with self.assertRaises(canonical.LoneSurrogateError):
+            g.check("pay.send", tool="\ud800")
 
 
 if __name__ == "__main__":

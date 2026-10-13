@@ -78,6 +78,7 @@ from typing import Mapping
 from .authority import Authority, AuthorityError
 from .chain import Chain, Node, MonotonicClock
 from .audit import AuditLog, CommittedAuditError
+from . import canonical
 from .reasons import (
     Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult, Policy,
 )
@@ -121,7 +122,9 @@ def _package_version() -> str:
 
 
 class AuthorityDenied(Exception):
-    """Raised only by `enforce()`. Carries the full `Decision` so a caller
+    """Raised by `enforce()`, and by `check()` for the one deny it raises rather than returns: a
+    context the ledger cannot hold (a float of 2**53 or more), which is recorded first. Carries
+    the full `Decision` so a caller
     can branch on `.decision.reasons[i].code` instead of parsing a message
     string; `str(exc)` still gives a human-readable one-liner via
     `Decision.explain()`.
@@ -528,6 +531,10 @@ class Guard:
               totals: Mapping | None = None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
+        One exception: a context the ledger cannot hold in RFC 8785 (a float of
+        2**53 or more, such as `spend=1e21`) is recorded as a `no_authority` deny on
+        `context`, with the context left out of the row, and raised as
+        `AuthorityDenied`.
 
         `totals` (the -02 profile): the running totals this component holds for the node's
         cumulative constraints, keyed by total field (`spend_total`, `calls_subtree_total`).
@@ -637,7 +644,8 @@ class Guard:
             #    nothing is pending, and the exception is re-raised as-is (not swallowed into a
             #    Decision — unlike CSPRNG exhaustion, a malformed context/authorized_params value
             #    is the caller's error, and this library's convention elsewhere is to raise on
-            #    malformed input, not silently deny).
+            #    malformed input, not silently deny). The one exception is a context the ledger
+            #    cannot hold: that is recorded as a deny and raised as AuthorityDenied (below).
             try:
                 self._log_decision(decision, scope, tool, ctx, disposition, extra_fields=extra)
             except CommittedAuditError as exc:
@@ -646,11 +654,21 @@ class Guard:
                     self._chain.register_pending(nid, call_id)
                 exc.decision = decision_with_id
                 raise
-            except Exception:
+            except Exception as exc:
                 if decision:
                     for c in filled:
                         self._chain.uncount_call(nid, getattr(c, "meter_key", "*"))
-                raise
+                unrepresentable = self._unrepresentable_context(ctx, scope)
+                if unrepresentable is None or not isinstance(exc, canonical.CanonicalizationError):
+                    raise
+                # A context value the ledger cannot hold (a float of 2**53 or more: `spend=1e21`,
+                # a nanosecond timestamp) is a recorded deny, not a bare raise: adapters fill the
+                # context from tool arguments, so a model-sent value must not become a refusal
+                # nobody can see. The row leaves the context out, the meters are as they were,
+                # and the deny raises as `enforce()` does (attenu-ops #127, review M1).
+                denied = self.record_denial(unrepresentable, scope=scope, tool=tool,
+                                            disposition=Disposition.UNRESOLVED)
+                raise AuthorityDenied(denied) from exc
 
             decision = self._attach_call_id(decision, call_id)
             # 5. register pending (allows only, and only for a capture that promises a terminal
@@ -693,7 +711,20 @@ class Guard:
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
         totals = dict(totals or {})
         self._auto_meter(scope, ctx, totals)                          # read the meters, never consume them
+        unrepresentable = self._unrepresentable_context(ctx, scope)
+        if unrepresentable is not None:                               # what check() would record and raise
+            return Decision.deny(unrepresentable, node=self._node.node_id)
         return self._evaluate(scope, ctx, metered, totals)
+
+    @staticmethod
+    def _unrepresentable_context(ctx: Mapping, scope: str):
+        """The deny reason for a context the ledger cannot hold in RFC 8785, or None."""
+        try:
+            canonical.dumps(dict(ctx))
+        except canonical.CanonicalizationError as exc:
+            return Reason(ReasonCode.NO_AUTHORITY, constraint="context", requested=scope,
+                          message=f"context not representable: {exc}")
+        return None
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,
                       tool: str | None = None, context: Mapping | None = None,

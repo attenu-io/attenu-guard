@@ -52,8 +52,9 @@ def decode_salt(params_salt_hex: str) -> bytes:
 
 def _has_unsafe_integral_float(value) -> bool:
     """True if `value` contains, anywhere in its structure, a float that is mathematically
-    integral and exceeds ±canonical.MAX_SAFE_INTEGER — the one gap `canonical.dumps` itself
-    leaves open for floats (see the module docstring)."""
+    integral and exceeds ±canonical.MAX_SAFE_INTEGER. Since 0.20 `canonical.dumps` refuses it
+    too; this check answers first, so the commitment reports `unsupported` rather than raising
+    (see the module docstring)."""
     t = type(value)
     if t is float:
         return math.isfinite(value) and value == math.trunc(value) and abs(value) > canonical.MAX_SAFE_INTEGER

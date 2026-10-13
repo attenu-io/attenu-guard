@@ -506,6 +506,8 @@ class Authority:
         # verified under the -01 profile, where the TypeScript implementation refused it.
         if not isinstance(scopes, (list, tuple)):
             raise ValueError(f"scopes is {draft02._json_kind(scopes)}, not an array")
+        if any(type(s) is not str for s in scopes):
+            raise ValueError("scopes must be an array of strings")
         constraints = d.get("constraints", ())
         if not isinstance(constraints, (list, tuple)):
             raise ValueError(f"constraints is {draft02._json_kind(constraints)}, not an array")
