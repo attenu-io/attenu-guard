@@ -61,7 +61,7 @@ VECTORS_VERSION = "bundle_vectors_v1"
 # contract and stays put: an implementation that scored `bundle_vectors_v1` still scores it.
 # `revision` is the additive counter — it moves whenever a case is appended, so a reader can
 # tell which corpus they ran without diffing case lists.
-VECTORS_REVISION = "bundle_vectors_v1.4"
+VECTORS_REVISION = "bundle_vectors_v1.5"
 
 VECTORS_DIR = Path(__file__).resolve().parent / BUNDLES_DIRNAME
 # The shipped copy: package data, so `pip install attenu-guard` carries these vectors.
@@ -256,6 +256,43 @@ def _ungated_bundle() -> dict:
         child.record_outcome(d_read.call_id, BodyState.RETURNED, invoked_params=read_params,
                              duration_ms=7)
 
+        child.complete()
+        root.complete()
+        return evidence.export_bundle(root.audit_log(), _signer(), ts=ANCHOR_TS)
+
+
+def _valid_bundle_v1(*, ungated: bool = False) -> dict:
+    """The same run as valid_bundle_v2, written as a schema_version=1 chain (revision v1.5).
+
+    v1 has no execution binding: no `call_id`, no `capture`, no `adapter`, no argument
+    commitments, and no `outcome` event, so the two calls appear only as their allows. Seven
+    entries, seq 0..6:
+
+        0 root      orchestrator            {crm.*, mail.send}, max_rows 100000
+        1 spawn     summarizer              {crm.read}, max_rows 5000   (child subset of parent)
+        2 allow     orchestrator mail.send
+        3 allow     summarizer   crm.read
+        4 deny      summarizer   crm.export (over-reach, out_of_authority)
+        5 done      summarizer
+        6 done      orchestrator
+
+    `ungated=True` inserts the summarizer's un-gated `legacy.sync` passthrough at seq 5, as
+    valid_bundle_v2_ungated_allow does on v2 (eight entries; the two dones move to 6 and 7).
+    Every entry carries only canonical v1 field names, and none of the nine field names no
+    published entry carries.
+    """
+    with _fixed_entropy(), _fixed_version():
+        root = Guard.issue("orchestrator",
+                           Authority(scopes=set(ROOT_SCOPES), ceilings=[RowLimit(100_000)], ttl=3600),
+                           chain_id=CHAIN_ID, schema_version=1)
+        child = root.delegate("summarizer",
+                              Authority(scopes={"crm.read"}, ceilings=[RowLimit(5_000)], ttl=900),
+                              task="summarize Q3 pipeline")
+        root.check("mail.send", tool="mail.send")
+        child.check("crm.read", tool="crm.read", context={"rows": 120})
+        child.check("crm.export", tool="crm.export", context={"rows": 120})   # denied: over-reach
+        if ungated:
+            child.record_passthrough("legacy.sync")                   # un-gated, never checked
         child.complete()
         root.complete()
         return evidence.export_bundle(root.audit_log(), _signer(), ts=ANCHOR_TS)
@@ -680,6 +717,151 @@ def gen_cases() -> list:
         _mutate(ungated, _policy_on_spawn),
         expect="reject", expect_failures=[_fail("policy_on_non_allow", 1, n1)]))
 
+    # Revision v1.5. Entry validation, and the first schema_version=1 chains. Every row above is
+    # a v2 chain, so the rules that read an entry WHOLE (its fields, its event, its shape) had no
+    # row, and neither did anything on the v1 path: with unknown_ledger_fields, v2_field_on_v1,
+    # unknown_ledger_event, invalid_ledger_entry or invalid_policy deleted, a verifier still
+    # scored 20 of 20 (reported for the first two on A2A #1575; reproduced for all five on this
+    # verifier, where each deletion fails its v1.5 rows). One accepting v1 base, one rejecting
+    # row per entry-validation reason, and the policy rule of revision v1.4 on a v1 chain, where
+    # reference implementations have skipped it. No row carries any of the nine field names no
+    # published entry carries.
+    v1 = _valid_bundle_v1()
+
+    cases.append(_case(
+        "valid_bundle_v1",
+        "The run of valid_bundle_v2 written as a schema_version=1 chain: the same orchestrator, "
+        "the same strictly narrower summarizer, the same two authorized calls and the same "
+        "over-reach denied, both nodes finalized. v1 has no execution binding, so there is no "
+        "`outcome` entry and no call_id, capture, adapter or argument commitment on any allow; "
+        "seven entries, seq 0..6, each carrying only canonical v1 field names. Every check MUST "
+        "pass. It is the base for the v1 rows below, and it is the case a verifier that converts "
+        "v2 bundles to v1 by stripping fields needs: `outcome` is not a v1 event, so a v1 chain "
+        "that keeps its outcome entries is not this bundle (see reject_outcome_event_on_v1).",
+        v1, expect="accept"))
+
+    def _unknown_field_on_spawn(es):
+        es[1]["deny_scopes"] = [UNDELEGATED_SCOPE]
+
+    cases.append(_case(
+        "reject_unknown_ledger_fields",
+        "The delegation at seq 1 carries one extra top-level field, `deny_scopes`, which is "
+        "not one of the 39 names an entry may carry (tests/vectors/README.md, Entry fields). "
+        "Derived from valid_bundle_v2 by that single change, chain re-hashed and re-anchored, "
+        "so every other check passes. A verifier that reads an entry by projection, picking "
+        "the fields it knows, accepts this bundle and never sees the field, which here claims "
+        "to restrict the child: it reports success on an entry it did not fully read. Required: "
+        "unknown_ledger_fields on the spawn (seq 1), node the child.",
+        _mutate(base, _unknown_field_on_spawn),
+        expect="reject", expect_failures=[_fail("unknown_ledger_fields", 1, n1)]))
+
+    def _call_id_on_v1_allow(es):
+        es[3]["call_id"] = ORPHAN_CALL_ID
+
+    cases.append(_case(
+        "reject_v2_field_on_v1",
+        "The summarizer's allow at seq 3 of valid_bundle_v1 carries a `call_id`, one of the 12 "
+        "v2-only field names. Derived from valid_bundle_v1 by that single change, chain "
+        "re-hashed and re-anchored. A schema_version=1 chain never allocates a call_id, so the "
+        "entry mixes versions; a verifier that applies the one 39-name allow-list to every "
+        "chain finds nothing to report, since `call_id` is on it. Required: v2_field_on_v1 on "
+        "the allow (seq 3), node the child.",
+        _mutate(v1, _call_id_on_v1_allow),
+        expect="reject", expect_failures=[_fail("v2_field_on_v1", 3, n1)]))
+
+    def _rename_done_event(es):
+        es[7]["event"] = "frobnicate"
+
+    cases.append(_case(
+        "reject_unknown_ledger_event",
+        "The summarizer's `done` at seq 7 has its event renamed `frobnicate`, which is not one "
+        "of the eight event names. Derived from valid_bundle_v2 by that single change, chain "
+        "re-hashed and re-anchored. Every check reads an entry by its event, so an entry whose "
+        "event none of them reads was skipped by all of them and the bundle verified clean. "
+        "Required: unknown_ledger_event on that entry (seq 7), node the child.",
+        _mutate(base, _rename_done_event),
+        expect="reject", expect_failures=[_fail("unknown_ledger_event", 7, n1)]))
+
+    def _bare_outcome_on_v1(es):
+        allow = es[3]
+        es.insert(4, {"v": allow["v"], "c14n": allow["c14n"], "seq": 4, "ts": allow["ts"],
+                      "event": "outcome", "chain_id": allow["chain_id"], "node": allow["node"]})
+        _renumber(es)
+
+    cases.append(_case(
+        "reject_outcome_event_on_v1",
+        "valid_bundle_v1 with one entry inserted at seq 4, after the summarizer's allow: an "
+        "`outcome` carrying only canonical v1 field names (v, c14n, seq, ts, event, chain_id, "
+        "node), so no v2-only field is present and v2_field_on_v1 has nothing to report. Every "
+        "later entry shifts up by one seq. `outcome` is a v2-only event: a schema_version=1 "
+        "chain has seven event names, not eight. This is the shape a v2 bundle takes when it "
+        "is converted to v1 by stripping the v2-only fields and keeping the outcome entries. "
+        "Chain re-hashed and re-anchored. Required: unknown_ledger_event on the inserted entry "
+        "(seq 4), node the child.",
+        _mutate(v1, _bare_outcome_on_v1),
+        expect="reject", expect_failures=[_fail("unknown_ledger_event", 4, n1)]))
+
+    def _entry_as_string(es):
+        es[7] = "done"
+
+    cases.append(_case(
+        "reject_invalid_ledger_entry",
+        "The summarizer's `done` at entries[7] of valid_bundle_v2 is replaced by the JSON "
+        "string \"done\". An entry that is not a JSON object has no seq and no node, so the "
+        "required failure is chain-level: invalid_ledger_entry with seq and node null; this "
+        "build names the index in its message (`entries[7] is a string, not an object`). A "
+        "string has no hash, so the chain cannot be re-hashed over it and the ORIGINAL anchor "
+        "is kept: the hash chain breaks at that index, and this build also reports integrity "
+        "and integrity(anchor), both chain-level. Those are permitted, not required. A "
+        "verifier that reads a member of every entry without first checking the entry is an "
+        "object raises here instead of reporting.",
+        _mutate(base, _entry_as_string, rehash=False, reanchor=False),
+        expect="reject", expect_failures=[_fail("invalid_ledger_entry", None, None)]))
+
+    def _entry_as_array(es):
+        es[7] = [es[7]]
+
+    cases.append(_case(
+        "reject_invalid_ledger_entry_array",
+        "reject_invalid_ledger_entry with the summarizer's `done` at entries[7] wrapped in a "
+        "one-element JSON array instead of replaced by a string: the entry object is all there, "
+        "one level down. An array is not an object. In JavaScript `typeof` reports an array as "
+        "\"object\", so a verifier that checks an entry's shape that way reads this array as an "
+        "entry with no members. Derived from valid_bundle_v2; not re-hashed and not "
+        "re-anchored, for the same reason as reject_invalid_ledger_entry. Required: "
+        "invalid_ledger_entry with seq and node null (this build: `entries[7] is an array, not "
+        "an object`); integrity and integrity(anchor) are permitted, not required.",
+        _mutate(base, _entry_as_array, rehash=False, reanchor=False),
+        expect="reject", expect_failures=[_fail("invalid_ledger_entry", None, None)]))
+
+    v1_ungated = _valid_bundle_v1(ungated=True)
+
+    cases.append(_case(
+        "valid_bundle_v1_ungated_allow",
+        "valid_bundle_v1 plus one entry: at seq 5 the summarizer calls `legacy.sync` with no "
+        "declared policy, and the allow carries \"policy\": \"unlisted\". `policy` is a canonical "
+        "v1 field, not a v2-only one, and the v1 rule is the v2 rule: a policy-marked allow is "
+        "not tested for containment and is not ignored either. The bundle MUST verify, with "
+        "actions_checked=2 and ungated=1, which `expect_report` pins, exactly as for "
+        "valid_bundle_v2_ungated_allow. Eight entries, seq 0..7.",
+        v1_ungated, expect="accept",
+        expect_report={"actions_checked": 2, "ungated": 1}))
+
+    cases.append(_case(
+        "reject_unknown_policy_value_v1_chain",
+        "reject_unknown_policy_value on a schema_version=1 chain: the un-gated allow at seq 5 "
+        "of valid_bundle_v1_ungated_allow carries \"policy\": \"made-up\". Derived from "
+        "valid_bundle_v1_ungated_allow by that single change, chain re-hashed and re-anchored. "
+        "It MUST reject on BOTH counts. The value is not one the format defines: on v1 that is "
+        "invalid_policy, since the v2 record check that reports invalid_allow does not run on "
+        "a v1 chain. And an undefined value buys no containment exemption, so `legacy.sync` is "
+        "measured against the summarizer's {crm.read} and is outside it (containment). A "
+        "verifier that validates `policy` only in its v2 execution-binding pass accepts this "
+        "bundle. Both failures sit on seq 5, node the child; ungated is 0.",
+        _mutate(v1_ungated, _unknown_policy_value),
+        expect="reject", expect_failures=[_fail("containment", 5, n1),
+                                          _fail("invalid_policy", 5, n1)]))
+
     return cases
 
 
@@ -689,15 +871,16 @@ def _document(cases: list) -> dict:
         "revision": VECTORS_REVISION,
         "description": (
             "Bundle-level offline-verification vectors for attenu-guard evidence bundles "
-            "(schema_version=2, with execution binding). Each case is a complete bundle plus the "
+            "(schema_version=2, with execution binding, and from revision bundle_vectors_v1.5 "
+            "schema_version=1 cases too). Each case is a complete bundle plus the "
             "signer material for its anchor. `expect` is \"accept\" or \"reject\". For a rejecting "
             "case, `expect_failures` is the MINIMAL set of failures that MUST appear, each with "
             "the exact reason and the exact position (`seq`/`node`, null when the failure is "
             "chain-level); a conformant verifier MAY report additional failures — one broken "
             "record often makes a second check unsatisfiable — but never fewer, and never at a "
             "different position. Every rejecting bundle is derived from an accepting case by "
-            "exactly one change, so each case isolates one rule: from `valid_bundle_v2` unless "
-            "its description names `valid_bundle_v2_literal`. `version` is the compatibility "
+            "exactly one change, so each case isolates one rule: from the accepting case its "
+            "description names, and from `valid_bundle_v2` when it names none. `version` is the compatibility "
             "contract and does not move when cases are appended; `revision` does. Verify an anchor as "
             "hex(HMAC-SHA256(secret, JCS(anchor without kid/sig/verified))) and each entry as "
             "hex(SHA-256(prev_hash_ascii || JCS(entry without hash))); see "

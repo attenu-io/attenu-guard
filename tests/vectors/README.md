@@ -189,7 +189,7 @@ One JSON object holding every case:
 ```jsonc
 {
   "version": "bundle_vectors_v1",         // compatibility contract; does not move
-  "revision": "bundle_vectors_v1.4",      // additive counter; moves when a case is appended
+  "revision": "bundle_vectors_v1.5",      // additive counter; moves when a case is appended
   "description": "what this file is and how it is scored",
   "cases": [
     {
@@ -201,7 +201,7 @@ One JSON object holding every case:
       "expect_failures": [                       // [] for an accepting case
         {"reason": "params_mismatch", "seq": 3, "node": "vectors:n0"}
       ],
-      "expect_report": {"ungated": 1}            // OPTIONAL; present on one case (see below)
+      "expect_report": {"ungated": 1}            // OPTIONAL; present on two cases (see below)
     }
   ]
 }
@@ -305,20 +305,22 @@ rejecting case declares `expect_failures`: the **minimal set** of
   `seq` is the offending entry's own `seq` field and `node` its `node`; both
   are `null` when the failure is chain-level, with nothing single to point at.
 - Every rejecting bundle is derived from an accepting case by exactly **one**
-  change, so each case isolates one rule: from `valid_bundle_v2`, unless its
-  description names `valid_bundle_v2_literal`. Unless a case says otherwise, the
+  change, so each case isolates one rule: from the accepting case its
+  description names, and from `valid_bundle_v2` when it names none. Unless a
+  case says otherwise, the
   chain was re-hashed and a fresh anchor signed over it after the change, so
   integrity is NOT what fails.
 - Cases are **appended, never inserted, changed or removed**: a case's name,
   position and declared minimal set are stable for life. So `version` is the
   compatibility contract and stays `bundle_vectors_v1` — an implementation that
   scored the file before still scores it — while `revision` moves with each
-  addition, which is what a report should name (`bundle_vectors_v1.4`,
-  twenty cases). Iterate `cases`; do not assume a length.
+  addition, which is what a report should name (`bundle_vectors_v1.5`,
+  twenty-nine cases). Iterate `cases`; do not assume a length.
 - A case MAY also declare **`expect_report`**: named counters from the verifier's own report
   that a conformant implementation MUST reproduce exactly. It exists for a rule that
   accept/reject cannot distinguish — where two different behaviours both accept, and only the
-  number separates them. One case uses it today (`valid_bundle_v2_ungated_allow`). A case
+  number separates them. Two cases use it today (`valid_bundle_v2_ungated_allow` and
+  `valid_bundle_v1_ungated_allow`). A case
   without the key asserts nothing about counters. If your report names these counters
   differently, map them and say which is which.
 
@@ -403,12 +405,12 @@ how much of the run was actually measured. `policy` is an allow-only field; on a
 chain a `deny` carrying it is invalid, and the only value v1 defines is `unlisted`. No reason token
 is involved: an un-gated call is not a violation of anything the bundle claims.
 
-Both halves of that rule are **version-independent**, and this is the one place they have to be
-stated rather than pinned by a row: every bundle in this file is a `schema_version=2` chain, so
-`reject_unknown_policy_value` and `reject_policy_on_spawn` exercise them on v2 only. A
-`schema_version=1` chain can carry `policy` too — `Guard.record_passthrough` writes it on either
-version, and it is not a v2-only field — so a verifier MUST validate the value and its placement
-on a v1 bundle as well. Reference implementations have gotten this wrong by validating `policy`
+Both halves of that rule are **version-independent**. Through revision v1.4 every bundle in
+this file was a `schema_version=2` chain, so `reject_unknown_policy_value` and
+`reject_policy_on_spawn` exercised them on v2 only; revision v1.5 adds the first row on a v1
+chain, `reject_unknown_policy_value_v1_chain`. A `schema_version=1` chain can carry `policy`
+too — `Guard.record_passthrough` writes it on either version, and it is not a v2-only field — so
+a verifier MUST validate the value and its placement on a v1 bundle as well. Reference implementations have gotten this wrong by validating `policy`
 inside the execution-binding pass, which does not run on a v1 chain: every undefined value then
 bought the containment exemption there. If your v2-only reading of these two rows leaves your v1
 path unchecked, you have the bug they exist to prevent.
@@ -569,11 +571,62 @@ actually report are the same set, so a new check cannot be added without a row h
   The un-gated allow at seq 6 is untouched and still exempt, so the bundle fails on the
   spawn alone. (Added in revision v1.4.)
 
+Revision v1.5 adds entry validation and the first `schema_version=1` chains. Every row
+before it was a v2 chain, and none exercised the rules that read an entry whole: with
+`unknown_ledger_fields`, `v2_field_on_v1`, `unknown_ledger_event`, `invalid_ledger_entry`
+or `invalid_policy` deleted, a verifier still scored all twenty (reported for the first two
+by a third-party verifier on A2A #1575; reproduced for all five on this verifier, where each
+deletion fails the v1.5 rows named for it). No v1.5 row carries any of the nine field names that no published
+entry carries (`detail`, `error_code`, `mode`, `params_hash_reason`, `pending_at_kill`,
+`receipt`, `revoked`, `strikes`, `target`).
+
+- `valid_bundle_v1` — the run of `valid_bundle_v2` written as a `schema_version=1`
+  chain: seven entries, no `outcome`, no `call_id` and no other v2-only field.
+  **`"expect": "accept"`**. It is the base for the v1 rows below, and the case a
+  verifier needs if it converts v2 bundles to v1 by stripping fields: `outcome` is
+  not a v1 event, so a v1 chain that keeps its outcome entries is not this bundle.
+  (Added in revision v1.5.)
+- `reject_unknown_ledger_fields` — `valid_bundle_v2` with the `spawn` at seq 1
+  carrying one extra top-level field, `deny_scopes`, outside the 39 names. A
+  verifier that reads entries by projection accepts it. Required:
+  `unknown_ledger_fields` on seq 1. (Added in revision v1.5.)
+- `reject_v2_field_on_v1` — `valid_bundle_v1` with the summarizer's allow at seq 3
+  carrying a `call_id`. `call_id` is on the 39-name list, so only the v2-only rule
+  finds it. Required: `v2_field_on_v1` on seq 3. (Added in revision v1.5.)
+- `reject_unknown_ledger_event` — `valid_bundle_v2` with the summarizer's `done` at
+  seq 7 renamed `frobnicate`. Required: `unknown_ledger_event` on seq 7. (Added in
+  revision v1.5.)
+- `reject_outcome_event_on_v1` — `valid_bundle_v1` with an `outcome` entry inserted
+  at seq 4 that carries only canonical v1 field names, so `v2_field_on_v1` has
+  nothing to report; later entries shift up by one seq. `outcome` is v2-only.
+  Required: `unknown_ledger_event` on seq 4. (Added in revision v1.5.)
+- `reject_invalid_ledger_entry` — `valid_bundle_v2` with `entries[7]` replaced by
+  the JSON string `"done"`. Required: `invalid_ledger_entry` with `seq` and `node`
+  null. The chain cannot be re-hashed over a string, so the original anchor is
+  kept and this build also reports `integrity` and `integrity(anchor)`, both
+  chain-level; permitted, not required. (Added in revision v1.5.)
+- `reject_invalid_ledger_entry_array` — the same, with `entries[7]` wrapped in a
+  one-element array: the entry object is all there, one level down. `typeof`
+  reports an array as `"object"` in JavaScript. Required and permitted as for
+  `reject_invalid_ledger_entry`. (Added in revision v1.5.)
+- `valid_bundle_v1_ungated_allow` — `valid_bundle_v1` plus the summarizer's
+  un-gated `legacy.sync` allow at seq 5, carrying `"policy": "unlisted"`.
+  **`"expect": "accept"`**, with `"expect_report": {"actions_checked": 2,
+  "ungated": 1}`, as for `valid_bundle_v2_ungated_allow`. (Added in revision
+  v1.5.)
+- `reject_unknown_policy_value_v1_chain` — `valid_bundle_v1_ungated_allow` with
+  the un-gated allow at seq 5 carrying `"policy": "made-up"`. Required:
+  `invalid_policy` AND `containment`, both on seq 5. The v2 row reports
+  `invalid_allow` from the v2 record check, which does not run on a v1 chain. A
+  verifier that validates `policy` only in its v2 execution-binding pass accepts
+  this bundle. Proposed by safal207 on A2A #1575. (Added in revision v1.5.)
+
 None of the four v1.1 cases or the four v1.2 rejecting cases has a permitted
 extra: each fails exactly one check and reports exactly one failure. The v1.3 case has no
 failures at all — it is an accepting row whose whole content is a report counter. The first
-v1.4 case is the one row in the file with TWO required failures, because it breaks two rules
-with one change and either alone would leave the other untested.
+v1.4 case and its v1.5 counterpart on a v1 chain are the two rows in the file with TWO
+required failures, because each breaks two rules with one change and either alone would leave
+the other untested.
 
 Attenuation is a lattice relation over three dimensions, not a scope list, so
 the v1.1 ttl and ceiling cases add no scope at all. A verifier that compares
