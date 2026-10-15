@@ -28,9 +28,9 @@
     "authority": { "type": "object" },
     "reason": { "type": "string", "description": "Denial reason: scope | egress | max_rows | max_spend | max_depth | max_fanout | chain_ceiling | chain_revoked." },
     "detail": { "type": "object" },
-    "rows": { "type": ["integer", "null"] },
-    "spend": { "type": ["number", "null"] },
-    "egress": { "type": ["string", "null"] },
+    "context": { "type": "object", "description": "allow and deny: the request context the call was checked against, as the caller passed it; free-form, and redactable for transport. The built-in per-call ceilings read `rows`, `spend` and `egress` from it. A value of the wrong type is refused by its ceiling and recorded as passed, so those members are described here, not typed.", "properties": { "rows": { "description": "What a max_rows ceiling reads: a number, never a boolean; null or absent asserts nothing." }, "spend": { "description": "What a max_spend ceiling reads: a number, never a boolean; null or absent asserts nothing." }, "egress": { "description": "What an egress ceiling reads: none | internal | any; null or absent asserts nothing." } } },
+    "reasons": { "type": "array", "items": { "type": "object" }, "description": "deny only: every Reason the check found, as {code, constraint, limit, requested, message}; `reason` is the first one's code." },
+    "target": { "type": "string", "description": "kill only: the node the kill names, the node revoked or, beside `agent`, the node that banned that agent; `revoked` lists every node the kill reached." },
     "revoked": { "type": "array", "items": { "type": "string" }, "description": "Node ids revoked by a kill." },
     "strikes": { "type": "integer", "description": "Same-scope denial count that tripped the strike policy (kill with reason=strike_policy)." },
     "mode": { "type": "string", "description": "Strike policy mode (same_scope|total) on a strike-policy kill." },
@@ -112,5 +112,5 @@
       }
     }
   ],
-  "additionalProperties": true
+  "additionalProperties": false
 }

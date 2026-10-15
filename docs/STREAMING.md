@@ -1,6 +1,6 @@
 # Streaming the ledger
 
-*Every allow and deny, sent to your own endpoint as it is decided. Each block below ran on
+*Your code forwards every allow and deny to your own endpoint as it is decided. Each block below ran on
 `attenu-guard==0.18.0` from PyPI, Python 3.14.6, macOS, and its output is pasted from that run.*
 
 ## The model

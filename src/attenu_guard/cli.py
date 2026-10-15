@@ -163,12 +163,18 @@ def _entry_lines(entries: list, failure_entries: list, failure_details: list,
     never contain one; a value may (`scope=failed=containment` is the scope "failed=containment").
     A value that starts with `"` is a JSON string, which `json.loads` decodes. Any other value
     is printed as it is: printable ASCII other than space, `"` and `\\`, an integer, `null` for
-    an entry with no seq, or the compact JSON of a value that is not a string."""
+    an entry with no seq, or the compact JSON of a value that is not a string.
+
+    An entry that is not a JSON object has no member to print, so its line is `seq=null` and
+    what the verifier said about it, as for any entry without those members."""
+    from collections.abc import Mapping
     from attenu_guard.audit import _int_or
     from attenu_guard.evidence import _state_key
     failed = _failed_by_entry(failure_entries, failure_details)
     lines = ["entries:"]
     for i, e in enumerate(entries):
+        if not isinstance(e, Mapping):
+            e = {}
         pairs = [("event", e.get("event")), ("node", e.get("node")), ("scope", e.get("scope"))]
         if envelopes is not None:
             kid = envelopes["witnesses"].get(i)        # by index: the entry the envelope covers
@@ -229,12 +235,17 @@ def _verify(args: list):
     if bundle is not None:
         from attenu_guard import evidence
         signer = None
+        # The kid is read off the anchor only when the anchor is an object. Reading it off one
+        # that is not raised here, before anything was verified; the verifier reports such an
+        # anchor (`invalid_bundle`).
+        anchor = bundle.get("anchor")
+        anchor_kid = anchor.get("kid") if isinstance(anchor, dict) else None
         if key_hex:
             from attenu_guard.wire import HS256TestSigner
-            signer = HS256TestSigner(bytes.fromhex(key_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+            signer = HS256TestSigner(bytes.fromhex(key_hex), kid=kid or anchor_kid or "k1")
         elif pub_hex:
             from attenu_guard.wire import Ed25519Verifier
-            signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or (bundle.get("anchor") or {}).get("kid") or "k1")
+            signer = Ed25519Verifier(bytes.fromhex(pub_hex), kid=kid or anchor_kid or "k1")
         witness_keys = None
         if witness_path:
             try:
@@ -258,11 +269,15 @@ def _verify(args: list):
         # A bundle carrying envelopes and no trust set fails every one of them, correctly and
         # unhelpfully: the keys are the caller's to supply and nothing in the bundle can stand
         # in for them. The failure stands; the line says how to make the run meaningful.
-        if bundle.get("envelopes") and witness_keys is None:
+        envelopes = bundle.get("envelopes")
+        if isinstance(envelopes, list) and envelopes and witness_keys is None:
             print("hint: pass --witness-keys FILE to supply the trusted witness keys")
         print("OK" if rep["ok"] else "FAILED")
         if per_entry:
-            print("\n".join(_entry_lines(bundle.get("entries") or [], rep["failure_entries"],
+            # `entries` that are not an array list nothing: the verifier read none of them.
+            listed = bundle.get("entries")
+            listed = listed if isinstance(listed, (list, tuple)) else []
+            print("\n".join(_entry_lines(listed, rep["failure_entries"],
                                          rep["failure_details"], rep["envelopes"])))
         return 0 if rep["ok"] else 2
     entries = AuditLog.load(path)

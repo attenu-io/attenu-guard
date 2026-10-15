@@ -81,7 +81,8 @@ from .audit import AuditLog, CommittedAuditError
 from .reasons import (
     Decision, Reason, ReasonCode, Disposition, Capture, BodyState, CompletionResult, Policy,
 )
-from .ceilings import ctx_field_of, is_metered
+from .ceilings import CallLimit, ctx_field_of, is_metered
+from .draft02 import MaxLifetime
 from . import params as params_mod
 
 __all__ = ["Guard", "AuthorityDenied", "DuplicateOutcomeError"]
@@ -367,7 +368,8 @@ class Guard:
         merged.update(legacy)
         return merged
 
-    def _evaluate(self, scope: str, context: Mapping, metered: bool) -> Decision:
+    def _evaluate(self, scope: str, context: Mapping, metered: bool,
+                  totals: Mapping | None = None) -> Decision:
         """The actual policy evaluation, shared verbatim by check() and
         would_allow() (would_allow just skips the audit write the caller
         does afterwards). Order mirrors v0.1: node state (integrity,
@@ -400,8 +402,14 @@ class Guard:
         # A null quantity asserts nothing, so it is undeclared too (attenu-ops#110): counting it as
         # declared let `{"rows": None}` through, since every ceiling reads null as absent.
         if self._strict and metered:
+            # Exactly what permits() reads: per-action ceilings the request context, cumulative
+            # ceilings (under the -02) the trusted totals; the two are never merged.
+            declared_ctx = auth.effective_context(context)
+            declared_totals = auth.effective_totals(totals)
+            is_02 = getattr(auth, "profile", None) == "02"
             missing = [c.key for c in auth.ceilings
-                       if is_metered(c) and context.get(ctx_field_of(c)) is None]
+                       if is_metered(c) and (declared_totals if is_02 and auth.is_cumulative(c)
+                                             else declared_ctx).get(ctx_field_of(c)) is None]
             if missing:
                 held = [c.key for c in auth.ceilings if is_metered(c)]
                 return Decision.deny(
@@ -410,7 +418,7 @@ class Guard:
                                    f"metered ceilings held: {held}"),
                     node=nid)
 
-        decision = auth.permits(scope, context)
+        decision = auth.permits(scope, context, totals=totals)
         if decision.determining_node is None:
             decision = Decision(decision.allowed, decision.reasons, nid)
         return decision
@@ -450,19 +458,37 @@ class Guard:
 
     # ---- enforcement ---------------------------------------------------
     def _call_limits(self):
-        return [c for c in self._node.authority.ceilings if str(c.key).startswith("max_calls")]
+        """The ceilings the guard's own per-(node, pattern) call meter feeds: a `CallLimit`,
+        or its -02 wire form, a `max_lifetime` on `max_calls`. Never a per-subtree bound: a
+        subtree total spans nodes and no node meter holds it, so filling it from this node's
+        count let three nodes make six calls under a bound of two (security review of
+        2026-10-07, finding 1). A subtree total arrives only through `check(totals=...)`."""
+        return [c for c in self._node.authority.ceilings
+                if isinstance(c, CallLimit)
+                or (isinstance(c, MaxLifetime) and str(c.key).startswith("max_calls"))]
 
-    def _auto_meter(self, scope: str, ctx: dict) -> list:
+    def _auto_meter(self, scope: str, ctx: dict, totals: dict | None = None) -> list:
         """Fill in `calls` / `calls[<pattern>]` for every held CallLimit the caller left
         undeclared, reading the per-(node, pattern) meter. Returns the limits that were
-        auto-filled AND apply to this scope (to be counted on allow)."""
+        auto-filled AND apply to this scope (to be counted on allow).
+
+        Under the -02 profile the meter is the ONLY source: the count is written into `totals`
+        (the trusted channel), overriding anything the caller put in the context or in `totals`
+        for that field, and every applicable limit is counted on allow. The default profile
+        keeps its documented behaviour: an explicit `calls` in the context wins."""
         filled = []
+        is_02 = getattr(self._node.authority, "profile", None) == "02"
         for c in self._call_limits():
             fld = getattr(c, "ctx_field", "calls")
-            if ctx.get(fld) is not None:
-                continue                                              # explicit count wins; null is no count
             applies = getattr(c, "applies_to_scope", lambda s: True)(scope)
-            ctx[fld] = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
+            count = self._chain.calls_so_far(self._node.node_id, getattr(c, "meter_key", "*")) + (1 if applies else 0)
+            if is_02:
+                if totals is not None:
+                    totals[fld] = count
+            else:
+                if ctx.get(fld) is not None:
+                    continue                                          # explicit count wins; null is no count
+                ctx[fld] = count
             if applies:
                 filled.append(c)
         return filled
@@ -498,9 +524,15 @@ class Guard:
               rows=None, spend=None, egress=None,
               disposition: str | None = None,
               authorized_params=_UNSET, capture: str | None = None,
-              adapter: Mapping | None = None) -> Decision:
+              adapter: Mapping | None = None,
+              totals: Mapping | None = None) -> Decision:
         """Authorize an action. Returns a `Decision` (does NOT raise on
         denial). Every call — allow or deny — is appended to the audit log.
+
+        `totals` (the -02 profile): the running totals this component holds for the node's
+        cumulative constraints, keyed by total field (`spend_total`, `calls_subtree_total`).
+        They are the only source of a total: a `*_total` key in `context` is ignored. A
+        cumulative constraint with no total held denies.
 
         Auto-metering: when this node holds a `CallLimit` and the caller did
         not supply `calls`, the guard supplies the running count for
@@ -553,8 +585,9 @@ class Guard:
                 filled = []
             else:
                 # 2. evaluate authority/ceilings; update meters on allow.
-                filled = self._auto_meter(scope, ctx)
-                decision = self._evaluate(scope, ctx, metered)
+                totals = dict(totals or {})
+                filled = self._auto_meter(scope, ctx, totals)
+                decision = self._evaluate(scope, ctx, metered, totals)
                 if decision:
                     for c in filled:
                         self._chain.count_call(nid, getattr(c, "meter_key", "*"))
@@ -650,15 +683,17 @@ class Guard:
 
     def would_allow(self, scope: str, *, context: Mapping | None = None,
                     metered: bool = False, tool: str | None = None,
-                    rows=None, spend=None, egress=None) -> Decision:
+                    rows=None, spend=None, egress=None,
+                    totals: Mapping | None = None) -> Decision:
         """Pure dry-run: identical policy evaluation to `check()`, but never
         raises and — critically — writes NOTHING to the audit log. For
         planners/UIs that want to ask "could I do this?" without leaving a
         record as though the action were actually attempted. Never allocates
         a `call_id` (there is nothing to bind an outcome to)."""
         ctx = self._merge_legacy(context, rows=rows, spend=spend, egress=egress)
-        self._auto_meter(scope, ctx)                                  # read the meters, never consume them
-        return self._evaluate(scope, ctx, metered)
+        totals = dict(totals or {})
+        self._auto_meter(scope, ctx, totals)                          # read the meters, never consume them
+        return self._evaluate(scope, ctx, metered, totals)
 
     def record_denial(self, reason, message: str = "", *, scope: str | None = None,
                       tool: str | None = None, context: Mapping | None = None,

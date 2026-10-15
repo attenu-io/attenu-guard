@@ -250,6 +250,7 @@ class RowLimit:
     max_rows: int
     key: str = field(default="max_rows", init=False, repr=False)
     ctx_field: str = field(default="rows", init=False, repr=False, compare=False)
+    draft_type = "max"            # the -02 constraint type this ceiling is on the wire (draft02.py)
 
     def __post_init__(self):
         _check_max(self.key, self.max_rows)
@@ -288,6 +289,7 @@ class SpendCap:
     max_spend: float
     key: str = field(default="max_spend", init=False, repr=False)
     ctx_field: str = field(default="spend", init=False, repr=False, compare=False)
+    draft_type = "max"
 
     def __post_init__(self):
         _check_max(self.key, self.max_spend)
@@ -338,6 +340,10 @@ class CallLimit:
     applies_to: str | None = None
     key: str = field(default="max_calls", init=False, repr=False)
     ctx_field: str = field(default="calls", init=False, repr=False, compare=False)
+    # A call count is a RUNNING total over the node's lifetime, so under the -02 this is the
+    # per-lifetime type. The -01 wire form below still says `max`, which the -02 names as the
+    # defect it fixes; `to_wire_02` emits the honest type.
+    draft_type = "max_lifetime"
 
     def __post_init__(self):
         _check_string(self.key, "applies_to", self.applies_to, optional=True)
@@ -389,6 +395,12 @@ class CallLimit:
             return {"key": self.key, "max": self.max_calls}                       # unchanged v0.2 wire form
         return {"key": self.key, "type": "max_calls", "max": self.max_calls, "applies_to": self.applies_to}
 
+    def to_wire_02(self) -> dict:
+        """The -02 shape: a cumulative bound under its own type, keyed `max_calls` or
+        `max_calls[<pattern>]`; the pattern lives in the key, as the -02 constraint object
+        admits no `applies_to` member."""
+        return {"key": self.key, "max_lifetime": self.max_calls}
+
     @classmethod
     def from_wire(cls, d: Mapping) -> "CallLimit":
         return cls(d.get("max", _ABSENT), d.get("applies_to"))
@@ -400,6 +412,7 @@ class EgressRank:
     level: str
     key: str = field(default="egress", init=False, repr=False)
     ctx_field: str = field(default="egress", init=False, repr=False, compare=False)
+    draft_type = "rank"
 
     def __post_init__(self):
         # A rank outside the vocabulary ranked above "any", so the ceiling admitted every request.
@@ -429,6 +442,11 @@ class EgressRank:
 
     def to_wire(self) -> dict:
         return {"key": self.key, "rank": self.level}
+
+    def to_wire_02(self) -> dict:
+        """The -02 shape carries the ordering on the wire, so a verifier needs no registry entry
+        for `egress`; the -01 shape above relies on the fixed `none < internal < any`."""
+        return {"key": self.key, "rank": self.level, "order": list(_EGRESS_ORDER)}
 
     @classmethod
     def from_wire(cls, d: Mapping) -> "EgressRank":
@@ -612,6 +630,7 @@ class Allow:
     key: str
     one_of: _Members
     field: str | None = None
+    draft_type = "one_of"
 
     def __post_init__(self):
         _check_key(self.key)
@@ -663,6 +682,7 @@ class Deny:
     key: str
     not_one_of: _Members
     field: str | None = None
+    draft_type = "not_one_of"
 
     def __post_init__(self):
         _check_key(self.key)
@@ -711,6 +731,7 @@ class Prefix:
     key: str
     prefix: str
     field: str | None = None
+    draft_type = "prefix"
 
     def __post_init__(self):
         _check_key(self.key)
