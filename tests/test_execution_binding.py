@@ -241,10 +241,23 @@ class TestAtomicityAndRollback(unittest.TestCase):
         g = Guard.issue("a", Authority({"crm.read"}, [RowLimit(100)], ttl=60), schema_version=2)
         before = g._chain.calls_so_far(g.node_id, "*")
         with self.assertRaises(canonical.CanonicalizationError):
-            g.check("crm.read", context={"rows": 1, "note": "\ud800"})   # a lone surrogate: fails _hash() pre-commit
+            g.check("crm.read", tool="\ud800", context={"rows": 1})   # a lone surrogate: fails _hash() pre-commit
         after = g._chain.calls_so_far(g.node_id, "*")
         self.assertEqual(before, after, "meters must be restored on ANY pre-commit failure, not only CSPRNG")
         self.assertEqual(len(g.audit_log().entries), 1)   # just the root -- nothing was appended
+
+    def test_an_unrepresentable_context_restores_meters_and_is_a_recorded_deny(self):
+        # Since 0.20 (attenu-ops #127, review M1): the same pre-commit failure, when it is the
+        # context the ledger cannot hold, is recorded as a deny with the context left out.
+        g = Guard.issue("a", Authority({"crm.read"}, [RowLimit(100)], ttl=60), schema_version=2)
+        before = g._chain.calls_so_far(g.node_id, "*")
+        d = g.check("crm.read", context={"rows": 1, "note": "\ud800"})
+        self.assertFalse(d)
+        self.assertEqual(d.reasons[0].constraint, "context")
+        self.assertEqual(g._chain.calls_so_far(g.node_id, "*"), before)
+        entries = g.audit_log().entries
+        self.assertEqual(len(entries), 2)
+        self.assertEqual((entries[-1]["event"], entries[-1]["context"]), ("deny", {}))
 
     def test_record_outcome_pre_commit_failure_leaves_the_call_id_unresolved(self):
         g = _v2_root()
@@ -485,11 +498,13 @@ class TestParamsCommitment(unittest.TestCase):
         h2, reason2 = params_mod.commit({"n": canonical.MAX_SAFE_INTEGER + 1}, salt)
         self.assertIsNone(h2); self.assertEqual(reason2, params_mod.ParamsHashReason.UNSUPPORTED)
 
-    def test_integral_float_beyond_the_bound_is_unsupported_even_though_canonical_dumps_tolerates_it(self):
+    def test_integral_float_beyond_the_bound_is_unsupported(self):
         salt = bytes(16)
-        # canonical.dumps itself still accepts this (a pinned JCS-divergence-class test relies on
-        # it — see tests/test_canonical.py); params_c14n_v1 closes the gap itself, in front.
-        self.assertEqual(canonical.dumps(1e16), b"10000000000000000")
+        # canonical.dumps tolerated this through 0.19 and params_c14n_v1 closed the gap in front of
+        # it; since 0.20 canonical.dumps refuses it too (attenu-ops #127). The params check still
+        # answers first, with its own reason.
+        with self.assertRaises(canonical.UnsafeIntegerError):
+            canonical.dumps(1e16)
         h, reason = params_mod.commit({"n": 1e16}, salt)
         self.assertIsNone(h)
         self.assertEqual(reason, params_mod.ParamsHashReason.UNSUPPORTED)

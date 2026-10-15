@@ -49,8 +49,9 @@ class UnsupportedTypeError(CanonicalizationError, TypeError):
 
 
 #: The largest (and, negated, the smallest) integer magnitude a binary64
-#: double represents exactly. Every int strictly beyond this range raises
-#: `UnsafeIntegerError` rather than being canonicalized.
+#: double represents exactly. Every number whose value is an integer strictly
+#: beyond this range, an int or an integral float, raises `UnsafeIntegerError`
+#: rather than being canonicalized.
 MAX_SAFE_INTEGER = 2**53 - 1
 
 
@@ -65,20 +66,40 @@ _ESCAPES = {
 }
 
 
+def _unsafe(rendered: str) -> UnsafeIntegerError:
+    return UnsafeIntegerError(
+        f"integer {rendered} exceeds the safe range "
+        f"±{MAX_SAFE_INTEGER} for a binary64 signing surface "
+        "(RFC 8785 numbers are IEEE 754 doubles)"
+    )
+
+
 def _number(value: int | float) -> str:
-    """ECMAScript ``Number::toString`` formatting required by RFC 8785."""
+    """ECMAScript ``Number::toString`` formatting required by RFC 8785.
+
+    The safe-integer rule is applied to the VALUE, not to the Python type: JSON has one number
+    type, and the JCS form of an integer past 2**53 - 1 is its exponent form (``10**21`` is
+    ``1e+21``), so a float holding an integral value past that range is the same wire value as the
+    int this rule refuses. Every double of magnitude 2**53 or more is integral, so this refuses
+    every number past the range. It is the rule the TypeScript implementation applies (a
+    JavaScript number cannot tell the two apart) and the one the -01 vector
+    ``valid_jcs_exponent_form`` states (attenu-ops #127)."""
     if type(value) is int:
         if abs(value) > MAX_SAFE_INTEGER:
-            raise UnsafeIntegerError(
-                f"integer {value!r} exceeds the safe range "
-                f"±{MAX_SAFE_INTEGER} for a binary64 signing surface "
-                "(RFC 8785 numbers are IEEE 754 doubles)"
-            )
+            raise _unsafe(repr(value))
         number = float(value)
     else:
         number = value
     if not math.isfinite(number):
         raise NonFiniteNumberError("non-finite numbers are not permitted")
+    rendered = _es_number(number)
+    if abs(number) > MAX_SAFE_INTEGER and number.is_integer():
+        raise _unsafe(rendered)
+    return rendered
+
+
+def _es_number(number: float) -> str:
+    """ECMAScript ``Number::toString`` of a finite double."""
     if number == 0:
         return "0"
 

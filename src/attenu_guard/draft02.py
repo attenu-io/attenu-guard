@@ -47,6 +47,7 @@ same form. The forms are not normalised into one in this release.
 from __future__ import annotations
 
 import collections.abc
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Mapping
@@ -491,9 +492,15 @@ def ceiling_to_wire_02(c) -> dict:
 
 
 def check_integer_safe(value) -> None:
-    """The -02 Section 3 rule: an integer whose magnitude exceeds 2^53-1 is malformed."""
-    if type(value) is int and abs(value) > MAX_SAFE_INTEGER:
-        raise ValueError(f"integer {value!r} exceeds the safe range for a binary64 signing surface")
+    """The -02 Section 3 rule: an integer whose magnitude exceeds 2^53-1 is malformed. Read by
+    value, as `canonical` reads it: an int, or a finite float past the range, every one of which
+    is integral (attenu-ops #127). A non-finite float is left to the non_finite check."""
+    if type(value) is int:
+        if abs(value) > MAX_SAFE_INTEGER:
+            raise ValueError(f"integer {value!r} exceeds the safe range for a binary64 signing surface")
+    elif type(value) is float and math.isfinite(value) and abs(value) > MAX_SAFE_INTEGER:
+        raise ValueError(f"integer {canonical._es_number(value)} exceeds the safe range for a "
+                         "binary64 signing surface")
 
 
 def is_identical_unknown(a, b) -> bool:

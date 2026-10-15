@@ -56,6 +56,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Protocol, runtime_checkable
 
@@ -746,7 +747,7 @@ def _check_token_02(header: Mapping, payload: Mapping, i: int) -> Authority:
         raise bad(f"cnf must be an object carrying one of {list(_CNF_MEMBERS)}, binding the token "
                   "to its holder's key (draft -02 Sections 3 and 7)")
     for claim, value in payload.items():
-        if type(value) is int:
+        if type(value) in (int, float):
             try:
                 draft02.check_integer_safe(value)
             except ValueError as e:
@@ -811,11 +812,27 @@ def _parse_token(token: str):
                 "(RFC 8785 numbers are IEEE 754 doubles)")
         return value
 
+    def reject_unsafe_float(text):
+        # The same rule by value (attenu-ops #127): JSON has one number type, and an integer past
+        # the range has the exponent form as its JCS serialization (10**21 is 1e+21), so the
+        # integer-literal hook above alone let through the value it exists to refuse. Every double
+        # past 2**53 - 1 is integral. A non-finite value is left to the non_finite check.
+        value = float(text)
+        if math.isfinite(value) and abs(value) > canonical.MAX_SAFE_INTEGER:
+            raise WireError(
+                WireReasonCode.MALFORMED,
+                f"integer {canonical._es_number(value)} exceeds the safe range "
+                f"±{canonical.MAX_SAFE_INTEGER} for a binary64 signing surface "
+                "(RFC 8785 numbers are IEEE 754 doubles)")
+        return value
+
     try:
         header = json.loads(header_bytes, object_pairs_hook=reject_duplicates,
-                            parse_constant=reject_constant, parse_int=reject_unsafe_int)
+                            parse_constant=reject_constant, parse_int=reject_unsafe_int,
+                            parse_float=reject_unsafe_float)
         payload = json.loads(payload_bytes, object_pairs_hook=reject_duplicates,
-                             parse_constant=reject_constant, parse_int=reject_unsafe_int)
+                             parse_constant=reject_constant, parse_int=reject_unsafe_int,
+                             parse_float=reject_unsafe_float)
     except WireError:
         raise
     except Exception as e:
