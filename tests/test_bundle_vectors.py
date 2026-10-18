@@ -75,7 +75,7 @@ class TestBundleVectors(unittest.TestCase):
         # an implementation that scored bundle_vectors_v1 still scores it. `revision` is the
         # additive counter that does move, so a reader can name the corpus they ran.
         self.assertEqual(self.document["version"], "bundle_vectors_v1")
-        self.assertEqual(self.document["revision"], "bundle_vectors_v1.4")
+        self.assertEqual(self.document["revision"], "bundle_vectors_v1.5")
         self.assertEqual([c["name"] for c in self.document["cases"]], [
             "valid_bundle_v2",
             "reject_params_mismatch",
@@ -109,6 +109,18 @@ class TestBundleVectors(unittest.TestCase):
             # appear only on an allow.
             "reject_unknown_policy_value",
             "reject_policy_on_spawn",
+            # revision v1.5 — entry validation, and the first schema_version=1 chains: an
+            # accepting v1 base with no outcome entries, one rejecting row per entry-validation
+            # reason, and the v1.4 policy rule on a v1 chain.
+            "valid_bundle_v1",
+            "reject_unknown_ledger_fields",
+            "reject_v2_field_on_v1",
+            "reject_unknown_ledger_event",
+            "reject_outcome_event_on_v1",
+            "reject_invalid_ledger_entry",
+            "reject_invalid_ledger_entry_array",
+            "valid_bundle_v1_ungated_allow",
+            "reject_unknown_policy_value_v1_chain",
         ])
 
     def test_the_delegation_containment_rules_each_have_a_rejecting_case(self):
@@ -145,7 +157,9 @@ class TestBundleVectors(unittest.TestCase):
         # which every mutation legitimately rewrites. The three cases that insert, transpose or
         # leave the chain broken are exempt from the count, not from the rule.
         by_name = {c["name"]: c for c in self.document["cases"]}
-        reshaped = {"reject_outcome_before_allow", "reject_duplicate_outcome"}
+        reshaped = {"reject_outcome_before_allow", "reject_duplicate_outcome",
+                    "reject_outcome_event_on_v1"}
+        accepting = [c["name"] for c in self.document["cases"] if c["expect"] == "accept"]
         for case in self.document["cases"]:
             if case["expect"] != "reject" or case["name"] in reshaped:
                 continue
@@ -154,19 +168,26 @@ class TestBundleVectors(unittest.TestCase):
                 # `valid_bundle_v2` when it names none. Selecting on the `_literal` suffix alone
                 # silently mis-based revision v1.4's rows, which come off the un-gated bundle
                 # and end in neither suffix — they were compared against a base one entry
-                # shorter and failed on the count, not on the rule.
-                named = [n for n in ("valid_bundle_v2_literal", "valid_bundle_v2_ungated_allow")
-                         if n in case["description"]]
+                # shorter and failed on the count, not on the rule. A name inside a longer
+                # named one (`valid_bundle_v1` in `valid_bundle_v1_ungated_allow`) is not a
+                # second base.
+                named = [n for n in accepting if n in case["description"]]
+                named = [n for n in named if not any(n != m and n in m for m in named)]
+                named = [n for n in named if n != "valid_bundle_v2"] or named
                 self.assertLessEqual(len(named), 1,
-                                     f"{case['name']} names more than one base")
+                                     f"{case['name']} names more than one base: {named}")
                 base_name = named[0] if named else "valid_bundle_v2"
                 base_entries = by_name[base_name]["bundle"]["entries"]
                 entries = case["bundle"]["entries"]
                 self.assertEqual(len(entries), len(base_entries))
                 skip = ("hash", "prev_hash")
+
+                def _content(e):
+                    # An entry that is not an object (revision v1.5) is compared as it is.
+                    return ({k: v for k, v in e.items() if k not in skip}
+                            if isinstance(e, dict) else e)
                 differing = [i for i, (a, b) in enumerate(zip(base_entries, entries))
-                             if {k: v for k, v in a.items() if k not in skip}
-                             != {k: v for k, v in b.items() if k not in skip}]
+                             if _content(a) != _content(b)]
                 self.assertEqual(len(differing), 1,
                                  f"{case['name']} changed entries {differing}, expected exactly 1")
 
@@ -211,22 +232,100 @@ class TestBundleVectors(unittest.TestCase):
                 self.assertEqual(granted["scopes"], base["scopes"])
                 self.assertTrue(granted["ttl"] != base["ttl"] or granted["constraints"] != base["constraints"])
 
-    def test_every_case_is_a_complete_v2_bundle_with_execution_binding(self):
+    def test_every_v2_case_is_a_complete_v2_bundle_with_execution_binding(self):
+        # Revision v1.5 adds schema_version=1 cases; the four v1 rows are pinned below. Every
+        # other case is a v2 bundle with execution binding.
+        v1_names = {"valid_bundle_v1", "reject_v2_field_on_v1", "reject_outcome_event_on_v1",
+                    "valid_bundle_v1_ungated_allow", "reject_unknown_policy_value_v1_chain"}
         for case in self.document["cases"]:
             with self.subTest(case=case["name"]):
                 bundle = case["bundle"]
+                if case["name"] in v1_names:
+                    self.assertEqual(bundle["v"], 1)
+                    self.assertTrue(bundle["anchor"]["sig"])
+                    self.assertEqual(bundle["anchor"]["v"], 1)
+                    for e in bundle["entries"]:
+                        self.assertEqual(e["v"], 1)
+                    self.assertTrue(case["description"].strip())
+                    continue
                 self.assertEqual(bundle["v"], 2)
                 self.assertTrue(bundle["anchor"]["sig"])
-                events = [e.get("event") for e in bundle["entries"]]
+                # The two invalid_ledger_entry rows hold one entry that is not an object.
+                objects = [e for e in bundle["entries"] if isinstance(e, dict)]
+                events = [e.get("event") for e in objects]
                 for required in ("root", "spawn", "allow", "deny", "outcome", "done"):
                     self.assertIn(required, events)
-                allow = next(e for e in bundle["entries"] if e.get("event") == "allow")
+                allow = next(e for e in objects if e.get("event") == "allow")
                 for field in ("call_id", "capture", "adapter", "authorized_params_hash"):
                     self.assertIn(field, allow)
-                outcome = next(e for e in bundle["entries"] if e.get("event") == "outcome")
+                outcome = next(e for e in objects if e.get("event") == "outcome")
                 for field in ("call_id", "body_state", "invoked_params_hash"):
                     self.assertIn(field, outcome)
                 self.assertTrue(case["description"].strip())
+
+    # ---- revision v1.5 ----------------------------------------------------
+
+    # The nine LEDGER_FIELDS names no published entry carried when revision v1.5 was cut. The
+    # promise on A2A #1575 was that v1.5 adds no row for them; this keeps it.
+    NEVER_PUBLISHED = frozenset({"detail", "error_code", "mode", "params_hash_reason",
+                                 "pending_at_kill", "receipt", "revoked", "strikes", "target"})
+
+    def test_no_case_carries_a_never_published_field_name(self):
+        for case in self.document["cases"]:
+            with self.subTest(case=case["name"]):
+                for e in case["bundle"]["entries"]:
+                    if isinstance(e, dict):
+                        self.assertFalse(self.NEVER_PUBLISHED & e.keys(), e.get("seq"))
+
+    def test_the_v1_base_has_no_outcome_and_only_canonical_v1_fields(self):
+        by_name = {c["name"]: c for c in self.document["cases"]}
+        v2_only = evidence._V2_ONLY_FIELDS
+        for name, count in (("valid_bundle_v1", 7), ("valid_bundle_v1_ungated_allow", 8)):
+            with self.subTest(case=name):
+                entries = by_name[name]["bundle"]["entries"]
+                self.assertEqual(len(entries), count)
+                self.assertEqual([e["seq"] for e in entries], list(range(count)))
+                for e in entries:
+                    self.assertIn(e["event"], evidence.LEDGER_EVENTS_V1)
+                    self.assertFalse(v2_only & e.keys(), e["seq"])
+                    self.assertLessEqual(e.keys(), evidence.LEDGER_FIELDS)
+
+    def test_each_entry_validation_row_reports_only_what_it_is_about(self):
+        # Each v1.5 row isolates one rule. The re-hashed, re-anchored rows report exactly their
+        # declared failures; the two non-object rows may add the chain-level integrity pair and
+        # nothing else, because the chain cannot be re-hashed over a non-object.
+        by_name = {c["name"]: c for c in self.document["cases"]}
+        exact = ("reject_unknown_ledger_fields", "reject_v2_field_on_v1",
+                 "reject_unknown_ledger_event", "reject_outcome_event_on_v1",
+                 "reject_unknown_policy_value_v1_chain")
+        for name in exact:
+            with self.subTest(case=name):
+                case = by_name[name]
+                report = evidence.verify_bundle(case["bundle"], _signer_for(case))
+                self.assertEqual(sorted(_positions(report), key=str),
+                                 sorted(case["expect_failures"], key=str))
+                self.assertEqual(report["checks"]["anchor"], "verified")
+                self.assertTrue(report["checks"]["integrity"])
+        for name in ("reject_invalid_ledger_entry", "reject_invalid_ledger_entry_array"):
+            with self.subTest(case=name):
+                case = by_name[name]
+                report = evidence.verify_bundle(case["bundle"], _signer_for(case))
+                extras = [f for f in _positions(report) if f not in case["expect_failures"]]
+                self.assertEqual(sorted(f["reason"] for f in extras),
+                                 ["integrity", "integrity(anchor)"])
+                self.assertTrue(all(f["seq"] is None and f["node"] is None for f in extras))
+                self.assertIn("entries[7] is", report["failures"][0])
+
+    def test_the_v1_policy_row_reports_invalid_policy_not_invalid_allow(self):
+        # The v2 row reports `invalid_allow`, from the v2 record check; that check does not run
+        # on a v1 chain, so the v1 row must be caught by the version-independent policy check.
+        by_name = {c["name"]: c for c in self.document["cases"]}
+        case = by_name["reject_unknown_policy_value_v1_chain"]
+        report = evidence.verify_bundle(case["bundle"], _signer_for(case))
+        reasons = {d["reason"] for d in report["failure_details"]}
+        self.assertIn("invalid_policy", reasons)
+        self.assertNotIn("invalid_allow", reasons)
+        self.assertEqual(report["ungated"], 0)
 
     def test_accepting_cases_verify_with_no_failures(self):
         for case in self.document["cases"]:
@@ -277,7 +376,7 @@ class TestBundleVectors(unittest.TestCase):
         self.assertEqual(vectors.read_bundle_vectors_bytes(), COMMITTED_REPO_BYTES)
         loaded = vectors.load_bundle_vectors()
         self.assertEqual(loaded["version"], "bundle_vectors_v1")
-        self.assertEqual(loaded["revision"], "bundle_vectors_v1.4")
+        self.assertEqual(loaded["revision"], "bundle_vectors_v1.5")
         self.assertEqual([c["name"] for c in loaded["cases"]],
                          [c["name"] for c in self.document["cases"]])
 

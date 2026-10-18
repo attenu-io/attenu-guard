@@ -846,12 +846,52 @@ def _verification_time(now):
 #: A trust-set row's members. A row is read whole: anything else in it is refused.
 _TRUST_ROW_MEMBERS = frozenset({"kid", "alg", "public_key_hex", "not_after"})
 
+#: A trust-set document's members (docs/TRUST-SET-FRESHNESS.md). Read whole, like a row.
+_TRUST_SET_MEMBERS = frozenset({"witness_keys", "not_after"})
+
+
+def _is_trust_set_document(witness_keys) -> bool:
+    """A trust set given as `{"witness_keys": [rows], "not_after": ...}` rather than as the bare
+    array or the `{kid: key}` mapping. A mapping with a `witness_keys` member is a document, so
+    the mapping form cannot name a kid `witness_keys`."""
+    return isinstance(witness_keys, Mapping) and "witness_keys" in witness_keys
+
+
+def _trust_set_document(document) -> tuple:
+    """`(rows, not_after, until)` from a trust-set document, read whole. `until` is the set's
+    `not_after` as an aware UTC `datetime`, or None when the document carries none. Raises
+    `ValueError` for a member outside `witness_keys` and `not_after`, rows that are not an
+    array, or a `not_after` outside the row grammar (`null` included)."""
+    unknown = sorted((m for m in document if m not in _TRUST_SET_MEMBERS), key=str)
+    if unknown:
+        raise ValueError(f"trust set: the document carries members this build does not evaluate "
+                         f"and will not ignore: {', '.join(map(repr, unknown))}")
+    rows = document["witness_keys"]
+    if not isinstance(rows, (list, tuple)):
+        raise ValueError("trust set: witness_keys must be an array of rows")
+    not_after = until = None
+    if "not_after" in document:
+        not_after = document["not_after"]
+        until = _rfc3339_utc(not_after)
+        if until is None:
+            raise ValueError(f"trust set: not_after must be an RFC 3339 UTC date-time such as "
+                             f"'2026-10-05T00:00:00Z', got {not_after!r}")
+    return rows, not_after, until
+
 
 def _trusted_witnesses(witness_keys, now=None) -> tuple:
     """`(trusted, expired)` from the vector file's own `witness_keys` shape
-    (`[{"kid", "alg", "public_key_hex"}]`, each row optionally with `not_after`) or from a plain
-    `{kid: public_key_bytes}` mapping. `trusted` is kid -> (alg, raw public key bytes); `expired`
-    is kid -> the `not_after` string of a row that was left out because it had expired.
+    (`[{"kid", "alg", "public_key_hex"}]`, each row optionally with `not_after`), from a plain
+    `{kid: public_key_bytes}` mapping, or from a trust-set document
+    `{"witness_keys": [rows], "not_after": ...}`. `trusted` is kid -> (alg, raw public key
+    bytes); `expired` is kid -> `(what, not_after)` for a row that was left out because it had
+    expired, `what` being "key" when its own `not_after` had passed and "trust set" when only the
+    document's had.
+
+    A document's `not_after` is the whole set's validity, compared with the same time as a row's.
+    At or after it no row is trusted, so every row is a row of a set that expired. The document is
+    read whole: a member outside `witness_keys` and `not_after` is refused, and so is a
+    `not_after` outside the row grammar (docs/TRUST-SET-FRESHNESS.md).
 
     `None` means no trust anchor is configured, which is an EMPTY set, not an absent check: an
     envelope naming a kid nobody trusts is `envelope_unknown_witness`, and that is the honest
@@ -861,7 +901,8 @@ def _trusted_witnesses(witness_keys, now=None) -> tuple:
     "2026-10-05T00:00:00Z". A row whose `not_after` is at or before `now` (`_verification_time`:
     the current UTC time by default) is left out of the trust set, so an envelope naming its kid
     is `envelope_unknown_witness`, and the message says the key expired and when. A row without
-    `not_after` is trusted with no time limit, as before.
+    `not_after` is trusted with no time limit, as before, unless the trust set is a document whose
+    `not_after` bounds it.
 
     Every row is validated here and a bad one raises `ValueError` naming its kid. This is the one
     envelope input that is NOT attacker-supplied — the deployment chose these keys — so a mistake
@@ -878,6 +919,9 @@ def _trusted_witnesses(witness_keys, now=None) -> tuple:
     at = _verification_time(now)
     if witness_keys is None:
         return {}, {}
+    set_not_after = set_until = None
+    if _is_trust_set_document(witness_keys):
+        witness_keys, set_not_after, set_until = _trust_set_document(witness_keys)
     rows = (witness_keys.items() if isinstance(witness_keys, Mapping)
             else [(k.get("kid") if isinstance(k, Mapping) else None, k) for k in witness_keys])
     trusted, expired, seen = {}, {}, set()
@@ -908,9 +952,15 @@ def _trusted_witnesses(witness_keys, now=None) -> tuple:
             value = value.get("public_key_hex")
         key = _witness_public_key(kid, value)
         if until is not None and until <= at:
-            expired[kid] = not_after
+            expired[kid] = ("key", not_after)
             continue
         trusted[kid] = (ENVELOPE_ALG, key)
+    if set_until is not None and set_until <= at:
+        # Validated in full above, then left out: the set's expiry, like a row's, never excuses
+        # a bad row. A row that had expired on its own keeps its own message.
+        for kid in trusted:
+            expired[kid] = ("trust set", set_not_after)
+        trusted = {}
     return trusted, expired
 
 
@@ -962,8 +1012,8 @@ def _envelopes(entries: list[dict], envelopes: list, trusted: dict,
     whoever appends the second decides what the first said, and an entry whose coverage is
     disputed must not read as clean.
 
-    `expired` is the kid -> `not_after` map `_trusted_witnesses` left out of `trusted`; it only
-    changes the wording of the `envelope_unknown_witness` an expired key gets."""
+    `expired` is the kid -> `(what, not_after)` map `_trusted_witnesses` left out of `trusted`;
+    it only changes the wording of the `envelope_unknown_witness` an expired key gets."""
     fail = _FailureLog()
     states = {_state_key(e, i): PROCESS_ASSERTED for i, e in enumerate(entries)}
     results: dict = {}
@@ -1199,9 +1249,10 @@ def _score_envelope(envelope, index: int, entries: list, subject_index: dict, re
         # different fixes.
         lapsed = (expired or {}).get(kid)
         if lapsed is not None:
+            what, not_after = lapsed
             report("envelope_unknown_witness",
                    f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
-                   f"({sorted(trusted)}): the key expired at not_after={lapsed!r}", subject)
+                   f"({sorted(trusted)}): the {what} expired at not_after={not_after!r}", subject)
             return None, None, None
         report("envelope_unknown_witness",
                f"witness kid={kid!r} alg={alg!r} is not in the trusted witness keys "
@@ -1239,11 +1290,12 @@ def _score_envelope(envelope, index: int, entries: list, subject_index: dict, re
 def verify_envelopes(bundle: dict, *, witness_keys=None, envelope_bytes=None, now=None) -> dict:
     """Score a bundle's observer envelopes on their own, without the ledger checks.
 
-    `witness_keys` is the trust set: the vector file's `[{"kid", "alg", "public_key_hex"}]`, or
-    a `{kid: public_key_bytes}` mapping. A row may carry `not_after`, an RFC 3339 UTC date-time;
+    `witness_keys` is the trust set: the vector file's `[{"kid", "alg", "public_key_hex"}]`, a
+    `{kid: public_key_bytes}` mapping, or a trust-set document `{"witness_keys": [rows],
+    "not_after": ...}`. A row may carry `not_after`, an RFC 3339 UTC date-time;
     a row whose `not_after` is at or before `now` (default: the current UTC time) is left out of
     the trust set, and its envelopes fail `envelope_unknown_witness`, with the expiry in the
-    message. `envelope_bytes` is the list of envelope bytes AS RECEIVED, positionally aligned
+    message. A document's `not_after` is the whole set's: at or after it no row is trusted. `envelope_bytes` is the list of envelope bytes AS RECEIVED, positionally aligned
     with `bundle["envelopes"]` (entries may be None) — only `envelope_non_canonical` needs them,
     and only where a deployment kept them.
 
@@ -1855,11 +1907,14 @@ def verify_bundle(bundle: dict, signer=None, *, expected_anchor: dict | None = N
 
     `witness_keys` is the trust set for the bundle's observer envelopes, if it carries any:
     `[{"kid", "alg", "public_key_hex"}]` (the envelope vector file's own shape) or a
-    `{kid: public_key_bytes}` mapping. `None` is an EMPTY trust set, not a skipped check — an
-    envelope naming a key nobody trusts is `envelope_unknown_witness`. A row may carry
-    `not_after`, an RFC 3339 UTC date-time such as "2026-10-05T00:00:00Z"; a row whose
+    `{kid: public_key_bytes}` mapping, or a trust-set document `{"witness_keys": [rows],
+    "not_after": ...}` (docs/TRUST-SET-FRESHNESS.md). `None` is an EMPTY trust set, not a
+    skipped check — an envelope naming a key nobody trusts is `envelope_unknown_witness`. A row
+    may carry `not_after`, an RFC 3339 UTC date-time such as "2026-10-05T00:00:00Z"; a row whose
     `not_after` is at or before `now` is left out of the trust set, so its envelopes fail
-    `envelope_unknown_witness` with the expiry in the message. `now` defaults to the current
+    `envelope_unknown_witness` with the expiry in the message. A document's `not_after` is the
+    whole set's: at or after it no row is trusted, and for a key the set held the message says the
+    trust set expired. `now` defaults to the current
     UTC time and may be an aware `datetime`, an RFC 3339 UTC string or epoch seconds; a
     malformed `not_after` raises `ValueError` naming the kid. `envelope_bytes` supplies
     the envelope bytes AS RECEIVED, positionally aligned with `bundle["envelopes"]`, which only

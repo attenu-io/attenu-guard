@@ -37,4 +37,12 @@ witness, and its key, where the process it observes cannot reach them.
 
 Which witness keys count is the verifier's decision, made in `witness_keys`. A row there may
 carry `not_after` (RFC 3339, UTC); from that time on the key is not trusted and its envelopes
-fail `envelope_unknown_witness`. A row without `not_after` is trusted until it is removed.
+fail `envelope_unknown_witness`. A row without `not_after` is trusted until it is removed, or
+until the set's own `not_after` when the set is a document. The set may also be given as a document, `{"witness_keys": [...], "not_after": ...}`, whose
+`not_after` bounds every row, so a stale copy of the set stops being trusted even where its rows
+carry no expiry ([TRUST-SET-FRESHNESS.md](TRUST-SET-FRESHNESS.md)).
+
+`not_after` protects against staleness for a reader whose clock is right, and not against an
+adversary who holds that clock. The reader compares it with its own UTC clock, or with a time
+the caller passes as `now`; the `attenu-guard verify` CLI passes none, so it uses the clock of
+the machine it runs on.
