@@ -154,3 +154,7 @@ Kieran Sweeney's proposed cases from the WIMSE list thread on the -02 scope gram
 layout and signed with this set's key; the scope values and declared outcomes are his.
 `reject_reissued_parent` pins the answer to Jijie Wei's question on the same list about
 what `par_hash` commits to when a parent is re-issued.
+`reject_child_adds_detail_type` (added for the -03) pins the outcome of a child that adds a
+detail type its parent did not carry: malformed under the one-detail rule of the -02 and -03,
+and recorded in the -03's Section 4.4 as the widening case of Kieran Sweeney's rule for a later
+revision (WIMSE list, 2026-10-20).

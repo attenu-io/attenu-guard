@@ -4,6 +4,12 @@ One line per change. The long-form notes for each version (reasoning, review fin
 
 Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Added
+- **Vector `reject_child_adds_detail_type`** in the -02 set (`tests/vectors-02/`, shipped as `attenu_guard.vectors.draft02`; the set now has thirty-six files). DT_0 and DT_1 carry one `agent_delegation` detail each; the leaf adds a second detail of a type its parent did not carry (`acme_site_policy`). Rejected at parse as `malformed` under the one-detail rule. Added for draft -03, whose Section 4.4 records Kieran Sweeney's rule for a later multi-type revision (a child that adds a type its parent did not carry is treated as widening unless that type's definition states otherwise; WIMSE list, 2026-10-20). `VECTOR_NAMES_02` lists it; the thirty-five earlier files are byte-identical. attenu-guard-ts vendors the file and scores it to the same outcome
+- **`docs/draft-asor-wimse-agent-delegation-chain-03.md`**: the -03 source (Table 1 row on the Principal's standing, credited to Cliff Singletary; the two-type rule and the use-time sentence, credited to Kieran Sweeney; a new Section 1.2 on the relationship to draft-mcguinness-oauth-actor-profile and draft-mw-oauth-actor-chain; Changes Since -02)
+
 ## [0.21.0] - 2026-10-18
 
 ### Added
