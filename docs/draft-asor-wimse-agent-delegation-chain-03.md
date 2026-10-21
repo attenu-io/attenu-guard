@@ -133,32 +133,39 @@ informatively, and no requirement here depends on it.
 
 ## Relationship to the OAuth actor drafts {#actor-drafts}
 
-Two drafts in the OAuth working group record who acted along a delegation and
-are complementary to this document rather than alternatives to it.
+Two individual Internet-Drafts directed to the OAuth working group record who
+acted along a delegation and are complementary to this document.
 {{I-D.mcguinness-oauth-actor-profile}} represents delegated actors in the
 "act" claim of OAuth 2.0 Token Exchange {{RFC8693}}: the outermost actor is
 the immediate actor, inner actors are prior-actor context preserved for audit
 and not inputs to access-control decisions, and the authorization server that
 extends a chain confirms that the new actor is authorized to act for the
 subject, enforces a locally configured maximum depth, and issues a token whose
-effective scope does not exceed the ceiling it holds for the inbound token.
-{{I-D.mw-oauth-actor-chain}} adds, in its verified profiles, an actor proof and
-an authorization server acceptance at every actor step, a salted commitment to
-the actor-visible path, and path evidence that a recipient validates from the
-root to the current actor; its validation applies the scope comparison to the
-final step and does not compare different hops' resource identifiers as if
-they had subset semantics.
+effective scope does not exceed the scope ceiling, if any, that the profile
+assigns to the inbound subject token.
+{{I-D.mw-oauth-actor-chain}} builds on the same "act" claim and adds, in its
+verified profiles, an actor proof and an authorization server acceptance at
+every actor step and a salted commitment to the actor-visible path, and in its
+verified-full profile optional path evidence that a recipient validates from
+the root to the current actor; its path validation applies the scope
+comparison to the final step and does not compare different hops' resource
+identifiers as if they had subset semantics.
 
 In both, the party that bounds what a hop may do is the authorization server
-at the time of each exchange, and the record a recipient can check is the
-record of actors and acceptances. This document bounds what each hop may do in
-the chain itself: every token carries its Authority, each child commits to its
-parent, and any holder of the chain checks at step 4 of {{verify}} that each
-hop's Authority is a subset of its parent's, with no authorization server
-present at verification. A deployment that needs both an attributable record
-of actors and an offline-checkable bound on authority can carry an "act" chain
-beside a Delegation Chain; nothing in either representation conflicts with the
-other, and this document defines no mapping between them.
+at the time of each exchange. A recipient can check which actors took part, as
+the issuer asserts them in "act" or, in the verified profiles of
+{{I-D.mw-oauth-actor-chain}}, through actor proofs and acceptances, and, as
+that draft's Section 8 states, path evidence does not reconstruct the
+effective authority of a historical token. This document bounds what each hop
+may do in the chain itself: every token carries its Authority, each child
+commits to its parent, and any holder of the chain can check at step 4 of
+{{verify}} that each hop's Authority is a subset of its parent's, with no
+authorization server present at verification. A deployment that wants an
+authorization server's record of actors as well as an offline-checkable bound
+on authority can carry an "act" chain beside a Delegation Chain, whose
+"client_id" already names the acting agent at each hop ({{principal}}); this
+document places no requirement on an "act" claim and defines no mapping
+between the two.
 
 # Conventions and Definitions
 
@@ -293,7 +300,7 @@ machinery.
 This revision defines no transition mode for chains shaped by the previous
 revision. A chain whose tokens carry no "client_id" or no "cnf", or whose
 "aud" is null, is malformed under this revision. A verifier that also accepts
-such chains under the previous revision's rules does so outside this document
+such chains under the -01's rules does so outside this document
 and reports which revision's rules it applied.
 
 # Authority Representation {#authority}
@@ -501,8 +508,8 @@ type its parent did not carry, because a verifier cannot tell from the child
 alone whether the addition narrowed or widened what the parent granted. The
 rule recorded here for that revision, proposed by Kieran Sweeney, is that a
 child that adds a type its parent did not carry is treated as widening unless
-that type's definition states otherwise. Under this revision the case does not
-arise: the added type is not "agent_delegation", so the token is malformed
+that type's definition states otherwise. Under this revision the rule is not
+needed: the added type is not "agent_delegation", so the token is malformed
 under the rule above, and the vector "reject_child_adds_detail_type" in
 {{vectors}} pins that outcome. A resource server SHOULD declare the types it implements in the
 "authorization_details_types_supported" member of its protected resource
@@ -637,18 +644,19 @@ Verifier may and may not conclude.
 | The Principal still holds the authority granted at DT_0, at the instant checked | no | no |
 {: #table-conclusions title="What a Verifier may conclude, by the steps it performed"}
 
-The last row records, from the Verifier's side, the limit stated in
+The last row records a second limit beside the one stated in
 {{root-issuance}}: nothing in a chain says whether the Principal named in
 "sub" still holds the authority DT_0 granted. A Principal who has left, lost
 the role, or had the underlying grant withdrawn leaves every unexpired,
 unrevoked chain verifying clean, because a status list revokes tokens and
-nothing in the chain revokes the Principal. A Verifier that reports an action
-as authorized under that grant has to establish the Principal's standing
-elsewhere. One place it can be learned: where a server in the call path holds
-the Principal's deposited grant, it learns at use time whether that grant
-still stands, because the upstream call fails once the grant is withdrawn.
-That covers a withdrawn grant, not a role lost inside the Principal's own
-organization.
+nothing in the chain revokes the Principal. Step 8 permits an action within
+DT_n's Authority without establishing that standing; a deployment that must
+know it before honoring an action under that grant establishes it outside the
+chain. A server in the call path that holds the Principal's grant itself, for
+example a credential the Principal deposited with it, learns at use time
+whether the grant still stands, because its upstream call fails once the
+grant is withdrawn. That covers a withdrawn grant, not a role lost inside the
+Principal's own organization.
 
 The "subset" row holds for the constraint types the Verifier implements. A
 constraint type it does not implement fails closed under the rule in
@@ -953,11 +961,11 @@ presence and shape of "cnf" and perform neither step 6 (holder binding) nor
 step 7 (status list), which both document as not performed. The vector set of
 {{vectors}} for this revision has thirty-six files; the Python library
 generates and scores it on every test run, and the TypeScript library vendors
-it byte for byte and scores it in its test suite. The previous revision's
+it byte for byte and scores it in its test suite. The -01 set's
 twenty files ship in both libraries unchanged.
 
 Two implementations independent of the author's code have run the twenty test
-vectors of the previous revision and published their results, as reported by
+vectors of the -01 and published their results, as reported by
 their authors: the conformance harness of the Cred delegation protocol, whose
 published result of 2026-10-07 reports 20 of 20, with no failures and no
 declared gaps, at a pinned commit of the Cred SDK; and a standalone Node.js
@@ -982,8 +990,7 @@ acknowledged. The "min" constraint type was added after Amr Hassan, author of
 floor tightened upward; the duration-typed "tenureMin" axis of that document is
 the motivating example.
 
-The following contributions were made in review of the -01 and shaped this
-revision. Naming a contributor records where their
+The following contributions were made in review of the -01 and the -02. Naming a contributor records where their
 contribution landed; it does not imply that they endorse this document.
 
 Wes Jackson: the binding of the chain to an accountable Principal in "sub",
