@@ -297,8 +297,7 @@ new token with its own payload. The invariance check in step 3 of {{verify}} is
 what closes that gap, and it is a comparison of two strings, not new
 machinery.
 
-This revision defines no transition mode for chains shaped by the previous
-revision. A chain whose tokens carry no "client_id" or no "cnf", or whose
+This revision defines no transition mode for chains shaped by the -01. A chain whose tokens carry no "client_id" or no "cnf", or whose
 "aud" is null, is malformed under this revision. A verifier that also accepts
 such chains under the -01's rules does so outside this document
 and reports which revision's rules it applied.
@@ -1077,9 +1076,9 @@ claim layout.
 
 - {{table-conclusions}} gains a row: whether the Principal still holds the
   authority granted at DT_0 at the instant checked is established neither by
-  the chain nor by the request. A paragraph after the table says what a
-  Verifier has to establish elsewhere and where a server in the call path can
-  learn it.
+  the chain nor by the request. A paragraph after the table says that step 8 does not establish it, what a
+  deployment that needs it does, and where a server in the call path can learn
+  it.
 - {{detail-types}} records, for a later revision that admits several detail
   types, the rule that a child adding a type its parent did not carry is
   treated as widening unless that type's definition states otherwise. Under
