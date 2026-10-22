@@ -1012,9 +1012,9 @@ and spending within disjoint allocations, which does not, the two deployment
 shapes and the three hazards of the allocation path ({{fanout}}), the
 compatibility point that led the scope grammar to keep structured literals as
 their own form, and the request to state the residual ambiguity of that
-grammar beside it ({{scopes}}); and, on the -02, that one "agent_delegation"
-detail is enough for the EMILIA CAID companion experiment, as a use-case answer
-on its -01-pinned packet ({{detail-types}}).
+grammar beside it ({{scopes}}); and that one "agent_delegation" detail is
+enough for the EMILIA CAID companion experiment, as a use-case answer on its
+-01-pinned packet ({{detail-types}}).
 
 Girish Konda: the sustained refresh rate implied by the recommended lifetimes
 and the sizing it requires of the authorization server, and the requirement
