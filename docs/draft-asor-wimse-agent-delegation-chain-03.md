@@ -661,8 +661,9 @@ is the offline carrier of what a chain can prove, and what it cannot prove is
 checked by machinery outside it. A deployment that must know standing checks
 it at root issuance, where {{root-issuance}} places the policy decision, and,
 where the gap after minting is unacceptable, again at exercise by an online
-server in the call path. {{revocation}} names an online Delegation Server for
-synchronous revocation; what such a server checks is left to the deployment.
+server in the call path. {{revocation}} describes an online Delegation Server
+that evaluates delegation-tree state for synchronous revocation; what else such
+a server checks is left to the deployment.
 
 The "subset" row holds for the constraint types the Verifier implements. A
 constraint type it does not implement fails closed under the rule in
@@ -733,20 +734,22 @@ every delegation chain design, not of this one, and the author's view is that
 it belongs to the working group rather than to this document. It is recorded
 here as open and is not solved here.
 
-The gaps above do not behave alike. The binding gap is how the key is bound to
-the party it is trusted as, and under which algorithm, at the moment of use.
-The recording gap is whether a later reader can reconstruct what the chain
-rested on; the paragraph above does not name it. The binding gap is a property
-of offline verification, as the revocation window of {{latency}} is: a verifier
-working from a configured root key cannot inspect the binding at the moment of
-use, and a verifier that is online then can. The limit is stated here, as
-{{latency}} states that window, and a deployment that cannot bear it uses the
-online half that {{revocation}} names for synchronous revocation; what that
-half inspects is left to the deployment. The recording gap is not relieved by
-being online: a verifier that inspects the binding and writes nothing down
-leaves a later reader no better off. No trust-anchor topology is mandated here;
-mandating one would close the binding gap by forcing a deployment model on
-every deployment, which is worse than stating the limit.
+The binding gap and the recording gap do not behave alike. The binding gap is
+that a verifier working from a configured root key cannot inspect, at the
+moment of use, how that key is bound to the party it is trusted as or under
+which algorithm. The recording gap, not listed above, is that a later reader
+cannot reconstruct what the chain rested on. The binding gap is a property of
+offline verification, as the revocation window of {{latency}} is: a verifier
+that is online at the moment of use may be able to inspect the binding. This
+document states the limit, as {{latency}} states that window. A deployment that
+cannot bear it can use the online half that {{revocation}} names for
+synchronous revocation; {{revocation}} describes that half as evaluating
+delegation-tree state, and what it inspects beyond that is left to the
+deployment. The recording gap is not relieved by being online: a verifier that
+writes nothing down leaves a later reader no better off. No trust-anchor
+topology is mandated here; mandating one would address the binding gap only by
+forcing a deployment model on every deployment, which is worse than stating the
+limit.
 
 # Holder Binding {#binding}
 
@@ -1050,13 +1053,13 @@ re-issuance in the refresh rate ({{latency}}).
 Kieran Sweeney: the proposal to admit scope strings issued by OAuth providers,
 which became the opaque scope form, and the vectors that exercise it
 ({{scopes}}, {{vectors}}); the rule for a child that adds a detail type its
-parent did not carry, recorded in {{detail-types}} for a later revision; and
-the observation that a server holding the Principal's deposited grant learns
-at use time whether it still stands ({{without-request}}); the shape of
-the second paragraph of {{provenance}} and of the standing paragraph in
-{{without-request}}, a limit of offline verification stated with deployments
-that cannot bear it pointed at the online half, proposed on the list on
-23 October 2026.
+parent did not carry, recorded in {{detail-types}} for a later revision; the
+observation that a server holding the Principal's deposited grant learns at
+use time whether it still stands ({{without-request}}); and, proposed on the
+list on 23 October 2026, the statement of a limit of offline verification with
+deployments that cannot bear it pointed at the online half and the warning
+against mandating an anchor topology ({{provenance}}), and the naming of where
+standing is established ({{without-request}}).
 
 Cliff Singletary: the row of {{table-conclusions}} stating that neither the
 chain nor the request establishes that the Principal still holds the
