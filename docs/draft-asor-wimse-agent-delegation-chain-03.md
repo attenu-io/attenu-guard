@@ -655,7 +655,14 @@ chain. A server in the call path that holds the Principal's grant itself, for
 example a credential the Principal deposited with it, learns at use time
 whether the grant still stands, because its upstream call fails once the
 grant is withdrawn. That covers a withdrawn grant, not a role lost inside the
-Principal's own organization.
+Principal's own organization. This is the division of labor {{revocation}} and
+{{fanout}} already state for revocation and for aggregate budgets: the chain
+is the offline carrier of what a chain can prove, and what it cannot prove is
+checked by machinery outside it. A deployment that must know standing checks
+it at root issuance, where {{root-issuance}} places the policy decision, and,
+where the gap after minting is unacceptable, again at exercise by an online
+server in the call path. {{revocation}} names an online Delegation Server for
+synchronous revocation; what such a server checks is left to the deployment.
 
 The "subset" row holds for the constraint types the Verifier implements. A
 constraint type it does not implement fails closed under the rule in
@@ -725,6 +732,21 @@ on a root key whose provenance the verifier cannot check. That is a property of
 every delegation chain design, not of this one, and the author's view is that
 it belongs to the working group rather than to this document. It is recorded
 here as open and is not solved here.
+
+The gaps above do not behave alike. The binding gap is how the key is bound to
+the party it is trusted as, and under which algorithm, at the moment of use.
+The recording gap is whether a later reader can reconstruct what the chain
+rested on; the paragraph above does not name it. The binding gap is a property
+of offline verification, as the revocation window of {{latency}} is: a verifier
+working from a configured root key cannot inspect the binding at the moment of
+use, and a verifier that is online then can. The limit is stated here, as
+{{latency}} states that window, and a deployment that cannot bear it uses the
+online half that {{revocation}} names for synchronous revocation; what that
+half inspects is left to the deployment. The recording gap is not relieved by
+being online: a verifier that inspects the binding and writes nothing down
+leaves a later reader no better off. No trust-anchor topology is mandated here;
+mandating one would close the binding gap by forcing a deployment model on
+every deployment, which is worse than stating the limit.
 
 # Holder Binding {#binding}
 
@@ -1030,7 +1052,11 @@ which became the opaque scope form, and the vectors that exercise it
 ({{scopes}}, {{vectors}}); the rule for a child that adds a detail type its
 parent did not carry, recorded in {{detail-types}} for a later revision; and
 the observation that a server holding the Principal's deposited grant learns
-at use time whether it still stands ({{without-request}}).
+at use time whether it still stands ({{without-request}}); the shape of
+the second paragraph of {{provenance}} and of the standing paragraph in
+{{without-request}}, a limit of offline verification stated with deployments
+that cannot bear it pointed at the online half, proposed on the list on
+23 October 2026.
 
 Cliff Singletary: the row of {{table-conclusions}} stating that neither the
 chain nor the request establishes that the Principal still holds the
@@ -1038,8 +1064,10 @@ authority granted at DT_0 at the instant checked ({{without-request}}).
 
 Venkata Karunakar Uppalapati: the rule that a verifier rejects a chain carrying
 an algorithm outside its local policy even where the signature verifies, now
-step 1 of {{verify}} and the agility text in {{security}}, and the
-trust-anchor provenance gap recorded in {{provenance}}.
+step 1 of {{verify}} and the agility text in {{security}}, the
+trust-anchor provenance gap recorded in {{provenance}}, and the distinction
+there between the binding gap, which online verification relieves, and the
+recording gap, which it does not.
 
 # Reference Implementation and Test Vectors {#vectors}
 
@@ -1080,7 +1108,11 @@ claim layout.
   authority granted at DT_0 at the instant checked is established neither by
   the chain nor by the request. A paragraph after the table says that step 8 does not establish it, what a
   deployment that needs it does, and where a server in the call path can learn
-  it.
+  it. It also states the division of labor between the chain and the online
+  half, and where standing is checked.
+- {{provenance}} gains a paragraph stating that the binding gap is a property
+  of offline verification, that the recording gap is not relieved by online
+  verification, and that no trust-anchor topology is mandated.
 - {{detail-types}} records, for a later revision that admits several detail
   types, the rule that a child adding a type its parent did not carry is
   treated as widening unless that type's definition states otherwise. Under
