@@ -51,6 +51,7 @@ informative:
   I-D.hamr-oauth-agent-delegation:
   I-D.mcguinness-oauth-actor-profile:
   I-D.mw-oauth-actor-chain:
+  I-D.gilda-audit-agent-audit-record:
   Macaroons:
     title: "Macaroons: Cookies with Contextual Caveats for Decentralized Authorization in the Cloud"
     date: 2014
@@ -746,8 +747,12 @@ cannot bear it can use the online half that {{revocation}} names for
 synchronous revocation; {{revocation}} describes that half as evaluating
 delegation-tree state, and what it inspects beyond that is left to the
 deployment. The recording gap is not relieved by being online: a verifier that
-writes nothing down leaves a later reader no better off. No trust-anchor
-topology is mandated here; mandating one would address the binding gap only by
+writes nothing down leaves a later reader no better off. A record of what the
+verifier held belongs beside the retained record, not in the chain. Section 4.7
+of {{I-D.gilda-audit-agent-audit-record}} defines a retention entry kept beside
+a record. The entry's validationData carries what a verifier needs to validate
+the record's envelope signature and its anchors offline. This document defines
+no record. No trust-anchor topology is mandated here; mandating one would address the binding gap only by
 forcing a deployment model on every deployment, which is worse than stating the
 limit.
 
@@ -1065,6 +1070,10 @@ Cliff Singletary: the row of {{table-conclusions}} stating that neither the
 chain nor the request establishes that the Principal still holds the
 authority granted at DT_0 at the instant checked ({{without-request}}).
 
+Sankalp Gilda: the correction, on the list on 24 October 2026, that the audit
+record draft continues as {{I-D.gilda-audit-agent-audit-record}}, which
+{{provenance}} now cites at its Section 4.7.
+
 Venkata Karunakar Uppalapati: the rule that a verifier rejects a chain carrying
 an algorithm outside its local policy even where the signature verifies, now
 step 1 of {{verify}} and the agility text in {{security}}, the
@@ -1115,7 +1124,9 @@ claim layout.
   half, and where standing is checked.
 - {{provenance}} gains a paragraph stating that the binding gap is a property
   of offline verification, that the recording gap is not relieved by online
-  verification, and that no trust-anchor topology is mandated.
+  verification, and that no trust-anchor topology is mandated. It cites
+  Section 4.7 of {{I-D.gilda-audit-agent-audit-record}} for the retention
+  entry kept beside a record.
 - {{detail-types}} records, for a later revision that admits several detail
   types, the rule that a child adding a type its parent did not carry is
   treated as widening unless that type's definition states otherwise. Under
