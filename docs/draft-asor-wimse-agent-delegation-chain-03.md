@@ -953,13 +953,20 @@ records which agent acted under it.
 
 # IANA Considerations {#iana}
 
-This document requests registration, in the JSON Web Token Claims registry, of:
-"del_depth", "del_max_depth", and "par_hash" (with the semantics in
-{{token-format}}). The claims "sub", "client_id", "aud", and "cnf" are already
+This document does not request registration of "del_depth", "del_max_depth",
+or "par_hash". {{I-D.niyikiza-oauth-attenuating-agent-tokens}} requests
+registration of the same three names in the JSON Web Token Claims registry,
+and each name should have a single entry. That document defines "del_depth"
+and "par_hash" as {{token-format}} does. It defines "del_max_depth"
+differently: there the claim is required in every token and a leaf's
+"del_depth" may equal the root's "del_max_depth", while step 3 of {{verify}}
+here requires the leaf's "del_depth" to be less than DT_0.del_max_depth.
+Consequently, the same depth values can pass the depth checks in that
+document and fail step 3 of {{verify}} here. The claims "sub", "client_id", "aud", and "cnf" are already
 registered and are used with their registered meanings as profiled in
 {{token-format}}.
 
-It requests a new "Agent Delegation Constraint Types" registry with the
+This document requests a new "Agent Delegation Constraint Types" registry with the
 following initial entries, each recorded with its measurement scope:
 "max" (per action), "max_lifetime" (per token lifetime), "max_subtree" (per
 subtree), "min" (per action), "one_of" (per action), "not_one_of" (per action),
@@ -1100,6 +1107,11 @@ there between the binding gap, which an online verifier with an
 authenticated source of binding evidence may relieve, and the recording gap,
 which being online does not.
 
+Niki Aimable Niyikiza: the comparison of the -01 vectors with those of
+{{I-D.niyikiza-oauth-attenuating-agent-tokens}}, which found the difference
+in "del_max_depth", and the proposal that the three shared claim names have
+one registration ({{iana}}).
+
 # Reference Implementation and Test Vectors {#vectors}
 
 A permissively licensed reference implementation (the "attenu-guard" library)
@@ -1148,6 +1160,10 @@ label; they remain covered by the unchanged -01 set.
   online verification, and that no trust-anchor topology is mandated. It cites
   Section 4.7 of {{I-D.gilda-audit-agent-audit-record}} for the retention
   entry kept beside a record, and says what that entry does not cover.
+- {{iana}} no longer requests registration of "del_depth", "del_max_depth",
+  and "par_hash"; {{I-D.niyikiza-oauth-attenuating-agent-tokens}} requests
+  the same names, and the section states where the two definitions of
+  "del_max_depth" differ.
 - Step 5 of {{verify}} requires now < exp, as the JWT "exp" claim
   {{RFC7519}} does; the -02 text allowed now = exp.
 - {{binding}} no longer offers mTLS-bound tokens as an alternative to DPoP;
