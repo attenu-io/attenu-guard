@@ -170,6 +170,33 @@ Verification Algorithm from the draft's "Offline Verification Algorithm"
 section against the decoded tokens and `now`, and confirm your verifier's
 outcome matches `expect`/`expect_reject_reason`.
 
+### Comparison with AAT -02
+
+Niki Aimable Niyikiza, the author of draft-niyikiza-oauth-attenuating-agent-tokens (AAT),
+compared the twenty files above with the AAT -02 vector suite on 2026-10-27, and agreed to its
+listing here. It is a property comparison, not a run of a verifier: the files are HS256-signed
+`at+jwt` tokens, so an AAT verifier stops every one at the header check. He matched each file to
+the AAT -02 vector that tests the same property. The J numbers are AAT vector ids, listed in
+`ietf/vectors/aat-jws-vectors.md` in `tenuo-ai/tenuo`.
+
+- **Same verdict (10):** `valid_chain` (J.3), `reject_bad_signature` (J.14, J.4.b),
+  `reject_duplicate_member` (J.23.4), `reject_exceeded_ceiling` (J.15.5),
+  `reject_nonmonotonic_exp` (J.13), `reject_spliced_parent` (J.12), `reject_widened_scope`
+  (J.11.b), `reject_wildcard_widening` (J.11.d), `valid_jcs_big_integer` (J.8.8),
+  `valid_jcs_exponent_form` (J.8.12).
+- **Different rule (2):** `reject_depth_exceeded` passes in AAT, where `del_max_depth` is carried
+  in every token and is an inclusive bound; here step 3 requires the leaf's `del_depth` to be less
+  than the root's `del_max_depth`. `reject_unsafe_integer`, because AAT admits an integer above
+  2^53 if it survives the JCS round trip (J.8.8).
+- **Not covered by an AAT -02 vector (4):** `reject_non_finite`, `valid_jcs_integral_float`,
+  `valid_jcs_non_ascii`, `valid_jcs_utf16_key_order`. He has offered to add vectors for them.
+- **Not applicable (4):** `reject_bare_wildcard`, `reject_nonterminal_wildcard` and
+  `reject_wildcard_boundary`, since AAT names tools exactly; `valid_jcs_unmarked_header`, since AAT
+  does not require canonical token bytes.
+
+The `del_max_depth` difference is also stated in the IANA Considerations of
+`docs/draft-asor-wimse-agent-delegation-chain-03.md`.
+
 ## Evidence bundle vectors
 
 `bundles/bundle_vectors_v1.json` is the bundle-level suite: whole evidence

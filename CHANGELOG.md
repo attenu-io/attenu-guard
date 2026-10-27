@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-27
+
 ### Added
 - **Vector `reject_child_adds_detail_type`** in the -02 set (`tests/vectors-02/`, shipped as `attenu_guard.vectors.draft02`; the set now has thirty-six files). DT_0 and DT_1 carry one `agent_delegation` detail each; the leaf adds a second detail of a type its parent did not carry (`acme_site_policy`). Rejected at parse as `malformed` under the one-detail rule. Added for draft -03, whose Section 4.4 records Kieran Sweeney's rule for a later multi-type revision (a child that adds a type its parent did not carry is treated as widening unless that type's definition states otherwise; WIMSE list, 2026-10-20). `VECTOR_NAMES_02` lists it; the thirty-five earlier files are byte-identical. attenu-guard-ts vendors the file and scores it to the same outcome
 - **`docs/draft-asor-wimse-agent-delegation-chain-03.md`**: the -03 source (Table 1 row on the Principal's standing, credited to Cliff Singletary; the two-type rule and the use-time sentence, credited to Kieran Sweeney; a new Section 1.2 on the relationship to draft-mcguinness-oauth-actor-profile and draft-mw-oauth-actor-chain; Changes Since -02)
@@ -13,6 +15,8 @@ Versions follow semantic versioning.
 ### Changed
 - **Profile "02": a token is expired at `now == exp`** (`wire.load(..., draft="02")`). Draft -03 step 5 reads `now < exp`, as RFC 7519 Section 4.1.4 does; the -02 text and this profile accepted `now == exp`. The default -01 profile is unchanged (`now <= exp`, as the -01 text reads). Test: `tests/test_wire_02.py` `ExpiryBoundary`. No vector changes
 - **`docs/draft-asor-wimse-agent-delegation-chain-03.md`**, pre-submission review (2026-10-26): Section 11 records the Cred harness run of 2026-10-20 against the -02 vectors (20 pass, 5 fail, 10 gaps, as its author reports it) and that the built-in Ed25519 signer and verifier use the JOSE identifier `EdDSA`, not the fully-specified `Ed25519` the draft requires; Section 7 leaves an mTLS profile to a later revision; Appendix B no longer says every -01 case is re-minted in the new set; Sections 1.2, 6.1 and 6.4 and the acknowledgments narrowed
+- **`docs/draft-asor-wimse-agent-delegation-chain-03.md`**, IANA Considerations: the -03 no longer requests registration of `del_depth`, `del_max_depth` and `par_hash`; draft-niyikiza-oauth-attenuating-agent-tokens-02 requests the same three names, and the section states where the two definitions of `del_max_depth` differ (there it is carried in every token and the leaf may reach it; here step 3 requires the leaf's `del_depth` to be less than the root's). No code or vector changes
+- `tests/vectors/README.md`: "Comparison with AAT -02", Niki Aimable Niyikiza's mapping of the twenty -01 token files to the AAT -02 vectors (10 same verdict, 2 different rule, 4 not covered there, 4 not applicable), listed as a property comparison, not a verifier run
 
 ## [0.21.0] - 2026-10-18
 
