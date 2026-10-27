@@ -15,7 +15,8 @@ jobs:
   stdlib-suite:
     # Everything that must pass with ZERO third-party deps (the safety core).
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    # ubuntu-latest is 26.04, which has no Python 3.9; requires-python is >=3.9.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python: ["3.9", "3.11", "3.13"]
