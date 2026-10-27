@@ -235,6 +235,7 @@ VECTOR_NAMES_02 = (
     "reject_detail_extra_member.json",
     "reject_second_detail.json",
     "reject_unknown_detail_type.json",
+    "reject_child_adds_detail_type.json",
     "reject_altered_sub_and_par_hash.json",
     "reject_reissued_parent.json",
 )

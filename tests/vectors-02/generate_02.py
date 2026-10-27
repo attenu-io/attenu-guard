@@ -540,6 +540,21 @@ def gen_reject_unknown_detail_type() -> dict:
         tokens, expect_reject_reason=R.MALFORMED)
 
 
+def gen_reject_child_adds_detail_type() -> dict:
+    _r, _c, leaf = _base_chain()
+    tokens = _tamper(_mint(leaf), 2, lambda p: p["authorization_details"].append(
+        {"type": "acme_site_policy", "policy": "site-default"}))
+    return _vector(
+        "DT_0 and DT_1 each carry one detail of type agent_delegation; the leaf adds a second "
+        "detail of a type its parent did not carry ('acme_site_policy'). Under this revision a "
+        "token carries exactly one detail, of type agent_delegation, so the leaf is malformed on "
+        "two counts and is rejected at parse. The case is recorded for a later revision that "
+        "admits several types: a child that adds a type its parent did not carry is treated as "
+        "widening unless that type's definition states otherwise (Kieran Sweeney, WIMSE list, "
+        "2026-10-20). MUST be rejected: malformed.",
+        tokens, expect_reject_reason=R.MALFORMED)
+
+
 # =========================================================================
 # Section 5: the commitment is to a parent instance
 # =========================================================================
@@ -612,6 +627,7 @@ GENERATORS = {
     "reject_detail_extra_member.json": gen_reject_detail_extra_member,
     "reject_second_detail.json": gen_reject_second_detail,
     "reject_unknown_detail_type.json": gen_reject_unknown_detail_type,
+    "reject_child_adds_detail_type.json": gen_reject_child_adds_detail_type,
     "reject_altered_sub_and_par_hash.json": gen_reject_altered_sub_and_par_hash,
     "reject_reissued_parent.json": gen_reject_reissued_parent,
 }

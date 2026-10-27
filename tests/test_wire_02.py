@@ -370,5 +370,15 @@ def _repair(tokens):
     return tokens
 
 
+
+class ExpiryBoundary(unittest.TestCase):
+    """-03 step 5: now < exp, as RFC 7519 4.1.4; the -01 profile keeps now <= exp."""
+
+    def test_now_at_leaf_exp_is_expired_under_02(self):
+        tokens = _mint()
+        exp = _payload(tokens[-1])["exp"]
+        self.assertIsNotNone(wire.load(tokens, _signer(), draft="02", now=exp - 1))
+        _reject(self, tokens, WireReasonCode.EXPIRED, now=exp)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
