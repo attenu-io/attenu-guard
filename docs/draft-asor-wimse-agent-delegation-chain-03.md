@@ -757,10 +757,15 @@ writes nothing down leaves a later reader no better off. A record of what the
 verifier held belongs beside the retained record, not in the chain. Section 4.7
 of {{I-D.gilda-audit-agent-audit-record}} defines a retention entry kept beside
 a record. The entry's validationData carries what a verifier needs to validate
-the record's envelope signature and its anchors offline. That entry, in the
--00 of that draft, covers the key that signed the record and the anchors, not
-the root key a Delegation Chain verifier trusts, so the recording gap for that
-root key stays open here. This document defines
+the record's envelope signature and its anchors offline. For a record that
+carries the optional delegation.rootDigest (Section 5.2 of that document), it
+also carries the certification path or key set of the chain's root key as the
+chain verifier held it at decision time. Retaining that material and verifying
+its digest against delegation.rootDigest addresses the recording gap for the
+root key; Section 4.6 of that document requires a verifier without the digest
+or the retained material to report the root as not established. Recording that
+material does not by itself establish the root key's binding to the party it
+is trusted as, or show how the verifier came to hold it. This document defines
 no record. No trust-anchor topology is mandated here; mandating one would address the binding gap only by
 forcing a deployment model on every deployment, which is worse than stating the
 limit.
@@ -1158,8 +1163,11 @@ label; they remain covered by the unchanged -01 set.
 - {{provenance}} gains a paragraph stating that the binding gap is a limit of
   verifying from configured state, that the recording gap is not relieved by
   online verification, and that no trust-anchor topology is mandated. It cites
-  Section 4.7 of {{I-D.gilda-audit-agent-audit-record}} for the retention
-  entry kept beside a record, and says what that entry does not cover.
+  Sections 4.6, 4.7 and 5.2 of {{I-D.gilda-audit-agent-audit-record}} for the
+  optional delegation.rootDigest and the root material kept beside a record.
+  Retaining that material and verifying its digest addresses the recording gap
+  for the root key; recording it does not by itself establish the key's
+  binding to the party it is trusted as.
 - {{iana}} no longer requests registration of "del_depth", "del_max_depth",
   and "par_hash"; {{I-D.niyikiza-oauth-attenuating-agent-tokens}} requests
   the same names, and the section states where the two definitions of
