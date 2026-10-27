@@ -152,12 +152,14 @@ the root to the current actor; its path validation applies the scope
 comparison to the final step and does not compare different hops' resource
 identifiers as if they had subset semantics.
 
-In both, the party that bounds what a hop may do is the authorization server
-at the time of each exchange. A recipient can check which actors took part, as
-the issuer asserts them in "act" or, in the verified profiles of
-{{I-D.mw-oauth-actor-chain}}, through actor proofs and acceptances, and, as
-that draft's Section 8 states, path evidence does not reconstruct the
-effective authority of a historical token. This document bounds what each hop
+In both, the authorization server bounds the authority of the token it
+issues at each exchange, and the resource server applies its own
+authorization policy when the token is used. A recipient can check which
+actors took part, as the issuer asserts them in "act" or, in the verified
+profiles of {{I-D.mw-oauth-actor-chain}}, through actor proofs and
+acceptances, and, as that draft's Section 8 states, without a retained
+historical token path evidence does not reconstruct that token's effective
+authority. This document bounds what each hop
 may do in the chain itself: every token carries its Authority, each child
 commits to its parent, and any holder of the chain can check at step 4 of
 {{verify}} that each hop's Authority is a subset of its parent's, with no
@@ -582,7 +584,7 @@ following, denying on the first failure:
    2, 3, and 5 of {{subsumption}}. A token carrying a second detail, or a
    detail of a type other than "agent_delegation", was rejected as malformed
    when it was parsed ({{detail-types}}). Any violation: deny.
-5. Check time: for every i, nbf (if present) <= now <= exp, and exp is monotonic
+5. Check time: for every i, nbf (if present) <= now < exp, and exp is monotonic
    non-increasing along the chain (rule 4 of {{subsumption}}). Otherwise deny.
 6. Verify holder binding: the presenter proves possession of the key in DT_n.cnf
    via a valid DPoP proof {{RFC9449}} bound to this request. Otherwise deny.
@@ -653,10 +655,12 @@ nothing in the chain revokes the Principal. Step 8 permits an action within
 DT_n's Authority without establishing that standing; a deployment that must
 know it before honoring an action under that grant establishes it outside the
 chain. A server in the call path that holds the Principal's grant itself, for
-example a credential the Principal deposited with it, learns at use time
-whether the grant still stands, because its upstream call fails once the
-grant is withdrawn. That covers a withdrawn grant, not a role lost inside the
-Principal's own organization. This is the division of labor {{revocation}} and
+example a credential the Principal deposited with it, can learn at use time
+that the grant was withdrawn, when the upstream service refuses the
+credential; how soon that happens depends on the upstream service's
+revocation and caching, and a successful call does not establish the
+Principal's standing beyond that grant. That covers a withdrawn grant, not a
+role lost inside the Principal's own organization. This is the division of labor {{revocation}} and
 {{fanout}} already state for revocation and for aggregate budgets: the chain
 is the offline carrier of what a chain can prove, and what it cannot prove is
 checked by machinery outside it. A deployment that must know standing checks
@@ -735,13 +739,15 @@ every delegation chain design, not of this one, and the author's view is that
 it belongs to the working group rather than to this document. It is recorded
 here as open and is not solved here.
 
-The binding gap and the recording gap do not behave alike. The binding gap is
-that a verifier working from a configured root key cannot inspect, at the
-moment of use, how that key is bound to the party it is trusted as or under
-which algorithm. The recording gap, not listed above, is that a later reader
-cannot reconstruct what the chain rested on. The binding gap is a property of
-offline verification, as the revocation window of {{latency}} is: a verifier
-that is online at the moment of use may be able to inspect the binding. This
+Two gaps follow from this, and they do not behave alike. The binding gap is
+that a verifier provisioned only with a root key has nothing in the chain that
+shows how that key is bound to the party it is trusted as or under which
+algorithm. The recording gap is that a later reader cannot reconstruct what
+the chain rested on. The binding gap is a limit of verifying from configured
+state, as the revocation window of {{latency}} is: binding evidence the
+verifier already holds can be inspected offline, and a verifier that is
+online at the moment of use may be able to obtain current evidence from an
+authenticated source. Network access alone establishes nothing. This
 document states the limit, as {{latency}} states that window. A deployment that
 cannot bear it can use the online half that {{revocation}} names for
 synchronous revocation; {{revocation}} describes that half as evaluating
@@ -751,7 +757,10 @@ writes nothing down leaves a later reader no better off. A record of what the
 verifier held belongs beside the retained record, not in the chain. Section 4.7
 of {{I-D.gilda-audit-agent-audit-record}} defines a retention entry kept beside
 a record. The entry's validationData carries what a verifier needs to validate
-the record's envelope signature and its anchors offline. This document defines
+the record's envelope signature and its anchors offline. That entry, in the
+-00 of that draft, covers the key that signed the record and the anchors, not
+the root key a Delegation Chain verifier trusts, so the recording gap for that
+root key stays open here. This document defines
 no record. No trust-anchor topology is mandated here; mandating one would address the binding gap only by
 forcing a deployment model on every deployment, which is worse than stating the
 limit.
@@ -760,8 +769,8 @@ limit.
 
 Every Delegation Token is sender-constrained by a "cnf" claim {{RFC7800}}
 carrying the JWK thumbprint of the holder's key, proven per request with DPoP
-{{RFC9449}}. mTLS-bound tokens {{RFC8705}} MAY be used where the transport is
-controlled end-to-end. A captured token is therefore unusable without its bound
+{{RFC9449}}. This revision specifies DPoP holder binding only; a profile for
+mTLS-bound tokens {{RFC8705}} is left to a later revision. A captured token is therefore unusable without its bound
 private key, which mitigates replay of intermediate tokens. The "cnf" claim is
 present in every token of a chain, and a Verifier that sees no request
 ({{without-request}}) checks its presence and shape but cannot perform step 6.
@@ -979,19 +988,24 @@ License 2.0: "attenu-guard", in Python, which mints Delegation Tokens and runs
 the verification algorithm of {{verify}}, and "attenu-guard-ts", in TypeScript,
 which runs the verification algorithm and mints nothing. At the time of
 posting, both released libraries (attenu-guard 0.22.0 and attenu-guard-ts
-0.16.0) implement this revision as an opt-in profile beside the previous one,
-which remains their default: the claim rules of {{token-format}} at parse, the
+0.16.0) implement this revision as an opt-in profile, the one they introduced
+for the -02, beside the -01 profile, which remains their default: the claim rules of {{token-format}} at parse, the
 accepted-algorithm list of step 1, principal invariance, the three-form scope
 grammar, the two cumulative constraint types with their totals supplied through
 a channel separate from the request, the "order" member of "rank", one
 constraint per (key, type), the closed detail and constraint objects, and the
 audience check of step 8, under a single-signer trust model. Both check the
 presence and shape of "cnf" and perform neither step 6 (holder binding) nor
-step 7 (status list), which both document as not performed. The vector set of
+step 7 (status list), which both document as not performed. Their built-in
+Ed25519 signer and verifier still use the polymorphic JOSE identifier "EdDSA"
+rather than the fully-specified "Ed25519" of {{RFC9864}} that {{token-format}}
+requires; the vectors use a test-only HS256 signer and do not exercise it. The
+vector set of
 {{vectors}} for this revision has thirty-six files; the Python library
 generates and scores it on every test run, and the TypeScript library vendors
-it byte for byte and scores it in its test suite. The -01 set's
-twenty files ship in both libraries unchanged.
+it byte for byte as test fixtures and scores it in its test suite. The -01
+set's twenty files are unchanged in the Python package and in both source
+repositories.
 
 Two implementations independent of the author's code have run the twenty test
 vectors of the -01 and published their results, as reported by
@@ -1001,8 +1015,12 @@ declared gaps, at a pinned commit of the Cred SDK; and a standalone Node.js
 verifier that imports no code from either reference implementation, which
 reported 20 of 20 with verdicts and declared reasons both matching, under the
 boundary its author states: the vectors' HS256 single-signer, public-test-key
-profile, and steps 1 to 5 only. Neither result is reproduced here, and neither
-author has reported a run against the vectors of this revision.
+profile, and steps 1 to 5 only. Neither result is reproduced here. The Cred
+harness has also published a run of 2026-10-20 against the thirty-five
+vectors of the -02, all of which this revision's set retains unchanged; as
+its author reports it, at a pinned commit of the Cred SDK, it records 20
+passes, 5 failures, and 10 declared gaps. No run against all thirty-six
+vectors has been reported.
 
 --- back
 
@@ -1026,7 +1044,7 @@ Wes Jackson: the binding of the chain to an accountable Principal in "sub",
 distinct from the holder key, and the naming of the Acting Agent at each hop
 in "client_id" ({{token-format}}, {{principal}}); the observation that
 quantity constraints compose across siblings while subsumption is checked per
-edge, that "max" is therefore per token, and that per-action, per-lifetime,
+edge, that a per-action "max" therefore imposes no aggregate budget, and that per-action, per-lifetime,
 and per-subtree limits are enforced by different machinery and belong in
 distinct registered types ({{constraints}}, {{fanout}}); the atomic
 check-and-debit requirement on shared accounting and the single-writer
@@ -1059,8 +1077,8 @@ Kieran Sweeney: the proposal to admit scope strings issued by OAuth providers,
 which became the opaque scope form, and the vectors that exercise it
 ({{scopes}}, {{vectors}}); the rule for a child that adds a detail type its
 parent did not carry, recorded in {{detail-types}} for a later revision; the
-observation that a server holding the Principal's deposited grant learns at
-use time whether it still stands ({{without-request}}); and, proposed on the
+observation that a server holding the Principal's deposited grant can learn
+at use time that it was withdrawn ({{without-request}}); and, proposed on the
 list on 23 October 2026, the statement of a limit of offline verification with
 deployments that cannot bear it pointed at the online half and the warning
 against mandating an anchor topology ({{provenance}}), and the naming of where
@@ -1078,8 +1096,9 @@ Venkata Karunakar Uppalapati: the rule that a verifier rejects a chain carrying
 an algorithm outside its local policy even where the signature verifies, now
 step 1 of {{verify}} and the agility text in {{security}}, the
 trust-anchor provenance gap recorded in {{provenance}}, and the distinction
-there between the binding gap, which online verification relieves, and the
-recording gap, which it does not.
+there between the binding gap, which an online verifier with an
+authenticated source of binding evidence may relieve, and the recording gap,
+which being online does not.
 
 # Reference Implementation and Test Vectors {#vectors}
 
@@ -1108,11 +1127,13 @@ a token whose "alg" is not on the verifier's list (signature_invalid); and a
 token carrying an authorization detail of a type the verifier does not
 implement (malformed); and, added in the -03, a child that adds a detail of a
 type its parent did not carry (malformed under this revision, see
-{{detail-types}}). The -01 set's coverage of scope and ceiling widening,
-parent splicing, depth and expiry violations, wildcard errors, RFC 8785 number
-and string forms, non-finite values, duplicate member names, and the
-informational "c14n" label is re-minted in the new set under this revision's
-claim layout.
+{{detail-types}}). The -01 set's ceiling widening, parent splicing, non-monotonic expiry,
+and wildcard widening are re-minted in the new set under this revision's
+claim layout. Its other cases are not all re-minted, among them a chain
+longer than its root's "del_max_depth" allows, the bare, non-final, and
+segment-boundary wildcard cases, RFC 8785 number and string forms,
+non-finite values, duplicate member names, and the informational "c14n"
+label; they remain covered by the unchanged -01 set.
 
 # Changes Since -02 {#changes-02}
 
@@ -1122,11 +1143,17 @@ claim layout.
   deployment that needs it does, and where a server in the call path can learn
   it. It also states the division of labor between the chain and the online
   half, and where standing is checked.
-- {{provenance}} gains a paragraph stating that the binding gap is a property
-  of offline verification, that the recording gap is not relieved by online
-  verification, and that no trust-anchor topology is mandated. It cites
+- {{provenance}} gains a paragraph stating that the binding gap is a limit of
+  verifying from configured state, that the recording gap is not relieved by
+  online verification, and that no trust-anchor topology is mandated. It cites
   Section 4.7 of {{I-D.gilda-audit-agent-audit-record}} for the retention
-  entry kept beside a record.
+  entry kept beside a record, and says what that entry does not cover.
+- Step 5 of {{verify}} requires now < exp, as the JWT "exp" claim
+  {{RFC7519}} does; the -02 text allowed now = exp.
+- {{binding}} no longer offers mTLS-bound tokens as an alternative to DPoP;
+  an mTLS profile is left to a later revision.
+- {{vectors}} no longer says that the -01 set's coverage is re-minted in the
+  new set; the cases that are not remain in the -01 set.
 - {{detail-types}} records, for a later revision that admits several detail
   types, the rule that a child adding a type its parent did not carry is
   treated as widening unless that type's definition states otherwise. Under
@@ -1186,7 +1213,7 @@ claim layout.
   holds the running total it is measured over.
 - An integer whose magnitude exceeds 2^53-1 is malformed.
 - The revision states that it defines no transition mode for chains shaped by
-  the previous revision.
+  the -01.
 - Step 7 states that a cached status answer is trusted for its time to live,
   that an unobtainable or unrefreshable status is unknown and denies, and that
   a token issued without a status reference is a choice made at issuance.

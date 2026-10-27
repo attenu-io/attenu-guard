@@ -885,7 +885,8 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
       4. Subsumption: `Authority.from_wire(DT_i) .is_narrower_than
          Authority.from_wire(DT_{i-1})` for every i > 0 — REUSES the core's
          own relation (authority.py); not reimplemented here.
-      5. Time: `now <= exp` (and `now >= nbf` if present) for every DT_i, and
+      5. Time: `now <= exp` (`now < exp` under profile "02") and `now >= nbf`
+         if present, for every DT_i, and
          `exp` non-increasing along the chain.
 
     OUT OF SCOPE for v0.2 (not silently skipped — documented here and in the
@@ -1038,9 +1039,12 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
         if nbf is not None and now < nbf:
             raise WireError(WireReasonCode.EXPIRED,
                             f"token[{i}] not yet valid: now={now} < nbf={nbf}")
-        if now > exp:
+        # The -01 text reads now <= exp; the -03 text, profile "02", now < exp
+        # as RFC 7519 4.1.4 does.
+        if now > exp or (draft == draft02.PROFILE_02 and now == exp):
             raise WireError(WireReasonCode.EXPIRED,
-                            f"token[{i}] expired: now={now} > exp={exp}")
+                            f"token[{i}] expired: now={now} >= exp={exp}" if now == exp
+                            else f"token[{i}] expired: now={now} > exp={exp}")
         if prev_exp is not None and exp > prev_exp:
             raise WireError(WireReasonCode.EXPIRED,
                             f"token[{i}] exp={exp} exceeds parent token[{i-1}] exp={prev_exp} "
