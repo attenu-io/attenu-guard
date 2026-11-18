@@ -445,7 +445,7 @@ def gen_reject_child_raises_del_max_depth() -> dict:
     _r, _c, leaf = _base_chain()
     tokens = _tamper(_mint(leaf), 2, lambda p: p.__setitem__("del_max_depth", 60))
     return _vector(
-        "The leaf carries del_max_depth 60 under a root bound of 6. Rule 5 of Section 4.3 "
+        "The leaf carries del_max_depth 60 under a root bound of 7. Rule 5 of Section 4.3 "
         "(C.del_max_depth <= P.del_max_depth) is checked per hop at step 4 where a child carries "
         "the claim. MUST be rejected: not_narrower.",
         tokens, expect_reject_reason=R.NOT_NARROWER)

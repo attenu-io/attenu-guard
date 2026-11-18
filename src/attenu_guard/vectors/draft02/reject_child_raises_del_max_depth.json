@@ -1,5 +1,5 @@
 {
-  "description": "The leaf carries del_max_depth 60 under a root bound of 6. Rule 5 of Section 4.3 (C.del_max_depth <= P.del_max_depth) is checked per hop at step 4 where a child carries the claim. MUST be rejected: not_narrower.",
+  "description": "The leaf carries del_max_depth 60 under a root bound of 7. Rule 5 of Section 4.3 (C.del_max_depth <= P.del_max_depth) is checked per hop at step 4 where a child carries the claim. MUST be rejected: not_narrower.",
   "draft": "02",
   "expect_reject_reason": "not_narrower",
   "now": 0,
