@@ -608,9 +608,11 @@ following, denying on the first failure:
    DT_n.Authority: its scope, every per-action constraint ("max", "min",
    "one_of", "not_one_of", "prefix", "rank"), and every cumulative constraint
    ("max_lifetime", "max_subtree"). A cumulative constraint is checked where
-   the running total it is measured over is held: by the Enforcement Point
-   itself, or by a component that holds that total and authorizes A on the
-   Enforcement Point's behalf ({{fanout}}). The total, or the balance of an
+   the running total it is measured over is held, by the Enforcement Point
+   itself or by a component that holds that total and authorizes A on the
+   Enforcement Point's behalf, or, for a "max_subtree" under coordinated
+   allocation, by the Enforcement Point against the allocation it holds for
+   DT_n ({{fanout}}). The total, or the balance of an
    allocation, reaches the check through a channel separate from the
    request's own parameters, never from the request: a cumulative constraint
    is evaluated against that total or balance only, and a per-action
@@ -624,11 +626,11 @@ following, denying on the first failure:
    enforced in one of the two shapes of {{fanout}}.
 
    Where accounting is shared, the component holding it MUST also check A
-   against every "max_subtree" constraint carried by each DT_i, i < n, using,
-   for each DT_i, i <= n, the total for the subtree of DT_i, identified by
-   DT_i's "jti", the
-   constraint's "key" and its type, so that it is distinct from any
-   "max_lifetime" total of DT_i for the same key. It MUST debit those totals
+   against every "max_subtree" constraint carried by each DT_i, i < n. For
+   each DT_i, i <= n, the total for a "max_subtree" is the total for the
+   subtree of DT_i, identified by DT_i's "jti", the constraint's "key" and its
+   type, so that it is distinct from any "max_lifetime" total of DT_i for the
+   same key. It MUST debit those totals
    and DT_n's own cumulative totals as the one operation {{fanout}} requires,
    and MUST deny if any total would exceed its bound.
 
@@ -1050,9 +1052,9 @@ step 7 (status list), which both document as not performed. Each evaluates
 the cumulative constraints of DT_n against totals the caller supplies and
 holds no accounting, so neither performs the check against earlier tokens'
 "max_subtree" or the debit of step 8. A total the caller supplies for a
-"max_subtree" is the running total step 8 requires only where it comes from
-shared accounting or is the balance of an allocation set by a single-writer
-allocator ({{fanout}}); a total kept for DT_n's "jti" alone is not, and the
+"max_subtree" is what step 8 requires only where it is the running total kept
+by shared accounting or the balance of an allocation set by a single-writer
+allocator ({{fanout}}); a total kept for DT_n's "jti" alone is neither, and the
 caller, not the library, is responsible for which one it supplies. Under that profile attenu-guard signs
 with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
 {{token-format}} requires, and both accept that name by default; the -01
@@ -1242,7 +1244,9 @@ label; they remain covered by the unchanged -01 set.
   fully-specified "Ed25519", which both reference libraries accept by
   default; and that both evaluate the cumulative constraints of DT_n against
   caller-supplied totals and perform neither the check against earlier
-  tokens' "max_subtree" nor the debit of step 8.
+  tokens' "max_subtree" nor the debit of step 8. It states which
+  caller-supplied total for "max_subtree" step 8 accepts, and that the
+  caller, not the library, chooses it.
 - Acknowledgments credit the review of the -03.
 
 # Changes Since -02 {#changes-02}
