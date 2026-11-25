@@ -433,9 +433,11 @@ nothing, since each action contributes one; a producer bounds a count with
 "max_lifetime" or "max_subtree". A verifier that holds only
 the chain checks that a child's per-lifetime and per-subtree bounds are no
 wider than its parent's ({{subsumption}}); whether the spend is under the
-bound is checked only where the running total is held, and an enforcement
-point that has no access to that total denies ({{verify}}, step 8). The
-running total is supplied by the component that holds it, through a channel
+bound is checked only where the running total is held or, for
+"max_subtree", where an allocation set by a single-writer allocator is held
+({{fanout}}), and an enforcement point that has access to neither denies
+({{verify}}, step 8). The running total or allocation balance is supplied by
+the component that holds it, through a channel
 separate from the request's own parameters; a value the request asserts
 about its own total is not a total.
 
@@ -608,20 +610,23 @@ following, denying on the first failure:
    ("max_lifetime", "max_subtree"). A cumulative constraint is checked where
    the running total it is measured over is held: by the Enforcement Point
    itself, or by a component that holds that total and authorizes A on the
-   Enforcement Point's behalf ({{fanout}}). The total reaches the check
-   through a channel separate from the request's own parameters, never from
-   the request: a cumulative constraint is evaluated against that total only,
-   and a per-action constraint against the request only, so a name the two
-   share cannot let one stand in for the other. An Enforcement Point that
-   neither holds the running total for a cumulative constraint DT_n carries
-   nor has A authorized by a component that does MUST deny.
+   Enforcement Point's behalf ({{fanout}}). The total, or the balance of an
+   allocation, reaches the check through a channel separate from the
+   request's own parameters, never from the request: a cumulative constraint
+   is evaluated against that total or balance only, and a per-action
+   constraint against the request only, so a name the two share cannot let
+   one stand in for the other. An Enforcement Point MUST deny if, for a
+   cumulative constraint DT_n carries, it neither holds the running total,
+   nor has A authorized by a component that does, nor, for a "max_subtree",
+   holds an allocation for DT_n set by a single-writer allocator ({{fanout}}).
 
    A "max_subtree" carried by an earlier DT_i bounds A as well, and is
    enforced in one of the two shapes of {{fanout}}.
 
    Where accounting is shared, the component holding it MUST also check A
-   against every "max_subtree" constraint carried by each DT_i, i < n, using
-   the total for the subtree of DT_i, identified by DT_i's "jti", the
+   against every "max_subtree" constraint carried by each DT_i, i < n, using,
+   for each DT_i, i <= n, the total for the subtree of DT_i, identified by
+   DT_i's "jti", the
    constraint's "key" and its type, so that it is distinct from any
    "max_lifetime" total of DT_i for the same key. It MUST debit those totals
    and DT_n's own cumulative totals as the one operation {{fanout}} requires,
@@ -644,7 +649,7 @@ following, denying on the first failure:
    Permit only if A is within DT_n.Authority on every count and, where
    accounting is shared, within the "max_subtree" of every DT_i, or, under
    coordinated allocation, within the allocation held for DT_n. A total or an
-   allocation is debited only for an action that step 8 permits.
+   allocation is debited for every action that step 8 permits and for no other.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The one
@@ -675,7 +680,7 @@ Verifier may and may not conclude.
 | The presenter holds the key DT_n is bound to | no | yes |
 | A specific action is permitted | no | yes |
 | A per-lifetime total is within bound | no | only where the total is held; otherwise step 8 denies |
-| A per-subtree total is within bound | no | only where the total is held ({{fanout}}); otherwise step 8 denies |
+| A per-subtree total is within bound | no | only where the total, or an allocation from a single-writer allocator, is held ({{fanout}}); otherwise step 8 denies |
 | The Principal still holds the authority granted at DT_0, at the instant checked | no | no |
 {: #table-conclusions title="What a Verifier may conclude, by the steps it performed"}
 
@@ -1044,7 +1049,11 @@ presence and shape of "cnf" and perform neither step 6 (holder binding) nor
 step 7 (status list), which both document as not performed. Each evaluates
 the cumulative constraints of DT_n against totals the caller supplies and
 holds no accounting, so neither performs the check against earlier tokens'
-"max_subtree" or the debit of step 8. Under that profile attenu-guard signs
+"max_subtree" or the debit of step 8. A total the caller supplies for a
+"max_subtree" is the running total step 8 requires only where it comes from
+shared accounting or is the balance of an allocation set by a single-writer
+allocator ({{fanout}}); a total kept for DT_n's "jti" alone is not, and the
+caller, not the library, is responsible for which one it supplies. Under that profile attenu-guard signs
 with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
 {{token-format}} requires, and both accept that name by default; the -01
 profile keeps "EdDSA". The vectors use a test-only HS256 signer and exercise neither Ed25519
@@ -1223,7 +1232,9 @@ label; they remain covered by the unchanged -01 set.
   debits the allocation it holds; outside the two shapes no running total for
   "max_subtree" is held, so step 8 denies. The paragraph after the steps names
   that debit, and the component holding the allocation, as outside the
-  side-effect-free guarantee.
+  side-effect-free guarantee. Step 8, {{constraints}} and
+  {{table-conclusions}} admit an allocation set by a single-writer allocator
+  in place of a held running total for "max_subtree".
 - {{vectors}} adds three vectors at the upper bound of step 5 and a "steps"
   member in every file; the set has thirty-nine files.
 - Implementation Status records a third implementation, "visado", and that
