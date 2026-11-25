@@ -617,24 +617,34 @@ following, denying on the first failure:
    nor has A authorized by a component that does MUST deny.
 
    A "max_subtree" carried by an earlier DT_i bounds A as well, and is
-   enforced in one of the two shapes of {{fanout}}. Where accounting is
-   shared, the component holding it MUST also check A against every
-   "max_subtree" constraint carried by each DT_i, i < n, using the total for
-   the subtree of DT_i, identified by DT_i's "jti" and the constraint's
-   "key", and MUST debit those totals and DT_n's own cumulative totals as the
-   one operation {{fanout}} requires; if any total would exceed its bound, it
-   MUST deny. Under coordinated allocation, the single-writer allocator
-   bounds the ancestors' totals when it allocates, and the Enforcement Point
-   MUST check A against, and debit, the durable balance of the allocation it
-   holds for DT_n, denying if A would exceed it. A child's "max_subtree" is
-   an allocation only where that allocator set it; being no wider than the
-   parent's does not make it one. Outside the two shapes, a "max_subtree"
-   carried by an earlier DT_i is checked per edge (step 4) and is not
-   otherwise enforced.
+   enforced in one of the two shapes of {{fanout}}.
+
+   Where accounting is shared, the component holding it MUST also check A
+   against every "max_subtree" constraint carried by each DT_i, i < n, using
+   the total for the subtree of DT_i, identified by DT_i's "jti", the
+   constraint's "key" and its type, so that it is distinct from any
+   "max_lifetime" total of DT_i for the same key. It MUST debit those totals
+   and DT_n's own cumulative totals as the one operation {{fanout}} requires,
+   and MUST deny if any total would exceed its bound.
+
+   Under coordinated allocation, the single-writer allocator bounds the
+   ancestors' totals when it allocates, and the Enforcement Point MUST check
+   A against, and debit, the durable balance of the allocation it holds for
+   DT_n, denying if A would exceed it. A child's "max_subtree" is an
+   allocation only where that allocator set it; being no wider than the
+   parent's does not make it one.
+
+   Outside the two shapes, no component holds the running total for a
+   "max_subtree": a total kept for the actions authorized under DT_n's "jti"
+   alone omits those authorized under its descendants, and is not that total.
+   Since rule 3 of {{subsumption}} carries every earlier DT_i's "max_subtree"
+   into DT_n, an Enforcement Point that uses neither shape denies, under the
+   first paragraph of this step, any A whose chain carries "max_subtree".
 
    Permit only if A is within DT_n.Authority on every count and, where
    accounting is shared, within the "max_subtree" of every DT_i, or, under
-   coordinated allocation, within the allocation held for DT_n.
+   coordinated allocation, within the allocation held for DT_n. A total or an
+   allocation is debited only for an action that step 8 permits.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The one
@@ -1037,7 +1047,8 @@ holds no accounting, so neither performs the check against earlier tokens'
 "max_subtree" or the debit of step 8. Under that profile attenu-guard signs
 with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
 {{token-format}} requires, and both accept that name by default; the -01
-profile keeps "EdDSA". The vectors use a test-only HS256 signer and do not exercise it. The
+profile keeps "EdDSA". The vectors use a test-only HS256 signer and exercise neither Ed25519
+identifier. The
 vector set of
 {{vectors}} for this revision has thirty-nine files; the Python library
 generates and scores it on every test run, and the TypeScript library vendors
@@ -1207,10 +1218,12 @@ label; they remain covered by the unchanged -01 set.
 - Step 8 of {{verify}}: where accounting is shared, the component holding it
   MUST also check the action against the "max_subtree" of every token before
   DT_n and debit each of those totals in the same operation, denying if any
-  would be exceeded; under coordinated allocation, the allocator keeps the
-  ancestors' totals and the Enforcement Point checks and debits the
-  allocation it holds; outside the two shapes, an earlier token's
-  "max_subtree" is checked per edge only.
+  would be exceeded; under coordinated allocation, the allocator bounds the
+  ancestors' totals when it allocates and the Enforcement Point checks and
+  debits the allocation it holds; outside the two shapes no running total for
+  "max_subtree" is held, so step 8 denies. The paragraph after the steps names
+  that debit, and the component holding the allocation, as outside the
+  side-effect-free guarantee.
 - {{vectors}} adds three vectors at the upper bound of step 5 and a "steps"
   member in every file; the set has thirty-nine files.
 - Implementation Status records a third implementation, "visado", and that
