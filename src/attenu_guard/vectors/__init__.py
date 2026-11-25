@@ -238,6 +238,9 @@ VECTOR_NAMES_02 = (
     "reject_child_adds_detail_type.json",
     "reject_altered_sub_and_par_hash.json",
     "reject_reissued_parent.json",
+    "valid_now_before_exp.json",
+    "reject_now_equals_exp.json",
+    "reject_now_after_exp.json",
 )
 
 

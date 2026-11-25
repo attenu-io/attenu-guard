@@ -155,7 +155,35 @@ def _vector(description: str, tokens: list, *, expect: str = None, expect_reject
         data["expect"] = expect
     if expect_reject_reason is not None:
         data["expect_reject_reason"] = expect_reject_reason
+    data["steps"] = _steps(expect_reject_reason)
     return data
+
+
+#: The check of Section 6 at which each Table 2 outcome a vector can produce is decided. "parse"
+#: is the claim rules applied when a token is parsed (Sections 3, 4 and 4.4), before step 1.
+_DECIDED_AT = {
+    "malformed": "parse",
+    "signature_invalid": "1",
+    "par_hash_mismatch": "2",
+    "depth_invalid": "3", "principal_altered": "3",
+    "not_narrower": "4",
+    "expired": "5",
+    "audience_mismatch": "8-audience",
+}
+#: Section 6 in order, as these vectors can exercise it. Step 6 (holder binding) and step 7
+#: (status list) are never exercised: every cnf is a stand-in with no key behind it and no token
+#: carries a status reference. Step 8 is split, because no vector carries an action: its audience
+#: half runs, its authority half does not.
+_ORDER = ("parse", "1", "2", "3", "4", "5", "8-audience")
+_NEVER = ("6", "7", "8-authority")
+
+
+def _steps(reject_reason) -> dict:
+    """Which checks a verifier performs to reach this vector's outcome: every check in order up to and including the deciding one, so a
+    result file can state the boundary its verdict supports."""
+    last = len(_ORDER) - 1 if reject_reason is None else _ORDER.index(_DECIDED_AT[reject_reason])
+    return {"exercised": list(_ORDER[: last + 1]),
+            "not_exercised": list(_ORDER[last + 1:]) + list(_NEVER)}
 
 
 R = wire.WireReasonCode
@@ -176,6 +204,35 @@ def gen_valid_chain() -> dict:
         "bound (1000 -> 400 -> 100) on one key; the egress rank carries its order; ttl 3600 -> 900 "
         "-> 300. MUST verify.",
         _mint(leaf), expect="accept")
+
+
+def _boundary() -> list:
+    """valid_chain.json's tokens, unchanged; only `now` moves."""
+    _r, _c, leaf = _base_chain()
+    return _mint(leaf)
+
+
+def gen_valid_now_before_exp() -> dict:
+    return _vector(
+        "valid_chain.json with now = 299, one second before the formatter's exp of 300. Step 5 "
+        "is nbf <= now < exp. MUST verify. With reject_now_equals_exp.json and "
+        "reject_now_after_exp.json it pins the upper bound of step 5, which no vector at now = 0 "
+        "reaches.",
+        _boundary(), expect="accept", now=299)
+
+
+def gen_reject_now_equals_exp() -> dict:
+    return _vector(
+        "valid_chain.json with now = 300, equal to the formatter's exp. Step 5 admits now < exp "
+        "only, so a token is not valid at its own exp. MUST be rejected: expired.",
+        _boundary(), expect_reject_reason=R.EXPIRED, now=300)
+
+
+def gen_reject_now_after_exp() -> dict:
+    return _vector(
+        "valid_chain.json with now = 301, one second after the formatter's exp. MUST be "
+        "rejected: expired.",
+        _boundary(), expect_reject_reason=R.EXPIRED, now=301)
 
 
 def gen_valid_audience_array() -> dict:
@@ -630,6 +687,9 @@ GENERATORS = {
     "reject_child_adds_detail_type.json": gen_reject_child_adds_detail_type,
     "reject_altered_sub_and_par_hash.json": gen_reject_altered_sub_and_par_hash,
     "reject_reissued_parent.json": gen_reject_reissued_parent,
+    "valid_now_before_exp.json": gen_valid_now_before_exp,
+    "reject_now_equals_exp.json": gen_reject_now_equals_exp,
+    "reject_now_after_exp.json": gen_reject_now_after_exp,
 }
 
 

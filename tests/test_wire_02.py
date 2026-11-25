@@ -228,6 +228,74 @@ class AlgorithmList(unittest.TestCase):
         self.assertEqual(cm.exception.reason, WireReasonCode.SIGNATURE_INVALID)
 
 
+
+def _header(token):
+    return json.loads(wire.b64url_decode(token.split(".")[0]))
+
+
+def _has_crypto():
+    try:
+        import cryptography  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_crypto(), "Ed25519 needs the optional cryptography package")
+class FullySpecifiedEd25519(unittest.TestCase):
+    """RFC 9864: under the -02/-03 profile an Ed25519 key signs as "Ed25519", never the
+    polymorphic "EdDSA" (Section 3; step 1). The -01 profile is unchanged."""
+
+    def setUp(self):
+        self.signer = wire.Ed25519Signer.generate(kid="ed-1")
+        self.verifier = wire.Ed25519Verifier(self.signer.public_bytes_raw(), kid="ed-1")
+        self.leaf = _chain()[2]
+
+    def _mint_02(self):
+        return wire.serialize_chain(self.leaf, self.signer, principal=PRINCIPAL, aud=AUD,
+                                    draft="02", cnf=_cnf)
+
+    def test_02_tokens_say_Ed25519_and_verify(self):
+        tokens = self._mint_02()
+        self.assertEqual({_header(t)["alg"] for t in tokens}, {"Ed25519"})
+        self.assertIsNotNone(wire.load(tokens, self.verifier, draft="02"))
+
+    def test_01_tokens_still_say_EdDSA_and_verify(self):
+        root = Guard.issue("o", Authority({"crm.read"}, [], ttl=60), max_depth=2)
+        tokens = wire.serialize_chain(root, self.signer)
+        self.assertEqual({_header(t)["alg"] for t in tokens}, {"EdDSA"})
+        self.assertIsNotNone(wire.load(tokens, self.verifier))
+
+    def _legacy(self):
+        """A -02 chain as attenu-guard 0.22.0 minted it: header alg "EdDSA", same key, par_hash
+        computed over those headers. Minted with the RFC 9864 mapping switched off."""
+        saved = dict(wire._FULLY_SPECIFIED)
+        wire._FULLY_SPECIFIED.clear()
+        try:
+            tokens = self._mint_02()
+        finally:
+            wire._FULLY_SPECIFIED.update(saved)
+        self.assertEqual({_header(t)["alg"] for t in tokens}, {"EdDSA"})
+        return tokens
+
+    def test_a_legacy_EdDSA_02_chain_is_denied_by_default(self):
+        with self.assertRaises(WireError) as cm:
+            wire.load(self._legacy(), self.verifier, draft="02")
+        self.assertEqual(cm.exception.reason, WireReasonCode.SIGNATURE_INVALID)
+
+    def test_a_legacy_EdDSA_02_chain_verifies_when_the_list_admits_it(self):
+        self.assertIsNotNone(wire.load(self._legacy(), self.verifier, draft="02",
+                                       accepted_algs=["Ed25519", "EdDSA"]))
+
+    def test_the_alias_never_crosses_key_types(self):
+        """The guard admits only the signer's own algorithm under its two names: a list that
+        admits HS256 does not let an HS256 header through an Ed25519 verifier."""
+        tokens = _mint()                       # HS256-signed
+        with self.assertRaises(WireError) as cm:
+            wire.load(tokens, self.verifier, draft="02", accepted_algs=["HS256", "Ed25519"])
+        self.assertEqual(cm.exception.reason, WireReasonCode.SIGNATURE_INVALID)
+
+
 class AuthorityRulesOnTheWire(unittest.TestCase):
     def _leaf_detail(self, tokens, mutate):
         tokens = list(tokens)

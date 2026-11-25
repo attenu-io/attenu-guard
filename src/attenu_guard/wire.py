@@ -173,10 +173,33 @@ def _require_ed25519():
     return ed25519
 
 
+#: RFC 9864 deprecates the polymorphic JOSE identifier "EdDSA" for JWS and registers the
+#: fully-specified "Ed25519". The -02/-03 profile (Section 3, step 1) requires a fully-specified
+#: algorithm, so a token minted under that profile by an Ed25519 key says "Ed25519". The -01
+#: profile, the default, keeps "EdDSA" unchanged so tokens and vectors minted under it still verify.
+_FULLY_SPECIFIED = {"EdDSA": "Ed25519"}
+_ALIASES = {"EdDSA": frozenset({"EdDSA", "Ed25519"})}
+
+
+def _profile_alg(signer, draft: str) -> str:
+    """The JOSE `alg` a token minted by `signer` under `draft` carries in its header."""
+    if draft == draft02.PROFILE_02:
+        return _FULLY_SPECIFIED.get(signer.alg, signer.alg)
+    return signer.alg
+
+
+def _alg_matches_signer(header_alg, signer) -> bool:
+    """Alg-confusion guard: the header may name only the signer's own algorithm, under either
+    of its JOSE identifiers ("EdDSA" or "Ed25519" for an Ed25519 key). Which of the two a
+    verifier accepts is the accepted list's job, not this guard's."""
+    return header_alg in _ALIASES.get(signer.alg, frozenset({signer.alg}))
+
+
 class Ed25519Signer:
     """The production signer per the draft ("Implementations MUST support
     Ed25519 {{RFC8032}} {{RFC8037}}", draft {{token-format}}); JOSE alg
-    "EdDSA". Public-key, so — unlike `HS256TestSigner` — a verifier never
+    "EdDSA" (under the -02/-03 profile a token says "Ed25519", RFC 9864; see
+    `_profile_alg`). Public-key, so — unlike `HS256TestSigner` — a verifier never
     needs the signing secret, which is exactly the property the draft
     requires for offline verification at an untrusted edge.
 
@@ -521,7 +544,7 @@ def _build_token(node, signer: Signer, *, iss: str, aud, jti, iat: int,
 
     header = {
         "typ": "at+jwt",
-        "alg": signer.alg,
+        "alg": _profile_alg(signer, draft),
         "kid": getattr(signer, "kid", None),
         "c14n": "JCS",
     }
@@ -897,9 +920,12 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
     algorithm above, unchanged. "02" (draft-asor-wimse-agent-delegation-chain-02)
     adds, before step 1, the parse-time claim and constraint rules of
     `_check_token_02` (every failure `malformed`); in step 1, a list of
-    accepted algorithms (`accepted_algs`, defaulting to the signer's own) that
+    accepted algorithms (`accepted_algs`, defaulting to the signer's own under
+    its fully-specified RFC 9864 name, "Ed25519" for an Ed25519 key) that
     denies a token whose `alg` is off the list even where its signature
-    verifies; in step 3, principal invariance unconditionally; in step 4, the
+    verifies. A token minted by attenu-guard 0.22.0 or earlier under "02"
+    says "EdDSA"; pass `accepted_algs=["Ed25519", "EdDSA"]` to keep accepting
+    those while they are still unexpired; in step 3, principal invariance unconditionally; in step 4, the
     -02 subsumption relation (draft02); and in step 8, the audience check
     (`audience`, applied at load when given, and by `VerifiedChain.permits`).
     `accepted_algs` given under "01" is honoured too; it is never implied there.
@@ -922,13 +948,14 @@ def load(tokens: list[str], signer: Signer, *, root_key_ids=None, now: int = 0,
 
     # ---- step 1: signatures ------------------------------------------------
     if accepted_algs is None and draft == draft02.PROFILE_02:
-        accepted_algs = (signer.alg,)
+        accepted_algs = (_profile_alg(signer, draft),)
     for i, (header, _payload, sig, signing_input) in enumerate(parsed):
         if accepted_algs is not None and header.get("alg") not in accepted_algs:
             raise WireError(WireReasonCode.SIGNATURE_INVALID,
                             f"token[{i}] header alg {header.get('alg')!r} is not on the "
                             f"verifier's accepted list {list(accepted_algs)!r}")
-        if header.get("alg") != signer.alg:
+        if (header.get("alg") != signer.alg if draft != draft02.PROFILE_02
+                else not _alg_matches_signer(header.get("alg"), signer)):
             raise WireError(WireReasonCode.SIGNATURE_INVALID,
                             f"token[{i}] header alg {header.get('alg')!r} != "
                             f"signer alg {signer.alg!r}")
