@@ -723,7 +723,7 @@ class VerifiedChain:
         `Authority.permits`; no policy logic is reimplemented here. Under the
         -02, `audience` names this Enforcement Point and is checked against
         DT_n's `aud` first (reason `audience_mismatch`); a cumulative
-        constraint whose running total `ctx` does not carry denies (draft02)."""
+        constraint whose running total `totals` does not carry denies (draft02)."""
         if self.draft == draft02.PROFILE_02:
             # Step 8 is not opt-in: an Enforcement Point that never said who it is cannot have
             # confirmed that DT_n was issued for it (security review of 2026-10-07, finding 2).

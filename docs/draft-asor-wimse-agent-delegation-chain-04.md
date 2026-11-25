@@ -608,28 +608,39 @@ following, denying on the first failure:
    ("max_lifetime", "max_subtree"). A cumulative constraint is checked where
    the running total it is measured over is held: by the Enforcement Point
    itself, or by a component that holds that total and authorizes A on the
-   Enforcement Point's behalf ({{fanout}}). Where accounting is shared, the
-   component holding it MUST also check A against every "max_subtree"
-   constraint carried by each DT_i, i < n, using the total for the subtree of
-   DT_i, identified by DT_i's "jti" and the constraint's "key", and MUST debit
-   those totals and DT_n's as the one operation {{fanout}} requires; if any
-   total would exceed its bound, it MUST deny. Under coordinated allocation
-   ({{fanout}}), the ancestors' totals are kept by the allocator when it
-   allocates, and the Enforcement Point checks A against the allocation it
-   holds for DT_n; a child's "max_subtree" is not an allocation. The total reaches the check
+   Enforcement Point's behalf ({{fanout}}). The total reaches the check
    through a channel separate from the request's own parameters, never from
    the request: a cumulative constraint is evaluated against that total only,
    and a per-action constraint against the request only, so a name the two
    share cannot let one stand in for the other. An Enforcement Point that
    neither holds the running total for a cumulative constraint DT_n carries
-   nor has A authorized by a component that does MUST deny. Permit only if A
-   is within DT_n.Authority on every count and, where accounting is shared,
-   within the "max_subtree" of every DT_i.
+   nor has A authorized by a component that does MUST deny.
+
+   A "max_subtree" carried by an earlier DT_i bounds A as well, and is
+   enforced in one of the two shapes of {{fanout}}. Where accounting is
+   shared, the component holding it MUST also check A against every
+   "max_subtree" constraint carried by each DT_i, i < n, using the total for
+   the subtree of DT_i, identified by DT_i's "jti" and the constraint's
+   "key", and MUST debit those totals and DT_n's own cumulative totals as the
+   one operation {{fanout}} requires; if any total would exceed its bound, it
+   MUST deny. Under coordinated allocation, the single-writer allocator
+   bounds the ancestors' totals when it allocates, and the Enforcement Point
+   MUST check A against, and debit, the durable balance of the allocation it
+   holds for DT_n, denying if A would exceed it. A child's "max_subtree" is
+   an allocation only where that allocator set it; being no wider than the
+   parent's does not make it one. Outside the two shapes, a "max_subtree"
+   carried by an earlier DT_i is checked per edge (step 4) and is not
+   otherwise enforced.
+
+   Permit only if A is within DT_n.Authority on every count and, where
+   accounting is shared, within the "max_subtree" of every DT_i, or, under
+   coordinated allocation, within the allocation held for DT_n.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The one
-exception is the cumulative-constraint check of step 8, which belongs to the
-component holding the running total and lies outside that guarantee. The order of
+exception is the cumulative-constraint check and debit of step 8, which
+belong to the component holding the running total or the allocation and lie
+outside that guarantee. The order of
 steps 1 to 5 is the order in which a chain presented without an action can be
 checked ({{without-request}}); steps 6 and 8 need the request, and step 7 needs
 the status list.
@@ -1020,9 +1031,9 @@ a channel separate from the request, the "order" member of "rank", one
 constraint per (key, type), the closed detail and constraint objects, and the
 audience check of step 8, under a single-signer trust model. Both check the
 presence and shape of "cnf" and perform neither step 6 (holder binding) nor
-step 7 (status list), which both document as not performed. Both evaluate
-the cumulative constraints of DT_n against totals the caller supplies; neither
-holds accounting, so neither performs the check against earlier tokens'
+step 7 (status list), which both document as not performed. Each evaluates
+the cumulative constraints of DT_n against totals the caller supplies and
+holds no accounting, so neither performs the check against earlier tokens'
 "max_subtree" or the debit of step 8. Under that profile attenu-guard signs
 with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
 {{token-format}} requires, and both accept that name by default; the -01
@@ -1189,21 +1200,25 @@ label; they remain covered by the unchanged -01 set.
 
 # Changes Since -03 {#changes-03}
 
-- {{constraints}} states that "max_lifetime" bounds only the actions
-  authorized under the token carrying it, that a token which may delegate does
-  not bound the sum across the tree with it, and that a total for the tree is
-  "max_subtree", enforced as in {{fanout}}.
+- {{constraints}} states that a token descended from one carrying
+  "max_lifetime" starts its own total, so that where the token may delegate
+  the type does not bound the sum across the tree, and that a total for the
+  tree is "max_subtree", enforced as in {{fanout}}.
 - Step 8 of {{verify}}: where accounting is shared, the component holding it
   MUST also check the action against the "max_subtree" of every token before
   DT_n and debit each of those totals in the same operation, denying if any
   would be exceeded; under coordinated allocation, the allocator keeps the
-  ancestors' totals.
+  ancestors' totals and the Enforcement Point checks and debits the
+  allocation it holds; outside the two shapes, an earlier token's
+  "max_subtree" is checked per edge only.
 - {{vectors}} adds three vectors at the upper bound of step 5 and a "steps"
   member in every file; the set has thirty-nine files.
 - Implementation Status records a third implementation, "visado", and that
   under this revision's profile attenu-guard signs with an Ed25519 key as the
   fully-specified "Ed25519", which both reference libraries accept by
-  default.
+  default; and that both evaluate the cumulative constraints of DT_n against
+  caller-supplied totals and perform neither the check against earlier
+  tokens' "max_subtree" nor the debit of step 8.
 - Acknowledgments credit the review of the -03.
 
 # Changes Since -02 {#changes-02}
