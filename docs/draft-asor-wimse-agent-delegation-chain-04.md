@@ -396,8 +396,7 @@ token. This document defines:
   exceed it (e.g. {"key": "max_calls", "max_lifetime": 50}). It is measured per
   token lifetime. A re-issued token ({{chain-linkage}}) is a new "jti" and
   starts a new total; an issuer that needs a bound to span re-issuance issues
-  the new token with the bound reduced by the amount already consumed. It
-  bounds only the actions authorized under that token. A token descended from
+  the new token with the bound reduced by the amount already consumed. A token descended from
   it starts its own total, so where the token may delegate, this type does not
   bound the sum across the tree. A total for the tree is "max_subtree",
   enforced as in {{fanout}}.
@@ -610,16 +609,22 @@ following, denying on the first failure:
    the running total it is measured over is held: by the Enforcement Point
    itself, or by a component that holds that total and authorizes A on the
    Enforcement Point's behalf ({{fanout}}). Where accounting is shared, the
-   component holding it also checks A against the "max_subtree" of every
-   DT_i, i < n, and debits each of those totals, as the one operation
-   {{fanout}} requires. The total reaches the check
+   component holding it MUST also check A against every "max_subtree"
+   constraint carried by each DT_i, i < n, using the total for the subtree of
+   DT_i, identified by DT_i's "jti" and the constraint's "key", and MUST debit
+   those totals and DT_n's as the one operation {{fanout}} requires; if any
+   total would exceed its bound, it MUST deny. Under coordinated allocation
+   ({{fanout}}), the ancestors' totals are kept by the allocator when it
+   allocates, and the Enforcement Point checks A against the allocation it
+   holds for DT_n; a child's "max_subtree" is not an allocation. The total reaches the check
    through a channel separate from the request's own parameters, never from
    the request: a cumulative constraint is evaluated against that total only,
    and a per-action constraint against the request only, so a name the two
    share cannot let one stand in for the other. An Enforcement Point that
    neither holds the running total for a cumulative constraint DT_n carries
    nor has A authorized by a component that does MUST deny. Permit only if A
-   is within DT_n.Authority on every count.
+   is within DT_n.Authority on every count and, where accounting is shared,
+   within the "max_subtree" of every DT_i.
 
 The algorithm is deterministic, side-effect free, and requires no network call
 except the (cacheable, offline-checkable) status list of step 7. The one
@@ -1015,10 +1020,13 @@ a channel separate from the request, the "order" member of "rank", one
 constraint per (key, type), the closed detail and constraint objects, and the
 audience check of step 8, under a single-signer trust model. Both check the
 presence and shape of "cnf" and perform neither step 6 (holder binding) nor
-step 7 (status list), which both document as not performed. Under that
-profile an Ed25519 key signs and is verified as the fully-specified "Ed25519"
-of {{RFC9864}} that {{token-format}} requires; the -01 profile keeps
-"EdDSA". The vectors use a test-only HS256 signer and do not exercise it. The
+step 7 (status list), which both document as not performed. Both evaluate
+the cumulative constraints of DT_n against totals the caller supplies; neither
+holds accounting, so neither performs the check against earlier tokens'
+"max_subtree" or the debit of step 8. Under that profile attenu-guard signs
+with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
+{{token-format}} requires, and both accept that name by default; the -01
+profile keeps "EdDSA". The vectors use a test-only HS256 signer and do not exercise it. The
 vector set of
 {{vectors}} for this revision has thirty-nine files; the Python library
 generates and scores it on every test run, and the TypeScript library vendors
@@ -1036,7 +1044,7 @@ reported 20 of 20 with verdicts and declared reasons both matching, under the
 boundary its author states: the vectors' HS256 single-signer, public-test-key
 profile, and steps 1 to 5 only. Neither result is reproduced here. The Cred
 harness has also published a run of 2026-10-20 against the thirty-five
-vectors of the -02, all of which this revision's set retains unchanged; as
+vectors of the -02, whose tokens this revision's set retains unchanged; as
 its author reports it, at a pinned commit of the Cred SDK, it records 20
 passes, 5 failures, and 10 declared gaps.
 
@@ -1186,13 +1194,17 @@ label; they remain covered by the unchanged -01 set.
   not bound the sum across the tree with it, and that a total for the tree is
   "max_subtree", enforced as in {{fanout}}.
 - Step 8 of {{verify}}: where accounting is shared, the component holding it
-  also checks the action against the "max_subtree" of every token before
-  DT_n, and debits each of those totals in the same operation.
+  MUST also check the action against the "max_subtree" of every token before
+  DT_n and debit each of those totals in the same operation, denying if any
+  would be exceeded; under coordinated allocation, the allocator keeps the
+  ancestors' totals.
 - {{vectors}} adds three vectors at the upper bound of step 5 and a "steps"
   member in every file; the set has thirty-nine files.
 - Implementation Status records a third implementation, "visado", and that
-  both reference libraries now sign and verify Ed25519 as the fully-specified
-  "Ed25519" under this revision's profile.
+  under this revision's profile attenu-guard signs with an Ed25519 key as the
+  fully-specified "Ed25519", which both reference libraries accept by
+  default.
+- Acknowledgments credit the review of the -03.
 
 # Changes Since -02 {#changes-02}
 
