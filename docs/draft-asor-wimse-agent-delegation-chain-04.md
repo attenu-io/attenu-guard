@@ -396,7 +396,8 @@ token. This document defines:
   exceed it (e.g. {"key": "max_calls", "max_lifetime": 50}). It is measured per
   token lifetime. A re-issued token ({{chain-linkage}}) is a new "jti" and
   starts a new total; an issuer that needs a bound to span re-issuance issues
-  the new token with the bound reduced by the amount already consumed. A token descended from
+  the new token with the bound reduced by the amount already consumed. It
+  bounds only the actions authorized under that token. A token descended from
   it starts its own total, so where the token may delegate, this type does not
   bound the sum across the tree. A total for the tree is "max_subtree",
   enforced as in {{fanout}}.
@@ -648,8 +649,8 @@ following, denying on the first failure:
    into DT_n, an Enforcement Point that uses neither shape denies, under the
    first paragraph of this step, any A whose chain carries "max_subtree".
 
-   Permit only if A is within DT_n.Authority on every count and, where
-   accounting is shared, within the "max_subtree" of every DT_i, or, under
+   Permit only if A is within DT_n.Authority on every count and also, where
+   accounting is shared, within the "max_subtree" of every DT_i or, under
    coordinated allocation, within the allocation held for DT_n. A total or an
    allocation is debited for every action that step 8 permits and for no other.
 
@@ -900,7 +901,7 @@ chains verify, each gateway sees a request within bound, and the combined
 spend is 120. Individually permitted delegations compose into an outcome
 nobody permitted. The "max_subtree" type names that total, and a chain-only
 verifier checks only that a child's "max_subtree" is no wider than its
-parent's; verification is side-effect free by design, so a signed ceiling
+parent's; verification of the chain is side-effect free by design ({{verify}}), so a signed ceiling
 names a limit while nothing in verifying it reserves against that limit or
 sees another gateway's balance. A signed ceiling alone provides none of the
 protection an aggregate budget needs.
@@ -1048,17 +1049,17 @@ a channel separate from the request, the "order" member of "rank", one
 constraint per (key, type), the closed detail and constraint objects, and the
 audience check of step 8, under a single-signer trust model. Both check the
 presence and shape of "cnf" and perform neither step 6 (holder binding) nor
-step 7 (status list), which both document as not performed. Each evaluates
-the cumulative constraints of DT_n against totals the caller supplies and
-holds no accounting, so neither performs the check against earlier tokens'
+step 7 (status list), which both document as not performed. When verifying a
+presented chain, each evaluates the cumulative constraints of DT_n against
+totals the caller supplies and holds no accounting, so neither performs the check against earlier tokens'
 "max_subtree" or the debit of step 8. A total the caller supplies for a
 "max_subtree" is what step 8 requires only where it is the running total kept
 by shared accounting or the balance of an allocation set by a single-writer
 allocator ({{fanout}}); a total kept for DT_n's "jti" alone is neither, and the
 caller, not the library, is responsible for which one it supplies. Under that profile attenu-guard signs
 with an Ed25519 key as the fully-specified "Ed25519" of {{RFC9864}} that
-{{token-format}} requires, and both accept that name by default; the -01
-profile keeps "EdDSA". The vectors use a test-only HS256 signer and exercise neither Ed25519
+{{token-format}} requires, and both accept that name under that profile when
+no accepted-algorithm list is configured; the -01 profile keeps "EdDSA". The vectors use a test-only HS256 signer and exercise neither Ed25519
 identifier. The
 vector set of
 {{vectors}} for this revision has thirty-nine files; the Python library
@@ -1088,7 +1089,7 @@ with DPoP and status lists in JWT format, and scores the thirty-six vectors
 the -03 published, 36 of 36 with the expected outcome of {{outcomes}}. Its
 interoperability harness, run by the author of this document against
 attenu-guard 0.23.0 before posting, records agreement on nine of nine chains
-in each direction.
+in each direction, all signed with "Ed25519".
 
 --- back
 
@@ -1241,8 +1242,8 @@ label; they remain covered by the unchanged -01 set.
   member in every file; the set has thirty-nine files.
 - Implementation Status records a third implementation, "visado", and that
   under this revision's profile attenu-guard signs with an Ed25519 key as the
-  fully-specified "Ed25519", which both reference libraries accept by
-  default; and that both evaluate the cumulative constraints of DT_n against
+  fully-specified "Ed25519", which both reference libraries accept under
+  that profile when no accepted-algorithm list is configured; and that both evaluate the cumulative constraints of DT_n against
   caller-supplied totals and perform neither the check against earlier
   tokens' "max_subtree" nor the debit of step 8. It states which
   caller-supplied total for "max_subtree" step 8 accepts, and that the
