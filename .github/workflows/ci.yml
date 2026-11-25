@@ -280,7 +280,10 @@ jobs:
           - { fw: a2a,             pkgs: "a2a-sdk==1.1.2" }
           - { fw: omnigent,        pkgs: "omnigent==0.11.0" }
           - { fw: claude_code,     pkgs: "" }
-          - { fw: openhands,       pkgs: "openhands-sdk==1.44.1 openhands-tools==1.44.1" }
+          # openhands-sdk 1.44.1 imports authlib and acp.helpers without pinning their providers: fastmcp 4.2 (slim
+          # split) dropped authlib and agent-client-protocol moved acp.helpers, so a fresh resolve skips the module.
+          # Pinned to the versions a resolve as of 2026-10-27 picks (6/6 pass).
+          - { fw: openhands,       pkgs: "openhands-sdk==1.44.1 openhands-tools==1.44.1 fastmcp==4.1.4 agent-client-protocol==0.12.1" }
     name: integration (${{ matrix.label || matrix.fw }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
