@@ -53,9 +53,26 @@ only; no vector carries an action.
 
   // exactly one of:
   "expect": "accept",
-  "expect_reject_reason": "not_narrower"
+  "expect_reject_reason": "not_narrower",
+
+  // which checks of Section 6 this vector exercises (added for the -04):
+  "steps": {"exercised": ["parse", "1", "2", "3", "4"],
+            "not_exercised": ["5", "8-audience", "6", "7", "8-authority"]}
 }
 ```
+
+`steps` lists, in order, the checks a verifier performs to reach the vector's outcome:
+`"parse"` (the claim rules applied when a token is parsed), steps `"1"` to `"5"`, and
+`"8-audience"`, up to and including the check that decides a rejection. `not_exercised` lists
+the rest, always including `"6"`, `"7"` and `"8-authority"`, which no file here reaches. A
+result file can copy `exercised` to state the boundary its verdict supports. The member is
+informational: a scorer ignores it, and the `tokens` of the thirty-six files the -03 shipped are
+byte-identical to that release.
+
+`valid_now_before_exp.json`, `reject_now_equals_exp.json` and `reject_now_after_exp.json`
+carry `valid_chain.json`'s tokens unchanged with `now` at 299, 300 and 301, one second either
+side of and at the formatter's `exp` of 300. They pin the upper bound of step 5
+(`nbf <= now < exp`), which no vector at `now` 0 reaches.
 
 `verifier.accepted_algs` is the verifier's local list for step 1: a token whose `alg` is off
 the list is `signature_invalid` even where its signature verifies. `verifier.audience` is
