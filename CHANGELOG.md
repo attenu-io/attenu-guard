@@ -6,6 +6,8 @@ Versions follow semantic versioning.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-25
+
 ### Changed
 - **Profile "02": an Ed25519 key signs as `"Ed25519"`, not `"EdDSA"`** (RFC 9864; the -03's Section 3 and step 1 require a fully-specified algorithm). `serialize`/`serialize_chain(..., draft="02")` write `"Ed25519"` in the header; `wire.load(..., draft="02")` defaults its accepted list to `["Ed25519"]`, so a -02 chain minted by 0.22.0 or earlier (header `"EdDSA"`) is now `signature_invalid` by default. To keep accepting those until they expire, pass `accepted_algs=["Ed25519", "EdDSA"]`: the alg-confusion guard admits both names of the signer's own algorithm, never another key type. The default -01 profile is unchanged (`"EdDSA"`), and so is the evidence envelope's `witness.alg`. Found by the visado interop harness (case A.9). Tests: `tests/test_wire_02.py` `FullySpecifiedEd25519`
 
